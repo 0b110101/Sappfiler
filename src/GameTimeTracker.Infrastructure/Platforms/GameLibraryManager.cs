@@ -51,12 +51,9 @@ public sealed class GameLibraryManager
 
             try
             {
-                var found = detector.GetInstalledGames();
-                games.AddRange(found);
-                // 必须用 AppLog 而不是 Console.WriteLine：
-                // 这是 WinExe（无控制台）程序，Console 输出**直接进虚空**，
-                // 之前排查"玩 Steam 游戏检测不到"时日志里一片空白，就是因为这里全丢了。
-                AppLog.Info($"[游戏库] {detector.PlatformName}: 找到 {found.Count} 个游戏");
+                // 各检测器**自己**会输出一行「扫描 X，收录 Y，跳过 Z（原因）」，
+                // 所以这里不再重复记数量，只负责兜住异常与总计数。
+                games.AddRange(detector.GetInstalledGames());
             }
             catch (Exception ex)
             {

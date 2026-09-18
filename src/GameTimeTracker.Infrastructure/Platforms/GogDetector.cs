@@ -60,20 +60,23 @@ public sealed class GogDetector : IPlatformDetector
         if (gogKey is null) return [];
 
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("gog");
 
         foreach (var gameId in gogKey.GetSubKeyNames())
         {
+            scan.Seen();
             try
             {
                 using var gameKey = gogKey.OpenSubKey(gameId);
-                if (gameKey is null) continue;
+                if (gameKey is null) { scan.Skip("注册表项读不到"); continue; }
 
                 var name       = gameKey.GetValue("gameName")?.ToString();
                 var exePath    = gameKey.GetValue("exe")?.ToString();
                 var installDir = gameKey.GetValue("path")?.ToString();
                 var productId  = gameKey.GetValue("productId")?.ToString() ?? gameId;
 
-                if (string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir)) continue;
+                if (string.IsNullOrEmpty(installDir)) { scan.Skip("注册表缺 path"); continue; }
+                if (!Directory.Exists(installDir)) { scan.Skip("安装目录不存在"); continue; }
 
                 games.Add(new InstalledGame(
                     Platform:   "gog",
@@ -82,10 +85,12 @@ public sealed class GogDetector : IPlatformDetector
                     InstallDir: installDir.TrimEnd('\\', '/'),
                     ExePath:    File.Exists(exePath) ? exePath : null
                 ));
+                scan.Kept();
             }
-            catch { /* 跳过损坏的注册表项 */ }
+            catch { scan.Skip("注册表项解析失败"); }
         }
 
+        scan.Report();
         return games;
     }
 }

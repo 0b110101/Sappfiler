@@ -30,21 +30,23 @@ public sealed class EaDetector : IPlatformDetector
     public IReadOnlyList<InstalledGame> GetInstalledGames()
     {
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("ea");
 
         // EA App（新版）
         if (Directory.Exists(EaAppDataDir))
-            games.AddRange(ScanDirectory(EaAppDataDir));
+            games.AddRange(ScanDirectory(EaAppDataDir, scan));
 
         // Origin（旧版兼容）
         if (Directory.Exists(OriginDataDir))
-            games.AddRange(ScanDirectory(OriginDataDir));
+            games.AddRange(ScanDirectory(OriginDataDir, scan));
 
+        scan.Report();
         return games;
     }
 
     // ── 私有辅助 ────────────────────────────────────────────────────────────
 
-    private static IEnumerable<InstalledGame> ScanDirectory(string root)
+    private static IEnumerable<InstalledGame> ScanDirectory(string root, DetectorScanLog scan)
     {
         // 找所有 installerdata.xml（可能在 __Installer 子目录下）
         IEnumerable<string> xmlFiles;
@@ -57,10 +59,20 @@ public sealed class EaDetector : IPlatformDetector
 
         foreach (var xmlPath in xmlFiles)
         {
+            scan.Seen();
             InstalledGame? game = null;
-            try { game = ParseManifest(xmlPath); }
-            catch { /* 跳过损坏的 XML */ }
-            if (game is not null) yield return game;
+            var parsed = false;
+            try { game = ParseManifest(xmlPath); parsed = true; }
+            catch { /* 损坏的 XML */ }
+
+            if (game is null)
+            {
+                scan.Skip(parsed ? "清单缺安装目录或目录不存在" : "installerdata.xml 解析失败");
+                continue;
+            }
+
+            scan.Kept();
+            yield return game;
         }
     }
 

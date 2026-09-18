@@ -23,22 +23,49 @@ public sealed class WeGameDetector : IPlatformDetector
     public IReadOnlyList<InstalledGame> GetInstalledGames()
     {
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("wegame");
 
         var wegamePath = GetWeGamePath();
-        if (wegamePath is null) return games;
+        if (wegamePath is null)
+        {
+            // 装是装了（IsInstalled 通过了），但拿不到安装路径 —— 这条日志是排查的关键
+            scan.Skip("拿不到 WeGame 安装路径");
+            scan.Report();
+            return games;
+        }
 
         // 方式一：扫描 WeGame 安装目录下的 game 子目录
         var gameBaseDir = Path.Combine(wegamePath, "game");
         if (Directory.Exists(gameBaseDir))
-            games.AddRange(ScanGameDirectory(gameBaseDir));
+        {
+            foreach (var g in ScanGameDirectory(gameBaseDir))
+            {
+                scan.Seen();
+                scan.Kept();
+                games.Add(g);
+            }
+        }
+        else
+        {
+            scan.Skip("安装目录下无 game 子目录");
+        }
 
         // 方式二：扫描常见游戏配置文件
-        var configGames = ScanWeGameConfig(wegamePath);
+        var configGames = ScanWeGameConfig(wegamePath).ToList();
+        scan.Seen();
+        if (configGames.Count > 0) scan.Kept();
+        else scan.Skip("配置文件里没解析出游戏");
         MergeGames(games, configGames);
 
         // 方式三：注册表扫描（部分老版本游戏注册了独立键）
-        games.AddRange(ScanWeGameRegistry());
+        foreach (var g in ScanWeGameRegistry())
+        {
+            scan.Seen();
+            scan.Kept();
+            games.Add(g);
+        }
 
+        scan.Report();
         return games;
     }
 

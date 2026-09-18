@@ -28,19 +28,21 @@ public sealed class EpicDetector : IPlatformDetector
         if (!Directory.Exists(ManifestDir)) return [];
 
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("epic");
 
         foreach (var itemFile in Directory.EnumerateFiles(ManifestDir, "*.item"))
         {
+            scan.Seen();
             try
             {
                 var json = File.ReadAllText(itemFile);
                 var manifest = JsonSerializer.Deserialize<EpicManifest>(json,
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-                if (manifest is null) continue;
-                if (manifest.bIsIncompleteInstall) continue;
-                if (string.IsNullOrEmpty(manifest.InstallLocation)) continue;
-                if (!Directory.Exists(manifest.InstallLocation)) continue;
+                if (manifest is null) { scan.Skip("清单解析为空"); continue; }
+                if (manifest.bIsIncompleteInstall) { scan.Skip("安装未完成"); continue; }
+                if (string.IsNullOrEmpty(manifest.InstallLocation)) { scan.Skip("清单缺 InstallLocation"); continue; }
+                if (!Directory.Exists(manifest.InstallLocation)) { scan.Skip("安装目录不存在"); continue; }
 
                 var exePath = string.IsNullOrEmpty(manifest.LaunchExecutable)
                     ? null
@@ -53,10 +55,12 @@ public sealed class EpicDetector : IPlatformDetector
                     InstallDir: manifest.InstallLocation.TrimEnd('\\', '/'),
                     ExePath:    exePath
                 ));
+                scan.Kept();
             }
-            catch { /* 跳过损坏的 manifest */ }
+            catch { scan.Skip("清单解析失败"); }
         }
 
+        scan.Report();
         return games;
     }
 

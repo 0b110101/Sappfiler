@@ -617,13 +617,33 @@ public partial class HomeViewModel : ObservableObject
 
     private void OnSyncStatusChanged(object? sender, string status)
     {
-        // 同步链所有关键节点（各步骤、删除对账结果、失败原因）都经此事件上报，统一落日志供 QA 排查。
-        Infrastructure.AppLog.Info($"[同步] {status}");
+        // 同步链所有**结果与失败原因**都经此事件上报，统一落日志供 QA 排查。
+        //
+        // 但"正在进行…"这类纯 UI 进度提示不记：它们没有任何诊断价值
+        // （下一行紧跟着就是结果），却占掉每轮同步一半的日志行数。
+        // 约定：**进度提示以 "..." 结尾，结果不带** —— 见 NotionServices 里各 Invoke 点。
+        if (!IsProgressMessage(status))
+        {
+            Infrastructure.AppLog.Info($"[同步] {status}");
+        }
+
         _dispatcherQueue.TryEnqueue(() =>
         {
             NotionStatusText = status;
             NotionLastSyncText = $"上次同步 {DateTime.Now:HH:mm}";
         });
+    }
+
+    /// <summary>
+    /// 判断是否是"正在进行…"型进度提示（只用于刷新界面，不值得写日志）。
+    /// 同时兼容 ASCII 三点与中文省略号两种写法，避免哪天文案换了就失效。
+    /// </summary>
+    private static bool IsProgressMessage(string status)
+    {
+        if (string.IsNullOrEmpty(status)) return true;
+        var trimmed = status.TrimEnd();
+        return trimmed.EndsWith("...", StringComparison.Ordinal)
+            || trimmed.EndsWith("…", StringComparison.Ordinal);
     }
 
     private void OnCoverDownloaded(object? sender, string platformId)

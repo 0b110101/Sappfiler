@@ -71,16 +71,19 @@ public sealed class UbisoftDetector : IPlatformDetector
         if (installsKey is null) return [];
 
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("ubisoft");
 
         foreach (var gameId in installsKey.GetSubKeyNames())
         {
+            scan.Seen();
             try
             {
                 using var gameKey = installsKey.OpenSubKey(gameId);
-                if (gameKey is null) continue;
+                if (gameKey is null) { scan.Skip("注册表项读不到"); continue; }
 
                 var installDir = gameKey.GetValue("InstallDir")?.ToString();
-                if (string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir)) continue;
+                if (string.IsNullOrEmpty(installDir)) { scan.Skip("注册表缺 InstallDir"); continue; }
+                if (!Directory.Exists(installDir)) { scan.Skip("安装目录不存在"); continue; }
 
                 // Ubisoft 注册表不含游戏名，尝试几种方式获取
                 var name = GetGameName(gameId, installDir);
@@ -92,10 +95,12 @@ public sealed class UbisoftDetector : IPlatformDetector
                     InstallDir: installDir.TrimEnd('\\', '/'),
                     ExePath:    null   // 通过目录匹配，不需要精确 exe
                 ));
+                scan.Kept();
             }
-            catch { /* 跳过损坏的注册表项 */ }
+            catch { scan.Skip("注册表项解析失败"); }
         }
 
+        scan.Report();
         return games;
     }
 

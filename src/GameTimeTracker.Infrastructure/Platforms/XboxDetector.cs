@@ -29,13 +29,25 @@ public sealed class XboxDetector : IPlatformDetector
     public IReadOnlyList<InstalledGame> GetInstalledGames()
     {
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("xbox");
 
         // 方式一：Win32 Game Pass 游戏（通过注册表）
-        games.AddRange(GetWin32GamePassGames());
+        foreach (var g in GetWin32GamePassGames())
+        {
+            scan.Seen();
+            scan.Kept();
+            games.Add(g);
+        }
 
         // 方式二：UWP 打包游戏（通过 PackageManager）
-        games.AddRange(GetUwpGames());
+        foreach (var g in GetUwpGames())
+        {
+            scan.Seen();
+            scan.Kept();
+            games.Add(g);
+        }
 
+        scan.Report();
         return games;
     }
 

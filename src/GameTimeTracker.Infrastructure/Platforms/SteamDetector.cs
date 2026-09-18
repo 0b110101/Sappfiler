@@ -26,6 +26,7 @@ public sealed class SteamDetector : IPlatformDetector
         if (steamPath is null) return [];
 
         var games = new List<InstalledGame>();
+        var scan = new DetectorScanLog("steam");
 
         foreach (var libraryPath in GetLibraryPaths(steamPath))
         {
@@ -34,12 +35,13 @@ public sealed class SteamDetector : IPlatformDetector
 
             foreach (var acfFile in Directory.EnumerateFiles(steamappsDir, "appmanifest_*.acf"))
             {
+                scan.Seen();
                 try
                 {
                     var acf = ParseKeyValues(File.ReadAllText(acfFile));
-                    if (!acf.TryGetValue("appid", out var appId)) continue;
-                    if (!acf.TryGetValue("name", out var name)) continue;
-                    if (!acf.TryGetValue("installdir", out var installDir)) continue;
+                    if (!acf.TryGetValue("appid", out var appId)) { scan.Skip("清单缺 appid"); continue; }
+                    if (!acf.TryGetValue("name", out var name)) { scan.Skip("清单缺 name"); continue; }
+                    if (!acf.TryGetValue("installdir", out var installDir)) { scan.Skip("清单缺 installdir"); continue; }
 
                     // StateFlags 是**位标志**，不是枚举值 —— 不能写死 == "4"。
                     //   1 = 已卸载       2 = 需要更新    4 = 已完整安装
@@ -54,11 +56,19 @@ public sealed class SteamDetector : IPlatformDetector
                     {
                         const int Uninstalled = 1;
                         const int FullyInstalled = 4;
-                        if ((flags & FullyInstalled) == 0 || (flags & Uninstalled) != 0) continue;
+                        if ((flags & FullyInstalled) == 0 || (flags & Uninstalled) != 0)
+                        {
+                            scan.Skip($"StateFlags 非已安装({flags})");
+                            continue;
+                        }
                     }
 
                     var fullInstallDir = Path.Combine(steamappsDir, "common", installDir);
-                    if (!Directory.Exists(fullInstallDir)) continue;
+                    if (!Directory.Exists(fullInstallDir))
+                    {
+                        scan.Skip("安装目录不存在");
+                        continue;
+                    }
 
                     games.Add(new InstalledGame(
                         Platform:   "steam",
@@ -67,11 +77,13 @@ public sealed class SteamDetector : IPlatformDetector
                         InstallDir: fullInstallDir.TrimEnd('\\', '/'),
                         ExePath:    null   // Steam 游戏通过目录前缀匹配，不需要精确 exe
                     ));
+                    scan.Kept();
                 }
-                catch { /* 跳过损坏的 manifest */ }
+                catch { scan.Skip("清单解析失败"); }
             }
         }
 
+        scan.Report();
         return games;
     }
 
