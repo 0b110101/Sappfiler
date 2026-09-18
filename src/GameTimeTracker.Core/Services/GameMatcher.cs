@@ -45,6 +45,38 @@ public class GameMatcher : IGameMatcher
     private static readonly Regex TrailingBracketedYearRegex =
         new(@"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*$", RegexOptions.Compiled);
 
+    /// <summary>
+    /// 末尾的「版本 / 版次」后缀，比对时忽略。
+    /// </summary>
+    /// <remarks>
+    /// 总表里常写全称（「XX Deluxe Edition」），而进程名只有「XX」。
+    /// 这些词只描述**卖哪个版本**，不改变"这是哪款游戏"，所以可以安全忽略 ——
+    /// 你在玩的就是同一款游戏，时长理应记在一起。
+    ///
+    /// ⚠️ **只列确定是版本标记的词**。像 `Remake` / `Rebirth` / `Eternal` 这类
+    /// 是游戏名的组成部分（`Final Fantasy VII Remake` 与 `Final Fantasy VII Rebirth`
+    /// 是两款游戏、`Doom` 与 `Doom Eternal` 也是），**绝不能放进来**。
+    /// </remarks>
+    private static readonly Regex TrailingEditionRegex = new(
+        @"\s*(?:" +
+        @"(?:digital\s+)?deluxe(?:\s+edition)?" +
+        @"|ultimate(?:\s+edition)?" +
+        @"|definitive(?:\s+edition)?" +
+        @"|complete(?:\s+edition)?" +
+        @"|gold(?:\s+edition)?" +
+        @"|premium(?:\s+edition)?" +
+        @"|special(?:\s+edition)?" +
+        @"|collector'?s(?:\s+edition)?" +
+        @"|enhanced(?:\s+edition)?" +
+        @"|anniversary(?:\s+edition)?" +
+        @"|standard(?:\s+edition)?" +
+        @"|game\s+of\s+the\s+year(?:\s+edition)?" +
+        @"|goty(?:\s+edition)?" +
+        @"|remastered" +
+        @"|hd\s+remaster" +
+        @")\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private readonly HttpClient _httpClient;
     private readonly Dictionary<string, string?> _steamCnCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly double _fuzzyThreshold;
@@ -76,9 +108,16 @@ public class GameMatcher : IGameMatcher
         // NFKC normalization & lowercase
         var normalized = title.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
 
-        // 剥掉末尾括号里的年份（Valheim (2020) → Valheim）。
-        // 必须在去标点之前做 —— 去标点会把括号换成空格，那时就认不出括号形式了。
-        normalized = TrailingBracketedYearRegex.Replace(normalized, "");
+        // 剥掉末尾的「年份」「版本后缀」等噪音。
+        // 必须在去标点**之前**做 —— 去标点会把括号换成空格，那时就认不出括号形式了。
+        // 循环两次是为了兼容「XX Deluxe Edition (2020)」这类组合（顺序不定）。
+        for (int pass = 0; pass < 2; pass++)
+        {
+            var before = normalized;
+            normalized = TrailingBracketedYearRegex.Replace(normalized, "");
+            normalized = TrailingEditionRegex.Replace(normalized, "");
+            if (normalized == before) break;
+        }
 
         // Strip apostrophes
         normalized = ApostropheRegex.Replace(normalized, "");

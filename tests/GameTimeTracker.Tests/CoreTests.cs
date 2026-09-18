@@ -20,10 +20,22 @@ public class GameMatcherTests
     [InlineData("Valheim (2020)", "valheim")]
     [InlineData("Doom (2016)", "doom")]
     [InlineData("Prey [2017]", "prey")]
+    // 版本后缀也要剥掉（总表常写全称，进程名只有主名）
+    [InlineData("Valheim Deluxe Edition", "valheim")]
+    [InlineData("Skyrim Special Edition", "skyrim")]
+    [InlineData("Elden Ring GOTY Edition", "elden ring")]
+    [InlineData("Cyberpunk 2077 Ultimate Edition", "cyberpunk 2077")]
+    // 组合形式（年份 + 版本，顺序不定）也要处理
+    [InlineData("Hollow Knight (2017) Deluxe Edition", "hollow knight")]
     // 但裸年份不能剥 —— 那是游戏名的组成部分，剥了会让不同代互相误匹配
     [InlineData("Football Manager 2024", "football manager 2024")]
     [InlineData("F1 2023", "f1 2023")]
     [InlineData("NBA 2K24", "nba 2k24")]
+    // ⚠️ 以下绝不能剥 —— 它们是游戏名的一部分，不是版本标记
+    //    （放进来会让「Doom」匹配上「Doom Eternal」这类不同游戏）
+    [InlineData("Doom Eternal", "doom eternal")]
+    [InlineData("Final Fantasy VII Remake", "final fantasy 7 remake")]
+    [InlineData("Final Fantasy VII Rebirth", "final fantasy 7 rebirth")]
     public void NormalizeTitle_ShouldNormalizeProperly(string input, string expected)
     {
         var result = _matcher.NormalizeTitle(input);
@@ -47,6 +59,46 @@ public class GameMatcherTests
         matches.Should().NotBeEmpty("别名带年份后缀也必须能匹配上");
         matches[0].PageId.Should().Be("p1");
         matches[0].MatchType.Should().Be("normalized", "剥掉年份后应命中归一化匹配");
+    }
+
+    [Fact]
+    public void MatchGame_ShouldMatchAliasWithEditionSuffix()
+    {
+        var catalog = new List<NotionGameCatalogItem>
+        {
+            new() { PageId = "p1", Name = "Skyrim Special Edition" }
+        };
+
+        var matches = _matcher.MatchGame("Skyrim", catalog);
+
+        matches.Should().NotBeEmpty("版本后缀不应妨碍匹配");
+        matches[0].PageId.Should().Be("p1");
+    }
+
+    [Fact]
+    public void MatchGame_MustNotConflateDifferentGames()
+    {
+        // 归一化剥噪音是为了"同一款游戏的不同写法能对上"，
+        // **不能**变成"不同游戏被混为一谈"。这几组是典型的危险组合：
+        //   Doom / Doom Eternal          —— 副标题不是版本标记
+        //   Portal / Portal 2            —— 数字序号不是年份
+        //   FM 2023 / FM 2024            —— 裸年份是名字的一部分
+        var catalog = new List<NotionGameCatalogItem>
+        {
+            new() { PageId = "doom-eternal", Name = "Doom Eternal" },
+            new() { PageId = "portal-2", Name = "Portal 2" },
+            new() { PageId = "fm2024", Name = "Football Manager 2024" },
+            new() { PageId = "ff7r", Name = "Final Fantasy VII Rebirth" },
+        };
+
+        _matcher.MatchGame("Doom", catalog)
+            .Should().NotContain(c => c.PageId == "doom-eternal", "Doom ≠ Doom Eternal");
+        _matcher.MatchGame("Portal", catalog)
+            .Should().NotContain(c => c.PageId == "portal-2", "Portal ≠ Portal 2");
+        _matcher.MatchGame("Football Manager 2023", catalog)
+            .Should().NotContain(c => c.PageId == "fm2024", "不同年份是不同代游戏");
+        _matcher.MatchGame("Final Fantasy VII Remake", catalog)
+            .Should().NotContain(c => c.PageId == "ff7r", "Remake ≠ Rebirth");
     }
 
     [Fact]

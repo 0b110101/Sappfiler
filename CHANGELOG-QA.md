@@ -86,8 +86,14 @@ Steam 的安装清单里有个 `StateFlags` 字段，程序之前把它当"只�
 **只剥括号形式，不剥裸年份** —— `Football Manager 2024`、`F1 2023`、`NBA 2K24`
 这类游戏名里的年份是有意义的，剥掉会让不同代互相误匹配，所以刻意保留。
 
-> 如果你的总表别名是写成 `Valheim 2020`（不带括号）这种形式，仍然匹配不上，
-> 建议改成 `Valheim (2020)` 或直接在「游戏标识」里填 `steam:892970`（那是最可靠的匹配方式）。
+**同时放宽了"版本后缀"**：`Deluxe / Ultimate / Definitive / Complete / Gold /
+Premium / Special / Collector's / Enhanced / Anniversary Edition`、
+`Game of the Year Edition`、`Remastered` 等在比对时会被忽略，
+这样总表写「XX Deluxe Edition」而进程名是「XX」也能匹配上。
+
+> 匹配**完全基于游戏名**，不要求你在总表里填 Steam AppID。
+> 但「别名」建议写成 `Valheim (2020)` 这种**带括号**的年份形式
+> （不写年份也可以），写成 `Valheim 2020`（裸年份）时程序无法安全地剥掉它。
 
 
 之前**检测环节一行日志都没有** —— 因为代码用的是 `Console.WriteLine`，
