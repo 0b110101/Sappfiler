@@ -127,15 +127,36 @@
   所以要日志得加在 App 或 Infrastructure 层。
 - **监控循环 5 秒一轮，日志只在「开始/结束计时」时记**，心跳绝不能记，否则刷爆日志。
 
-### 结构性缺口（尚未解决，见 HANDOVER 已知问题）
-`MonitorLoopAsync` 只在两种情况下计时：
-1. `DetectGame` 命中平台库（Steam/Epic/GOG/Ubisoft/EA/Xbox/WeGame），或
-2. 该 exe 已存在于本地 `games` 表
-**未识别的进程 → 完全静默丢弃**：不计时、不进任何列表、UI 上毫无痕迹。
-唯一补救是用户手动「添加游戏」。
-另外「待处理」页 = `notion_page_id` 为空（即**未绑定 Notion**），
-**不是**"未识别进程待确认"；而且没有任何代码把 `games.status` 写成 `pending`。
-→ 这与"不用 Notion 也能当纯记录软件"的目标有落差，需要产品决策。
+### 识别策略（用户确认的设计，不要改）
+**只对主流平台（Steam/Epic/GOG/Ubisoft/EA/Xbox/WeGame）按安装路径自动识别，
+其余游戏一律靠用户手动「添加游戏」。**
+"未识别进程被忽略"**是刻意设计，不是 bug**（早期分析曾误判为设计缺口，已纠正）。
+
+**但这有个硬前提：主流平台的检测器必须准确。** 漏识别时用户看到的是
+"我在玩 Steam 游戏，程序毫无反应"，且**日志里没有线索**（设计上就是静默忽略）。
+已经真实发生过两次：
+- `SteamDetector.StateFlags` 当枚举比 → 丢掉已装好的游戏（已修）
+- `GogDetector` / `UbisoftDetector` 没处理 32 位注册表视图 → 完全看不到游戏（已修）
+
+### ⚠️ 注册表必须考虑 32/64 位视图（2026-09-18 踩坑）
+**GOG Galaxy 与 Ubisoft Connect 是 32 位程序**，在 64 位 Windows 上写
+`HKLM\SOFTWARE\...` 会被重定向到 `WOW6432Node\SOFTWARE\...`。
+本程序是 **x64**，`Registry.LocalMachine.OpenSubKey` 默认读 **64 位视图** → **看不到游戏**。
+
+正确做法（两个视图都试）：
+```csharp
+foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+{
+    var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+    var key = baseKey.OpenSubKey(path);
+    if (key is not null) return key;   // 记得 baseKey.Dispose()
+}
+```
+- `SteamDetector` 早就在循环两个视图，`WeGameDetector` 显式列了 `WOW6432Node` ——
+  作者知道这坑，**只有 GOG / Ubisoft 漏了**（已修）。
+- **Epic / EA / Xbox 不受影响**：它们读 `%ProgramData%` 下的文件目录，不碰注册表。
+- 排查时先看日志有没有 `[游戏库] xxx: 找到 N 个游戏`：
+  `N=0` 但用户确实装了 → 检测器有问题；`N>0` 但游戏不在其中 → 过滤条件过严。
 
 ## Notion 表结构硬要求（改代码前必看）
 **每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——

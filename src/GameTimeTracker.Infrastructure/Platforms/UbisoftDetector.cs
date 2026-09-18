@@ -30,15 +30,44 @@ public sealed class UbisoftDetector : IPlatformDetector
 
     public string PlatformName => "ubisoft";
 
+    /// <summary>
+    /// 打开 Ubisoft 注册表键，**两个视图都试**。
+    /// </summary>
+    /// <remarks>
+    /// Ubisoft Connect 是 32 位程序，在 64 位 Windows 上写 HKLM\SOFTWARE\... 会被
+    /// 重定向到 WOW6432Node\SOFTWARE\...；本程序是 x64，直接读 Registry.LocalMachine
+    /// 拿到的是 64 位视图，**看不到 Ubisoft 的游戏**。
+    /// 同 GOG / Steam 的同类问题（详见 GogDetector.OpenGogKey 的说明）。
+    /// </remarks>
+    private static RegistryKey? OpenUbiKey()
+    {
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            try
+            {
+                var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+                var key = baseKey.OpenSubKey(UbiRegistryPath);
+                if (key is not null)
+                {
+                    baseKey.Dispose();
+                    return key;
+                }
+                baseKey.Dispose();
+            }
+            catch { /* 该视图不可用时试下一个 */ }
+        }
+        return null;
+    }
+
     public bool IsInstalled()
     {
-        using var key = Registry.LocalMachine.OpenSubKey(UbiRegistryPath);
+        using var key = OpenUbiKey();
         return key is not null;
     }
 
     public IReadOnlyList<InstalledGame> GetInstalledGames()
     {
-        using var installsKey = Registry.LocalMachine.OpenSubKey(UbiRegistryPath);
+        using var installsKey = OpenUbiKey();
         if (installsKey is null) return [];
 
         var games = new List<InstalledGame>();
