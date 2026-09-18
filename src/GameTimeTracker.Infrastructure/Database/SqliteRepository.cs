@@ -669,6 +669,21 @@ public class SqliteRepository : IDatabaseRepository
         return rows.Select(MapDailySummary).ToList();
     }
 
+    /// <summary>
+    /// 待上传的每日汇总（推送到 Notion 的候选）。
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ 这里必须**排除 `unmapped`**，不能只写 `!= 'synced'`。
+    ///
+    /// `unmapped` 的语义是"已推到每日时长表，但游戏还没绑定总表"——
+    /// 也就是说**这一条已经推完了**，只是没写 relation。
+    /// 若把它当成待上传，会出现：推送 → 置 unmapped → 下轮 `unmapped != 'synced'` 又命中
+    /// → 再 PATCH → 再置 unmapped …… **每轮同步把所有未绑定记录重打一遍，永远不停**。
+    /// 用户刚配好 Notion、还没绑游戏的那段时间最容易撞上，且随天数线性变慢。
+    ///
+    /// 排除之后不会漏推：时长一旦增加，`AddSessionDurationToDailyAsync` 会把状态改回
+    /// `pending`（拉取路径在"本地领先"时也会置 `pending`），自然重新进入本查询。
+    /// </remarks>
     public async Task<IReadOnlyList<DailySummary>> GetPendingDailySummariesAsync()
     {
         using var conn = CreateConnection();
@@ -677,7 +692,7 @@ public class SqliteRepository : IDatabaseRepository
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id, g.notion_page_id AS game_notion_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
-            WHERE d.sync_status != 'synced' AND d.duration_minutes > 0
+            WHERE d.sync_status NOT IN ('synced', 'unmapped') AND d.duration_minutes > 0
             ORDER BY d.date ASC;
             """);
 

@@ -360,17 +360,33 @@
 给每个检测器补一个"扫到 N 个 / 跳过 M 个（原因）"的汇总日志，
 把"静默漏识别"变成"日志可查"。这是这类问题的根治手段。
 
-### 问题 8 — 「待处理」页的语义与"手动添加"的可见性
+### 问题 8 — 未绑定游戏的推送（已修）+ 「待处理」页的语义澄清
 
-「待处理」页 = `notion_page_id` 为空，即**"已识别但未绑定 Notion"**，
-**不是**"未识别进程待确认"。全代码库**没有任何地方**把 `games.status` 写成 `pending`
-（`GameRecord.Status` 注释里写了 `"active", "pending", "ignored"`，但 pending 从未被使用）。
+**用户澄清的设计（我先前理解错了，已纠正）**：
+- **本地为主**：不管 Notion 连没连上，本地记录一直在走。
+- **是否绑定只影响总表**：未绑定的游戏**照样推送到每日时长表**，
+  只是不带 `游戏` relation、`绑定状态` 写「未绑定」。
+- 非主流平台的游戏靠手动「添加游戏」，加进去之后一切照常。
 
-**影响**：按设计，非主流平台的游戏要靠手动「添加游戏」。但
-① 该入口在侧边栏左下角，不显眼；② 不用 Notion 的用户打开「待处理」页会看到自己**所有**游戏，
-却没有任何有意义的操作。
-**建议**（未做）：让「待处理」页对"未绑定"给出非 Notion 的处置选项（如「保持本地记录」），
-或在检测不到游戏时主动提示"找不到你的游戏？试试手动添加"。
+所以先前记的"「待处理」页对非 Notion 用户没意义"**是误判** ——
+该页的用途就是"把已识别的游戏绑到总表"，不绑也不影响每日表的推送。
+（Python 遗留线的 `test_dedup.py::test_unmapped_game_syncs_to_daily_table_without_relation`
+也印证了这个意图。）
+
+**但顺着这条设计查出一个真 bug（已修）**：
+`GetPendingDailySummariesAsync` 的筛选条件是 `sync_status != 'synced'`，
+而未绑定记录推完后状态是 **`unmapped`** —— `unmapped != 'synced'` 恒成立，
+于是**每轮同步都把这条记录重新 PATCH 一遍，永远不停**。
+用户刚配好 Notion、还没绑游戏的那段时间最容易撞上，且记录随天数累积、越用越慢。
+
+**修法**：筛选改为 `sync_status NOT IN ('synced', 'unmapped')`。
+不会漏推 —— 时长一旦增加，`AddSessionDurationToDailyAsync` 会把状态改回 `pending`
+（拉取路径在"本地领先"时也会置 `pending`），自然重新进入查询。
+守护用例：`SyncPending_DoesNotRepushUnboundRecord_EveryRound`
+与 `SyncPending_RepushesUnboundRecord_WhenDurationGrows`。
+
+**遗留（非阻塞）**：「添加游戏」入口在侧边栏左下角，不够显眼。
+检测不到游戏时若能主动提示一句"找不到你的游戏？试试手动添加"会更友好。**未做。**
 
 ---
 

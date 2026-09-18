@@ -384,4 +384,70 @@ public class NotionPullImportTests : IDisposable
         _client.UpdatedPages.Clear();
         (await _sync.RefreshDailyTitlesFromMasterAsync()).Should().Be(0, "推送已落快照，回刷不该再重复 PATCH");
     }
+
+    // ================= 未绑定游戏：照常推送，但不该无限重推 =================
+
+    [Fact]
+    public async Task SyncPending_PushesUnboundRecord_ToDailyTableWithoutRelation()
+    {
+        // 用户的设计：本地为主。游戏没绑定总表也要照常推到每日时长表，
+        // 只是不带 relation、绑定状态写「未绑定」。
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "4001", "未绑定的游戏", "u.exe", @"C:\u.exe"));
+        await _repo.AddSessionDurationToDailyAsync("2026-10-01", game.Id, 30 * 60);
+
+        var pushed = await _sync.SyncPendingDailyRecordsAsync();
+
+        pushed.Should().Be(1, "未绑定也要推送");
+        _client.CreatedDailyRecordTitles.Should().ContainSingle()
+            .Which.Should().Be("未绑定的游戏");
+
+        var row = (await _repo.GetDailySummariesByDateAsync("2026-10-01")).Single();
+        row.NotionPageId.Should().NotBeNullOrEmpty("记录已经建到 Notion 上了");
+        row.SyncStatus.Should().Be("unmapped", "状态是「已推送但未绑定」，不是 synced");
+    }
+
+    [Fact]
+    public async Task SyncPending_DoesNotRepushUnboundRecord_EveryRound()
+    {
+        // 性能护栏：unmapped 曾被视为"待上传"（因为筛选条件是 != 'synced'），
+        // 于是每轮同步都把这条记录重新 PATCH 一遍，永远不停。
+        // 用户刚配好 Notion、还没绑游戏的那段时间最容易撞上，且随天数线性变慢。
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "4002", "不该重推", "r.exe", @"C:\r.exe"));
+        await _repo.AddSessionDurationToDailyAsync("2026-10-02", game.Id, 30 * 60);
+
+        await _sync.SyncPendingDailyRecordsAsync();   // 第一轮：正常推送
+
+        // 第二轮、第三轮：时长没变，不应该再打 Notion
+        _client.UpdatedPages.Clear();
+        (await _sync.SyncPendingDailyRecordsAsync()).Should().Be(0, "时长没变就不该重推");
+        (await _sync.SyncPendingDailyRecordsAsync()).Should().Be(0, "第三轮同样不该重推");
+        _client.UpdatedPages.Should().BeEmpty("一次 PATCH 都不该发");
+    }
+
+    [Fact]
+    public async Task SyncPending_RepushesUnboundRecord_WhenDurationGrows()
+    {
+        // 不重推的前提是"没变化"。时长涨了就必须重新推上去，
+        // 否则未绑定游戏的时长会永远停在第一次的值。
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "4003", "时长会涨", "g.exe", @"C:\g.exe"));
+        await _repo.AddSessionDurationToDailyAsync("2026-10-03", game.Id, 30 * 60);
+
+        await _sync.SyncPendingDailyRecordsAsync();
+
+        // 又玩了 15 分钟 → 状态应被改回 pending
+        await _repo.AddSessionDurationToDailyAsync("2026-10-03", game.Id, 15 * 60);
+
+        var row = (await _repo.GetDailySummariesByDateAsync("2026-10-03")).Single();
+        row.DurationMinutes.Should().Be(45);
+        row.SyncStatus.Should().Be("pending", "时长增加必须把状态改回待上传");
+
+        var pushed = await _sync.SyncPendingDailyRecordsAsync();
+
+        pushed.Should().Be(1, "时长变了要重新推");
+        _client.UpdatedPages.Should().ContainSingle()
+            .Which.DurationMinutes.Should().Be(45, "推上去的是新时长");
+    }
 }
