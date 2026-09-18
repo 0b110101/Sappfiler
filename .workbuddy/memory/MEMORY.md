@@ -107,6 +107,36 @@
   把副本库的 `settings.notion_token` 清空（断开 Notion）+ 给目标游戏挂一个有 cover_url 的 page_id 即可离线复现。
 
 
+## 游戏检测链路（2026-09-18 踩坑，改这块前必看）
+**流程**：`MonitorLoopAsync`(5s) → `ScanRunningProcessesAsync`（取 exe 路径 + `ProcessFilter` 黑名单）
+→ `GameLibraryManager.DetectGame`（靠 `_installedGames` 目录前缀匹配）→ `GetOrCreateGameAsync` → 开始计时。
+
+- **`SteamDetector` 的 `StateFlags` 是位标志，不是枚举值。**
+  `1`=已卸载 `2`=需更新 `4`=已完整安装 `8/16/32/64/128`=更新相关 `256`=文件缺失 `1024`=较新状态位。
+  常见组合：`4`、`6`(4|2)、`1030`(1024|4|2)。
+  **旧代码写死 `flags != "4"` 会丢掉 6/1030 这类已装好的游戏** ——
+  本机实测：`StateFlags=4` 的是「Steamworks Common Redistributables」（运行库），
+  `StateFlags=1030` 的是「Where Winds Meet」（真游戏）→ **收下运行库、丢掉真游戏**，
+  症状就是"玩 Steam 游戏检测不到"。
+  正确写法：`(flags & 4) != 0 && (flags & 1) == 0`。
+- **禁止在 Infrastructure/App 里用 `Console.WriteLine` 输出诊断信息。**
+  这是 `WinExe`（无控制台）程序，Console 输出**直接进虚空**。
+  `GameLibraryManager.Refresh()` 曾全用 Console，导致排查时日志一片空白。
+  **一律用 `AppLog`**（`GameTimeTracker.Infrastructure` 命名空间）。
+  注意分层：`AppLog` 在 Infrastructure，**Core 层用不了**（App → Infrastructure → Core），
+  所以要日志得加在 App 或 Infrastructure 层。
+- **监控循环 5 秒一轮，日志只在「开始/结束计时」时记**，心跳绝不能记，否则刷爆日志。
+
+### 结构性缺口（尚未解决，见 HANDOVER 已知问题）
+`MonitorLoopAsync` 只在两种情况下计时：
+1. `DetectGame` 命中平台库（Steam/Epic/GOG/Ubisoft/EA/Xbox/WeGame），或
+2. 该 exe 已存在于本地 `games` 表
+**未识别的进程 → 完全静默丢弃**：不计时、不进任何列表、UI 上毫无痕迹。
+唯一补救是用户手动「添加游戏」。
+另外「待处理」页 = `notion_page_id` 为空（即**未绑定 Notion**），
+**不是**"未识别进程待确认"；而且没有任何代码把 `games.status` 写成 `pending`。
+→ 这与"不用 Notion 也能当纯记录软件"的目标有落差，需要产品决策。
+
 ## Notion 表结构硬要求（改代码前必看）
 **每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——
 ```csharp
