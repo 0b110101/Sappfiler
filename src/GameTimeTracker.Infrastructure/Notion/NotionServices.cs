@@ -649,9 +649,7 @@ public class NotionSyncService : INotionSyncService
         _repo = repo;
         _client = client;
         _config = config;
-        _matcher = matcher ?? new GameMatcher(
-            fuzzyThreshold: config.FuzzyCandidateThreshold,
-            scoreGapThreshold: config.FuzzyScoreGapThreshold);
+        _matcher = matcher ?? new GameMatcher();
     }
 
     /// <summary>

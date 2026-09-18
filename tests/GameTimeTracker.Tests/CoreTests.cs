@@ -85,12 +85,10 @@ public class GameMatcherTests
         //   FM 2023 / FM 2024            —— 裸年份是名字的一部分
         //   FF VII Remake / Rebirth      —— 副标题不同就是两款游戏
         //
-        // ⚠️ 断言的是"没有**确定性**匹配"，不是"没有候选"。
-        //    模糊相似度天生分不开 Portal 和 Portal 2（86%），
-        //    所以它们会作为 fuzzy_candidate 出现在候选列表里 —— 这是**设计如此**：
-        //    AutoLinkGamesFromCatalogAsync 只接受 identifier_match/exact/normalized，
-        //    fuzzy_candidate 仅供用户人工确认，绝不会自动绑定。
-        //    真正要守住的红线是"不会自动绑错"。
+        // ⚠️ 这条守的是"不同游戏不能被当成同一款"。
+        //    模糊相似度已于 2026-09-19 移除，所以现在不会有任何候选，
+        //    但这条用例仍有价值：它防的是将来有人往归一化规则里加东西
+        //    （比如"剥掉副标题"或"剥掉数字序号"）导致这几种名字被等同起来。
         var catalog = new List<NotionGameCatalogItem>
         {
             new() { PageId = "doom-eternal", Name = "Doom Eternal" },
@@ -118,29 +116,23 @@ public class GameMatcherTests
     }
 
     [Fact]
-    public void MatchGame_FuzzyCandidates_AreNeverAutoBindable()
+    public void MatchGame_ReturnsNothing_WhenOnlySimilarButDifferentGamesExist()
     {
-        // 守住"自动绑定只认确定性匹配"这条线：
-        // 近似但不同的游戏名必须落成 fuzzy_candidate，而不是 exact/normalized，
-        // 否则 AutoLinkGamesFromCatalogAsync 会把时长记到错误的游戏上。
+        // 模糊相似度已于 2026-09-19 移除，只保留确定性匹配。
+        // 这条守住"宁可说找不到，也不给看着像、实际错的建议"：
+        //   Portal    vs Portal 2    曾按 85.7% 被当成候选
+        //   Half-Life vs Half-Life 2  曾按 90.0% 被当成候选
+        // 这些在弹窗里会被显示成「XX (86% 匹配)」并默认勾选，一点就绑错。
         var catalog = new List<NotionGameCatalogItem>
         {
             new() { PageId = "portal-2", Name = "Portal 2" },
             new() { PageId = "hl2", Name = "Half-Life 2" },
         };
 
-        foreach (var query in new[] { "Portal", "Half-Life" })
-        {
-            var matches = _matcher.MatchGame(query, catalog);
-            matches.Should().NotBeEmpty($"「{query}」应产生模糊候选（否则本用例是空转的）");
-
-            foreach (var m in matches)
-            {
-                m.MatchType.Should().Be("fuzzy_candidate",
-                    $"「{query}」只能得到模糊候选，不能是 {m.MatchType}");
-                m.Score.Should().BeLessThan(100.0, "确定性匹配才是 100 分");
-            }
-        }
+        _matcher.MatchGame("Portal", catalog)
+            .Should().BeEmpty("Portal 与 Portal 2 是两款游戏，不该给候选");
+        _matcher.MatchGame("Half-Life", catalog)
+            .Should().BeEmpty("Half-Life 与 Half-Life 2 是两款游戏，不该给候选");
     }
 
     [Fact]
@@ -160,8 +152,10 @@ public class GameMatcherTests
     }
 
     [Fact]
-    public void MatchGame_ShouldMatchByFuzzyScore()
+    public void MatchGame_ShouldMatchAcrossPunctuationDifference()
     {
+        // 归一化把标点抹平，所以「Monster Hunter: World」和「Monster Hunter World」能对上。
+        // （这条以前叫 ...ByFuzzyScore，其实靠的是归一化而不是模糊相似度，名字有误导，一并改正。）
         var catalog = new List<NotionGameCatalogItem>
         {
             new() { PageId = "p1", Name = "Monster Hunter: World", Aliases = new() { "怪物猎人：世界" } },
@@ -171,7 +165,7 @@ public class GameMatcherTests
         var matches = _matcher.MatchGame("Monster Hunter World", catalog);
         matches.Should().NotBeEmpty();
         matches[0].PageId.Should().Be("p1");
-        matches[0].Score.Should().BeGreaterThan(90.0);
+        matches[0].MatchType.Should().Be("normalized");
     }
 }
 

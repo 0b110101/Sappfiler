@@ -7,7 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="FuzzySharp" Version="2.0.2" />
+    <!--
+      原 FuzzySharp（模糊字符串相似度）依赖已随模糊匹配一起移除（2026-09-19）。
+      匹配现在只做确定性判断：标识 / 精确 / 归一化。
+      详见 GameMatcher.MatchGame 的说明。
+    -->
   </ItemGroup>
 
 </Project>

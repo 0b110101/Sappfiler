@@ -389,8 +389,10 @@ public partial class HomeViewModel : ObservableObject
 
                     // 复用统一匹配链（含封面 URL 内嵌的 Steam AppID）。
                     // 只做精确同名比对时，「风暴怕死队」这类中英异名条目永远匹配不上。
+                    // 注：匹配链自 2026-09-19 起只返回确定性结果，
+                    // 原先这里为排除模糊候选写的 `!= "fuzzy_candidate"` 已无必要。
                     var hit = _matcher.MatchGame(activeGame.Name, catalogItems, activeGame.PlatformId)
-                                      .FirstOrDefault(c => c.MatchType != "fuzzy_candidate");
+                                      .FirstOrDefault();
                     var matched = hit == null
                         ? null
                         : catalogItems.FirstOrDefault(c => c.PageId == hit.PageId);

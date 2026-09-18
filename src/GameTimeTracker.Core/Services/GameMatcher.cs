@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using FuzzySharp;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 
@@ -79,14 +78,10 @@ public class GameMatcher : IGameMatcher
 
     private readonly HttpClient _httpClient;
     private readonly Dictionary<string, string?> _steamCnCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly double _fuzzyThreshold;
-    private readonly double _scoreGapThreshold;
 
-    public GameMatcher(HttpClient? httpClient = null, double fuzzyThreshold = 80.0, double scoreGapThreshold = 15.0)
+    public GameMatcher(HttpClient? httpClient = null)
     {
         _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
-        _fuzzyThreshold = fuzzyThreshold;
-        _scoreGapThreshold = scoreGapThreshold;
     }
 
     /// <summary>
@@ -275,34 +270,28 @@ public class GameMatcher : IGameMatcher
             }
         }
 
-        // 4. Fuzzy candidate scoring
-        var candidates = new List<GameCandidate>();
-        foreach (var item in catalog)
-        {
-            var bestScore = 0.0;
-            var itemNorm = NormalizeTitle(item.Name);
-            var ratio = Fuzz.TokenSortRatio(normQuery, itemNorm);
-            if (ratio > bestScore) bestScore = ratio;
-
-            foreach (var alias in item.Aliases)
-            {
-                var aliasNorm = NormalizeTitle(alias);
-                var aRatio = Fuzz.TokenSortRatio(normQuery, aliasNorm);
-                if (aRatio > bestScore) bestScore = aRatio;
-            }
-
-            if (bestScore >= _fuzzyThreshold)
-            {
-                candidates.Add(new GameCandidate
-                {
-                    PageId = item.PageId,
-                    Title = item.Name,
-                    MatchType = "fuzzy_candidate",
-                    Score = bestScore
-                });
-            }
-        }
-
-        return candidates.OrderByDescending(c => c.Score).ToList();
+        // 到此为止：只返回**确定性**匹配（identifier_match / exact / normalized），
+        // 没命中就是空列表，由调用方提示用户新建或手动搜索。
+        //
+        // 【为什么删掉了模糊相似度打分】（2026-09-19，用户要求）
+        // 原先这里用 Fuzz.TokenSortRatio 给"相近但不相同"的条目打分当候选。
+        // 问题在于它**分不开相似但不同的游戏**，而且分数看起来还很有说服力：
+        //     Portal      → Portal 2                85.7%
+        //     Half-Life   → Half-Life 2             90.0%
+        //     FM 2023     → Football Manager 2024   97.6%  ← 极其误导
+        //     FF VII Remake → FF VII Rebirth        88.9%
+        // 绑定弹窗会把这些显示成「XX (98% 匹配)」**并默认勾选第一个**，
+        // 用户点一下确定就把时长记到错误的游戏上了。
+        //
+        // 而且代码里另外两处用候选的地方**本来就都主动排除它**：
+        //   · AutoLinkGamesFromCatalogAsync 只认 identifier_match/exact/normalized
+        //   · ViewModels 取封面时显式 .Where(c => c.MatchType != "fuzzy_candidate")
+        // 也就是说模糊候选唯一的消费者就是那个弹窗 —— 它只在那里起作用，且只在那里有害。
+        //
+        // 现在改为：**只给确定性匹配**。想让"同一款游戏的不同写法能对上"，
+        // 靠的是 NormalizeTitle 里的确定性规则（剥年份/版本后缀、罗马数字、标点），
+        // 而不是靠相似度猜。找不到就如实说找不到 —— 宁可让用户手动选，
+        // 也不要给一个看着很像、实际错误的建议。
+        return results;
     }
 }

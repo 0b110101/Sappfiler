@@ -121,7 +121,7 @@ public class GameCandidate
 {
     public string PageId { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
-    public string MatchType { get; set; } = "fuzzy_candidate"; // "exact", "normalized", "identifier_match", "fuzzy_candidate"
+    public string MatchType { get; set; } = string.Empty; // "exact" | "normalized" | "identifier_match"
     public double Score { get; set; } = 100.0;
 }
 
@@ -212,6 +212,11 @@ public class TrackerConfig
     public int SessionHeartbeatIntervalSeconds { get; set; } = 15;
     public int SyncIntervalMinutes { get; set; } = 15;
     public bool AutoCreateGames { get; set; } = false;
+
+    // ⚠️ 已废弃：模糊匹配于 2026-09-19 移除（只保留确定性匹配），
+    //    这两个值**不再被任何代码读取**。按「不改配置键」的规则保留字段，
+    //    若确认无人依赖，可在单独一轮清理中删除。
+    //    详见 GameMatcher.MatchGame 里的说明。
     public double FuzzyCandidateThreshold { get; set; } = 80.0;
     public double FuzzyScoreGapThreshold { get; set; } = 15.0;
 
