@@ -172,6 +172,15 @@
   "写标题"和"比对标题"必须共用同一套规则，否则格式一旦漂移（改小数位、换分隔符），
   回刷会永远判定不一致、每轮白打 Notion。
   （alpha18 首轮构建失败就是这个坑：`BuildDailyRecordTitle` 曾是 `NotionClient` 私有方法。）
+- **`CreateDailyRecordAsync` / `UpdateDailyRecordAsync` 的第 4 个参数是「游戏名」，不是拼好的标题。**
+  方法内部会自己调 `DailyRecordTitle.Build()` 拼装。传完整标题进去会拼成
+  **「X · 0.7 h · 0.7 h」（时长后缀重复）**——alpha18 真实发生过，被测试抓到。
+  参数已从 `gameTitle` 改名为 `gameName` 以消除这个歧义
+  （`CreateGameMasterPageAsync` 的 `gameTitle` 不改，那个确实写标题）。
+  **调用时一律传 `displayName`（`ResolveDailyDisplayAsync` 的第一个返回值）。**
+  - 写测试 fake 时的经验：**保留"调用参数原样"比"模拟完整行为"更能暴露调用方的契约错误**。
+    这个 bug 能被抓到，正是因为 fake 记录的是传给 client 的原始值；
+    如果 fake 内部也拼一次标题、断言最终结果，就会漏过去。
 
 ## page id 匹配必须连字符不敏感（2026-09-18 踩坑）
 - Notion 的 page id 有时带连字符（8-4-4-4-12）有时不带，
