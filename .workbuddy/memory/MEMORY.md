@@ -239,23 +239,42 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 ## Notion 表结构硬要求（改代码前必看）
 **每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——
 ```csharp
-["游戏动态"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）★2026-09-18 由「游戏名称」改名
+["游戏动态"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）
 ["日期"]     = date
-["单次时长"] = number     // ★ 单位是分钟，不是小时。★2026-09-18 由「时长」改名
+["单次时长"] = number     // ★ 单位是**小时**、保留 1 位小数（2026-09-19 从分钟改来）
 ["绑定状态"] = select     // 已绑定 / 未绑定
-["关联游戏"] = relation   // 仅在有 gamePageId 时写入。★2026-09-18 由「游戏」改名
+["关联游戏"] = relation   // 仅在有 gamePageId 时写入
 ```
 - **属性名必须与代码里的字面量完全一致**，不匹配 Notion 返回 400（property does not exist）。
 - ⚠️ **总表的 title 属性仍叫「游戏名称」，不要跟着改。** 两处名字不同，很容易改错。
-- **拉取（Pull）时新名优先、旧名兜底**（`ExtractNumber` / `ExtractRelationId` 都带旧名），
+- **拉取（Pull）时新名优先、旧名兜底**（`ExtractDouble` / `ExtractRelationId` 都带旧名），
   这样还没改名的表也能拉回历史记录。但**写入只用新名**。
-- **标题读取是按类型找的**（`ExtractTitle` 找第一个 title 属性），与属性名无关，
-  所以改标题名不会影响读取。
-- **`绑定状态` 的选项不用手工预建**：Notion API 会自动把选项加进 schema
-  （官方文档原文：*"If the select data source property doesn't have an option by that name yet,
-  then the name is added to the data source schema"*）。前提是集成对父库有写权限。
+- **标题读取是按类型找的**（`ExtractTitle` 找第一个 title 属性），与属性名无关。
+- **`绑定状态` 的选项不用手工预建**：Notion API 会自动把选项加进 schema。
 
-**游戏总表**：程序只读，属性均可选，但：
+### ⚠️ 单位换算的三条硬约束（2026-09-19 改单位时踩到，再改单位前必读）
+1. **只在 Notion 边界换算**：`NotionDailyRecordItem.DurationMinutes` 与本地
+   `daily_summary` **一律是分钟**。写入用 `DailyRecordTitle.MinutesToHours()`，
+   读取用 `RawDurationToMinutes()`。
+2. **读 Number 必须用 `GetDouble`，不能用 `GetInt32`**。
+   原 `ExtractNumber` 用 `GetInt32()`，遇到 `0.7` 会**直接抛异常**，
+   整条记录拉不回来。已改为 `ExtractDouble` 返回 `double?`。
+3. **凡"本地 vs 远端"的时长比较都要带容差**。
+   0.1 小时 = 6 分钟粒度，换算回分钟最多差 ±3 分钟。
+   `SyncDailyRecordFromNotionAsync` 的 `localAhead` 若用精确比较，
+   本地 15 分钟 vs 远端 0.2h(=12分) 会**永远判本地领先 → 每轮重推**。
+   已改为 `> (remote + 3) * 60`。
+   （与 `unmapped` 那次同属一类：某条件永远命中。）
+
+**历史行兼容**：旧行存的是分钟。判别规则：单日单游戏时长不可能 > 24 小时，
+故 `> 24` 的值按分钟处理（`RawDurationToMinutes`）。局限已文档化：
+旧行 ≤24 的值会被当成小时（影响有界）。
+
+**测试**：`NotionWireFormatTests` 断言**实际发出的 JSON**（注入假 HttpMessageHandler），
+不能只测中间值 —— 中间值一直是分钟，换算写错测不出来。
+
+## 游戏总表
+程序只读，属性均可选，但：
 - `游戏名称` (Title) 实际必需（没有它匹配无从谈起）
 - `游戏标识`（多选/文本，`steam:appid`）**可选、不是推荐项** ——
   库里几百个游戏逐个补不现实，匹配**以游戏名（含别名）为主**。详见下文匹配设计原则。
@@ -267,15 +286,17 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 - 总表加 Rollup：Relation=反向关联、Property=`单次时长`、Calculate=**Sum**。
 - **Rollup 是只读计算值，不能加到另一个属性上。**
   用户原有手工时长要叠加的话，得再加 **Formula**：
-  `prop("原有列") + prop("GT累计")`，注意单位——Rollup 是分钟，
-  原列若是小时要 `/60`。
+  `prop("原有列") + prop("GT累计")`。
+- **单位已统一为小时**（2026-09-19）：Rollup 汇总出来的就是小时。
+  原手工列若为分钟，Formula 要写 `prop("原有列") + prop("GT累计") * 60`。
 - Rollup **只统计已绑定的记录**（没 relation 的算不进去），所以绑定是 Rollup 的前提。
 
 ## 版本号与版本控制（2026-09-18 确立）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
-- **当前版本 `0.9.5-alpha18`**，版本号只在仓库根 `Directory.Build.props` 定义一处，四个工程自动继承：
-  `VersionPrefix=0.9.5` / `VersionSuffix=alpha18` / `FileVersion=0.9.5.18` / `AssemblyVersion=0.9.5.0`。
+- **当前版本 `0.9.5-alpha19`**，版本号只在仓库根 `Directory.Build.props` 定义一处，四个工程自动继承：
+  `VersionPrefix=0.9.5` / `VersionSuffix=alpha19` / `FileVersion=0.9.5.19` / `AssemblyVersion=0.9.5.0`。
+  （`Package.appxmanifest` 的 `Identity/@Version` 也要同步改，publish.ps1 会校验一致性。）
   **不要在单个 `.csproj` 里再写 `<Version>`。**
 - 之前的 `v1.2.1` 只是打包 zip 的文件名，代码里从未体现过；用户明确项目**尚未正式发布**，故重命名。
 - **`alphaNN` 是给 QA 的迭代序号，每交一版调试包就 +1。**
@@ -292,11 +313,14 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
   （不一致直接中止，机制上防漏改）→ 跑测试 → `dotnet publish` →
   写 `VERSION.txt`（版本+commit+配置+打包时间+工作树是否脏）→ 压 zip。
   工作树有未提交改动时黄字警告（包里含未入库代码 QA 无法定位问题）。
-- 发布包命名：`GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
+- 发布包命名：`GameTimeTracker-v0.9.5-alphaNN-win-x64.zip`。
   **配套维护 `CHANGELOG-QA.md`**（面向 QA：改了什么 / 重点验什么 / 已知问题）。
   HANDOVER.md 给接手开发者，CHANGELOG-QA.md 给测试人员，**两者受众不同都要维护**。
 - **版本沿革**：`alpha17`（版本体系落地 + git 基线，已验证 0 警告 0 错误 / 69 测试全过）
-  → `alpha18`（3 项 Notion 同步需求 + 同步链顺序修正，**待验证**）。
+  → `alpha18`（3 项 Notion 同步需求 + 同步链顺序修正）
+  → `alpha19`（**待验证**，8 项：Steam StateFlags 位标志 / GOG+Ubisoft 注册表视图 /
+  未绑定记录重推 / 检测日志补齐 / 日志噪音精简 / 别名年份后缀匹配 /
+  属性改名 游戏动态·单次时长·关联游戏 / 移除模糊匹配 / 单次时长单位改小时）。
 
 ## 每日记录的「游戏名称」与 page icon（2026-09-18 用户明确要求）
 - **标题格式 `{游戏名} · {X} h`，其中「游戏名」的来源分两种**：
