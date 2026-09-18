@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="GameTimeTracker.App.Views.MappingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:models="using:GameTimeTracker.Core.Models"
+    mc:Ignorable="d">
+
+    <ScrollViewer Padding="24" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="18" HorizontalAlignment="Stretch">
+            <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="True" />
+
+            <!-- Header & Search -->
+            <Grid>
+                <StackPanel Spacing="4">
+                    <TextBlock Text="游戏映射库" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="管理已识别的本地游戏身份及其关联的 Notion 总表映射" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                </StackPanel>
+
+                <AutoSuggestBox x:Name="SearchBox" QuerySubmitted="OnSearchSubmitted"
+                                PlaceholderText="搜索游戏或可执行文件名..."
+                                Width="260" HorizontalAlignment="Right" VerticalAlignment="Bottom" />
+            </Grid>
+
+            <!-- Table Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="16,14">
+                <StackPanel Spacing="6">
+                    <!-- Column Header -->
+                    <Grid Padding="12,10" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="0,0,0,1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2.5*" MinWidth="180" />
+                            <ColumnDefinition Width="100" />
+                            <ColumnDefinition Width="2*" MinWidth="140" />
+                            <ColumnDefinition Width="120" />
+                            <ColumnDefinition Width="130" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="游戏名称" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Grid.Column="1" Text="平台" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Grid.Column="2" Text="可执行文件" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Grid.Column="3" Text="Notion 绑定状态" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Grid.Column="4" Text="操作" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Right" />
+                    </Grid>
+
+                    <!-- Items List (Using ItemsRepeater for exact pixel alignment without ListViewItem margins) -->
+                    <ItemsRepeater x:Name="MappingsRepeater">
+                        <ItemsRepeater.ItemTemplate>
+                            <DataTemplate x:DataType="models:GameRecord">
+                                <Border BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="0,0,0,0.5">
+                                    <Grid Padding="12,12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="2.5*" MinWidth="180" />
+                                            <ColumnDefinition Width="100" />
+                                            <ColumnDefinition Width="2*" MinWidth="140" />
+                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="130" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2" Margin="0,0,8,0">
+                                            <TextBlock Text="{x:Bind Name}" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind PlatformId}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+
+                                        <Border Grid.Column="1" HorizontalAlignment="Left" Background="#154F8FFF" CornerRadius="6" Padding="6,2" VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind Platform}" FontSize="12" Foreground="{ThemeResource AccentBlueBrush}" FontWeight="Medium" />
+                                        </Border>
+
+                                        <TextBlock Grid.Column="2" Text="{x:Bind Executable}" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+
+                                        <StackPanel Grid.Column="3" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind NotionPageId}">
+                                            <TextBlock Text="● 已绑定" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusGreenBrush}"
+                                                       Visibility="{x:Bind IsNotionBound, Mode=OneWay, Converter={StaticResource BoolToVisConverter}}" />
+                                            <TextBlock Text="● 未绑定" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusOrangeBrush}"
+                                                       Visibility="{x:Bind IsNotionBound, Mode=OneWay, Converter={StaticResource InverseBoolToVisConverter}}" />
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                            <Button Tag="{x:Bind}" Click="OnBindClicked" ToolTipService.ToolTip="重新绑定 Notion 总表游戏" Padding="6,4">
+                                                <FontIcon Glyph="&#xE71B;" FontSize="12" />
+                                            </Button>
+                                            <Button Tag="{x:Bind}" Click="OnUnbindClicked" ToolTipService.ToolTip="解除 Notion 关联" Padding="6,4">
+                                                <FontIcon Glyph="&#xE77A;" FontSize="12" />
+                                            </Button>
+                                            <Button Tag="{x:Bind}" Click="OnDeleteClicked" ToolTipService.ToolTip="彻底删除记录" Foreground="{ThemeResource StatusRedBrush}" Padding="6,4">
+                                                <FontIcon Glyph="&#xE74D;" FontSize="12" />
+                                            </Button>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsRepeater.ItemTemplate>
+                    </ItemsRepeater>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

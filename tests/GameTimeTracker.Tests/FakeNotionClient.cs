@@ -1,0 +1,72 @@
+using GameTimeTracker.Core.Interfaces;
+using GameTimeTracker.Core.Models;
+
+namespace GameTimeTracker.Tests;
+
+/// <summary>
+/// 可控的假 Notion 客户端：不联网，只按脚本返回数据并记录被归档的页面。
+/// </summary>
+internal sealed class FakeNotionClient : INotionClient
+{
+    public List<NotionGameCatalogItem> GameMasterItems { get; } = new();
+    public List<NotionDailyRecordItem> DailyRecords { get; } = new();
+
+    /// <summary>被归档（移入回收站）的页面 id。</summary>
+    public List<string> ArchivedPageIds { get; } = new();
+
+    /// <summary>被新建的每日记录（标题），用于断言"拉取失败时不应上传"。</summary>
+    public List<string> CreatedDailyRecordTitles { get; } = new();
+
+    /// <summary>设为 true 时归档调用抛异常，用于验证失败路径。</summary>
+    public bool FailArchive { get; set; }
+
+    /// <summary>设为 true 时查询每日记录抛异常，用于验证"拉取失败就不上传"。</summary>
+    public bool FailQueryDailyRecords { get; set; }
+
+    public void UpdateToken(string token) { }
+
+    public Task<bool> TestConnectionAsync() => Task.FromResult(true);
+
+    public Task<IReadOnlyList<NotionGameCatalogItem>> QueryGameMasterAsync(string databaseId)
+        => Task.FromResult<IReadOnlyList<NotionGameCatalogItem>>(GameMasterItems.ToList());
+
+    public Task<IReadOnlyList<NotionDailyRecordItem>> QueryDailyRecordsAsync(string databaseId)
+    {
+        if (FailQueryDailyRecords) throw new InvalidOperationException("模拟 Notion 查询失败");
+        return Task.FromResult<IReadOnlyList<NotionDailyRecordItem>>(DailyRecords.ToList());
+    }
+
+    public Task<string> CreateDailyRecordAsync(
+        string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId)
+    {
+        CreatedDailyRecordTitles.Add(gameTitle);
+        return Task.FromResult("created-page");
+    }
+
+    public List<(string PageId, int DurationMinutes)> UpdatedPages { get; } = new();
+
+    public Task<bool> UpdateDailyRecordAsync(
+        string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null)
+    {
+        UpdatedPages.Add((pageId, durationMinutes));
+        return Task.FromResult(true);
+    }
+
+    public List<(string PageId, string IconUrl)> IconUpdates { get; } = new();
+
+    public Task<bool> SetPageIconAsync(string pageId, string imageUrl)
+    {
+        IconUpdates.Add((pageId, imageUrl));
+        return Task.FromResult(true);
+    }
+
+    public Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle)
+        => Task.FromResult("created-master");
+
+    public Task<bool> ArchivePageAsync(string pageId)
+    {
+        if (FailArchive) throw new InvalidOperationException("模拟 Notion 归档失败");
+        ArchivedPageIds.Add(pageId);
+        return Task.FromResult(true);
+    }
+}

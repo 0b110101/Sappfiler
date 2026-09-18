@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentDialog
+    x:Class="GameTimeTracker.App.Dialogs.GameBindingDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="🎮 检测到新游戏"
+    PrimaryButtonText="确认绑定"
+    SecondaryButtonText="忽略"
+    DefaultButton="Primary"
+    CornerRadius="14"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="16" MinWidth="380" MaxWidth="440" Margin="0,10,0,0">
+        <!-- Game Identity Banner -->
+        <Border CornerRadius="12" Background="#154F8FFF" BorderBrush="{ThemeResource AccentBlueBrush}" BorderThickness="1" Padding="14">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Width="56" Height="56" CornerRadius="8" Background="#202433">
+                    <FontIcon Glyph="&#xE7FC;" FontSize="24" Foreground="{ThemeResource AccentBlueBrush}" />
+                </Border>
+
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                    <TextBlock x:Name="GameNameText" Text="Monster Hunter Wilds" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock x:Name="PlatformInfoText" Text="Steam · 2246340" FontSize="12" Foreground="{ThemeResource AccentBlueBrush}" />
+                    <TextBlock x:Name="ExecutableText" Text="MonsterHunterWilds.exe" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Prompt -->
+        <TextBlock Text="请选择对应的 Notion 记录：" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextSecondaryBrush}" />
+
+        <!-- Candidates Radio List -->
+        <StackPanel x:Name="CandidatesPanel" Spacing="8">
+            <RadioButton x:Name="Option1Radio" Content="怪物猎人：荒野 (推荐) - 96%" IsChecked="True" />
+            <RadioButton x:Name="Option2Radio" Content="怪物猎人：世界 - 35%" />
+            <RadioButton x:Name="Option3Radio" Content="怪物猎人物语2 - 28%" />
+            <RadioButton x:Name="OptionNewRadio" Content="➕ 新建游戏记录" />
+        </StackPanel>
+
+        <!-- Divider -->
+        <Border Height="1" Background="{ThemeResource CardBorderBrush}" Margin="0,4,0,4" />
+
+        <!-- Manual Catalog Search -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="或者从 Notion 游戏总表中搜索绑定：" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+            <AutoSuggestBox x:Name="CatalogSuggestBox" PlaceholderText="输入游戏名称搜索..."
+                            TextChanged="OnCatalogSuggestBoxTextChanged"
+                            SuggestionChosen="OnCatalogSuggestBoxSuggestionChosen" />
+            <TextBlock x:Name="SelectedManualGameText" FontSize="11" Foreground="{ThemeResource AccentBlueBrush}" Visibility="Collapsed" />
+        </StackPanel>
+    </StackPanel>
+</ContentDialog>

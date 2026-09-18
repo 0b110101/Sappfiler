@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="GameTimeTracker.App.Views.HomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:GameTimeTracker.App.Controls"
+    xmlns:vm="using:GameTimeTracker.App.ViewModels"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid x:Name="RootContentGrid" Padding="24,16,24,24" ColumnSpacing="20" RowSpacing="20" SizeChanged="OnRootGridSizeChanged">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ColLeft" Width="*" MinWidth="0" />
+                <ColumnDefinition x:Name="ColRight" Width="340" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition x:Name="RowRight" Height="0" />
+            </Grid.RowDefinitions>
+
+            <!-- ================= Left Main Column ================= -->
+            <StackPanel x:Name="LeftPanel" Grid.Column="0" Spacing="16">
+
+                <!-- 1. Current Game Hero Card -->
+                <Border CornerRadius="16"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="0">
+                    <Grid CornerRadius="16">
+                        <!-- Ambient Cover Background (when Notion cover exists)
+                             用 ImageBrush 而非 Image：Image 参与布局测量，cover 原图会把卡片撑大；
+                             画刷只负责绘制、不参与测量（外层 Border desired size = 0），
+                             卡片尺寸完全由内容决定 —— 有图无图尺寸一致。 -->
+                        <Border CornerRadius="16"
+                                Visibility="{x:Bind ViewModel.CurrentGameHeroBackgroundUrl, Mode=OneWay, Converter={StaticResource NullToVisConverter}}">
+                            <Border.Background>
+                                <ImageBrush ImageSource="{x:Bind ViewModel.CurrentGameHeroBackgroundUrl, Mode=OneWay, Converter={StaticResource StringToImageConverter}}"
+                                            Stretch="UniformToFill"
+                                            Opacity="0.18"
+                                            AlignmentX="Center" AlignmentY="Center" />
+                            </Border.Background>
+                        </Border>
+
+                        <!-- Subtle overlay tint to keep card readable.
+                             压暗层由 0.45 降到 0.38：原来这层把背景图洗成了灰雾，
+                             图像不透明度 0.14 -> 0.18、压暗层 0.45 -> 0.38，
+                             背景图的实际可见度 7.7% -> 11.2%（约 +45%），仍在“稍微”的量级内。 -->
+                        <Border Background="{ThemeResource CardBackgroundBrush}" Opacity="0.38"
+                                Visibility="{x:Bind ViewModel.CurrentGameHeroBackgroundUrl, Mode=OneWay, Converter={StaticResource NullToVisConverter}}" />
+
+                        <Grid Padding="22">
+                            <!-- When Game Is Running -->
+                            <Grid Visibility="{x:Bind ViewModel.IsGameRunning, Mode=OneWay, Converter={StaticResource BoolToVisConverter}}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Cover Image / Icon
+                                     容器不再给底色与描边：图标 PNG 自带透明边距时会露出深色底，
+                                     看上去就是给每张封面套了个黑色圆角框。只保留圆角用于裁切。 -->
+                                <Border Grid.Column="0" Width="88" Height="88" CornerRadius="12" Margin="0,0,18,0">
+                                    <Grid>
+                                        <Image Source="{x:Bind ViewModel.CurrentGameCoverPath, Mode=OneWay, Converter={StaticResource StringToImageConverter}}"
+                                               Stretch="UniformToFill"
+                                               Visibility="{x:Bind ViewModel.CurrentGameCoverPath, Mode=OneWay, Converter={StaticResource NullToVisConverter}}" />
+                                        <FontIcon Glyph="&#xE7FC;" FontSize="32" Foreground="{ThemeResource AccentBlueBrush}"
+                                                  Visibility="{x:Bind ViewModel.CurrentGameCoverPath, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}" />
+                                    </Grid>
+                                </Border>
+
+                                <!-- Details -->
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                                    <Border Background="#1534D399" BorderBrush="{ThemeResource StatusGreenBrush}" BorderThickness="1"
+                                            CornerRadius="10" Padding="8,2" HorizontalAlignment="Left">
+                                        <TextBlock Text="● 正在游玩" FontSize="12" Foreground="{ThemeResource StatusGreenBrush}" FontWeight="SemiBold" />
+                                    </Border>
+                                    <TextBlock Text="{x:Bind ViewModel.CurrentGameTitle, Mode=OneWay}" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind ViewModel.CurrentGameSubtitle, Mode=OneWay}" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0">
+                                        <FontIcon Glyph="&#xE916;" FontSize="16" Foreground="{ThemeResource AccentBlueBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Text="{x:Bind ViewModel.CurrentGameTimer, Mode=OneWay}" FontSize="24" FontWeight="Bold" FontFamily="Consolas" Foreground="{ThemeResource AccentBlueBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Platform Pill：Steam 游戏时整块可点，跳转对应商店页
+                                     HyperlinkButton 自带手型光标与悬停反馈；其它平台仍用静态 Border -->
+                                <Grid Grid.Column="2" VerticalAlignment="Top">
+                                    <HyperlinkButton Click="OnOpenStoreClicked"
+                                                     Visibility="{x:Bind ViewModel.CurrentGameStoreUrl, Mode=OneWay, Converter={StaticResource NullToVisConverter}}"
+                                                     Padding="0" Background="Transparent" BorderThickness="0" CornerRadius="12"
+                                                     ToolTipService.ToolTip="在 Steam 商店中打开">
+                                        <Border Background="#154F8FFF" BorderBrush="{ThemeResource AccentBlueBrush}" BorderThickness="1" CornerRadius="12" Padding="12,5">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE7FC;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                                <TextBlock Text="{x:Bind ViewModel.CurrentGameTag, Mode=OneWay}" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" FontWeight="SemiBold" />
+                                            </StackPanel>
+                                        </Border>
+                                    </HyperlinkButton>
+
+                                    <Border Visibility="{x:Bind ViewModel.CurrentGameStoreUrl, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}"
+                                            Background="#154F8FFF" BorderBrush="{ThemeResource AccentBlueBrush}" BorderThickness="1" CornerRadius="12" Padding="12,5">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon Glyph="&#xE7FC;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                            <TextBlock Text="{x:Bind ViewModel.CurrentGameTag, Mode=OneWay}" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" FontWeight="SemiBold" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                            </Grid>
+
+                            <!-- When Idle -->
+                            <Grid Visibility="{x:Bind ViewModel.IsGameRunning, Mode=OneWay, Converter={StaticResource InverseBoolToVisConverter}}" Padding="8">
+                                <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                                    <Border Width="64" Height="64" CornerRadius="12" Background="#154F8FFF">
+                                        <FontIcon Glyph="&#xE7FC;" FontSize="28" Foreground="{ThemeResource AccentBlueBrush}" />
+                                    </Border>
+                                    <StackPanel VerticalAlignment="Center" Spacing="3">
+                                        <Border Background="#158B8FA3" CornerRadius="10" Padding="8,2" HorizontalAlignment="Left">
+                                            <TextBlock Text="● 空闲中" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" FontWeight="SemiBold" />
+                                        </Border>
+                                        <TextBlock Text="暂无运行中的游戏" FontSize="18" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                        <TextBlock Text="后台持续自动监听 Steam / Epic / Xbox 平台游戏" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </Border>
+
+                <!-- 2. Metric Cards (Today & Week) -->
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Today Card -->
+                    <Border Grid.Column="0" CornerRadius="14"
+                            BorderBrush="{ThemeResource CardBorderBrush}"
+                            BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundBrush}"
+                            Padding="16,14">
+                        <StackPanel Spacing="6">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <Border Width="26" Height="26" CornerRadius="6" Background="#154F8FFF">
+                                        <FontIcon Glyph="&#xE787;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                    </Border>
+                                    <TextBlock Text="今日总计" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" FontWeight="Medium" />
+                                </StackPanel>
+                                <Border HorizontalAlignment="Right" Background="#1234D399" CornerRadius="8" Padding="7,2">
+                                    <TextBlock Text="{x:Bind ViewModel.TodayDeltaText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource StatusGreenBrush}" FontWeight="SemiBold" />
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="{x:Bind ViewModel.TodayDurationText, Mode=OneWay}" FontSize="30" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="0,2,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Week Card -->
+                    <Border Grid.Column="1" CornerRadius="14"
+                            BorderBrush="{ThemeResource CardBorderBrush}"
+                            BorderThickness="1"
+                            Background="{ThemeResource CardBackgroundBrush}"
+                            Padding="16,14">
+                        <StackPanel Spacing="6">
+                            <Grid>
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <Border Width="26" Height="26" CornerRadius="6" Background="#157C5CFC">
+                                        <FontIcon Glyph="&#xE787;" FontSize="13" Foreground="{ThemeResource AccentPurpleBrush}" />
+                                    </Border>
+                                    <TextBlock Text="本周总计" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" FontWeight="Medium" />
+                                </StackPanel>
+                                <Border HorizontalAlignment="Right" Background="#1234D399" CornerRadius="8" Padding="7,2">
+                                    <TextBlock Text="{x:Bind ViewModel.WeekDeltaText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource StatusGreenBrush}" FontWeight="SemiBold" />
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="{x:Bind ViewModel.WeekDurationText, Mode=OneWay}" FontSize="30" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="0,2,0,0" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- 3. Heatmap Card (52-Week 1-Year Activity Heatmap) -->
+                <Border CornerRadius="14"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="18">
+                    <StackPanel Spacing="12">
+                        <!-- Heatmap Top Bar -->
+                        <Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Border Width="26" Height="26" CornerRadius="6" Background="#154F8FFF">
+                                    <FontIcon Glyph="&#xE809;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                </Border>
+                                <TextBlock Text="游戏热力图" FontSize="16" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <TextBlock Text="{x:Bind ViewModel.HeatmapActiveDaysText, Mode=OneWay}"
+                                       FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}"
+                                       HorizontalAlignment="Right" VerticalAlignment="Center" />
+                        </Grid>
+
+                        <!-- Dedicated 52-Week Activity Heatmap Component -->
+                        <controls:HeatmapControl HeatmapData="{x:Bind ViewModel.ActivityHeatmap, Mode=OneWay}" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+
+                <!-- 4. Recent Records Table -->
+                <Border CornerRadius="14"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="18">
+                    <StackPanel Spacing="12">
+                        <Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Border Width="26" Height="26" CornerRadius="6" Background="#154F8FFF">
+                                    <FontIcon Glyph="&#xE81C;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                </Border>
+                                <TextBlock Text="最近记录" FontSize="16" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <Button Command="{x:Bind ViewModel.ViewAllHistoryCommand}" HorizontalAlignment="Right" Background="Transparent" BorderThickness="0" Padding="6,2">
+                                <TextBlock Text="查看全部 &gt;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" FontWeight="Medium" />
+                            </Button>
+                        </Grid>
+
+                        <!-- Table Header -->
+                        <Grid Padding="8,4" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="0,0,0,1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="100" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="90" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="日期" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                            <TextBlock Grid.Column="1" Text="游戏" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                            <TextBlock Grid.Column="2" Text="时长" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                            <TextBlock Grid.Column="3" Text="状态" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </Grid>
+
+                        <!-- Table Rows -->
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.RecentRecords, Mode=OneWay}">
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="vm:RecentRecordViewModel">
+                                    <Grid Padding="8,8" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="0,0,0,0.5">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="100" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="90" />
+                                            <ColumnDefinition Width="90" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Bind DateText, Mode=OneWay}" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0" Width="28" Height="28" CornerRadius="6" Margin="0,0,8,0">
+                                                <Grid>
+                                                    <Image Source="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource StringToImageConverter}}" Stretch="UniformToFill"
+                                                           Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource NullToVisConverter}}" />
+                                                    <FontIcon Glyph="&#xE7FC;" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}"
+                                                              Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}" />
+                                                </Grid>
+                                            </Border>
+                                            <TextBlock Grid.Column="1" Text="{x:Bind GameName, Mode=OneWay}" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        </Grid>
+                                        <TextBlock Grid.Column="2" Text="{x:Bind DurationText, Mode=OneWay}" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="3" Text="{x:Bind StatusText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind StatusBrush, Mode=OneWay}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </StackPanel>
+                </Border>
+
+            </StackPanel>
+
+            <!-- Column 1: Right Dashboard Panel -->
+            <StackPanel x:Name="RightPanel" Grid.Column="1" Spacing="16">
+
+                <!-- 1. Today Games Card (Top 3) -->
+                <Border CornerRadius="14"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="16,14">
+                    <StackPanel Spacing="10">
+                        <Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Border Width="26" Height="26" CornerRadius="6" Background="#154F8FFF">
+                                    <FontIcon Glyph="&#xE7FC;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
+                                </Border>
+                                <TextBlock Text="今日游戏" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <Button Command="{x:Bind ViewModel.ManageMappingsCommand}" HorizontalAlignment="Right" Background="Transparent" BorderThickness="0" Padding="4,2">
+                                <TextBlock Text="查看全部 &gt;" FontSize="12" Foreground="{ThemeResource AccentBlueBrush}" />
+                            </Button>
+                        </Grid>
+
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.TodayGames, Mode=OneWay}">
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="vm:GameListItemViewModel">
+                                    <Grid Padding="0,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- 36x36 Game Poster Thumbnail -->
+                                        <Border Grid.Column="0" Width="32" Height="32" CornerRadius="6" Margin="0,2,0,0" VerticalAlignment="Top">
+                                            <Grid>
+                                                <Image Source="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource StringToImageConverter}}" Stretch="UniformToFill"
+                                                       Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource NullToVisConverter}}" />
+                                                <FontIcon Glyph="&#xE7FC;" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}"
+                                                          Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}" />
+                                            </Grid>
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1" Spacing="4" Margin="8,0,0,0" VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind Title, Mode=OneWay}" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind DurationText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            <ProgressBar Value="{x:Bind ProgressPercentage, Mode=OneWay}"
+                                                         Maximum="100"
+                                                         Height="5"
+                                                         CornerRadius="2.5"
+                                                         Foreground="{ThemeResource ProgressBarGradientBrush}"
+                                                         Background="{ThemeResource CardBorderBrush}" />
+                                        </StackPanel>
+
+                                        <!-- Percentage & Chevron -->
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="8,0,0,0">
+                                            <TextBlock Text="{x:Bind PercentageText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                                            <FontIcon Glyph="&#xE76C;" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </StackPanel>
+                </Border>
+
+                <!-- 2. Compact Notion Sync Status Card -->
+                <Border CornerRadius="14"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="16,14">
+                    <StackPanel Spacing="10">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Border Width="26" Height="26" CornerRadius="6" Background="#1534D399">
+                                <FontIcon Glyph="&#xE753;" FontSize="13" Foreground="{ThemeResource StatusGreenBrush}" />
+                            </Border>
+                            <TextBlock Text="同步状态" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse Width="8" Height="8" Fill="{ThemeResource StatusGreenBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="{x:Bind ViewModel.NotionStatusText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="{x:Bind ViewModel.NotionLastSyncText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                        </StackPanel>
+
+                        <Button Command="{x:Bind ViewModel.SyncNowCommand}"
+                                HorizontalAlignment="Stretch"
+                                CornerRadius="8"
+                                Padding="12,7"
+                                Background="#154F8FFF"
+                                BorderBrush="{ThemeResource AccentBlueBrush}"
+                                BorderThickness="1">
+                            <Grid HorizontalAlignment="Stretch">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE72C;" FontSize="12" Foreground="{ThemeResource AccentBlueBrush}" />
+                                    <TextBlock Text="立即同步" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" FontWeight="SemiBold" />
+                                </StackPanel>
+                                <FontIcon Glyph="&#xE76C;" FontSize="11" Foreground="{ThemeResource AccentBlueBrush}" HorizontalAlignment="Right" />
+                            </Grid>
+                        </Button>
+                    </StackPanel>
+                </Border>
+
+                <!-- 3. Consecutive Gaming Streak Achievement Card (Fixed Height 305px, Horizontal Layout) -->
+                <Border Height="305"
+                        CornerRadius="16"
+                        BorderBrush="{ThemeResource CardBorderBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundBrush}"
+                        Padding="20,18">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Card Header -->
+                        <Grid Grid.Row="0">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Border Width="28" Height="28" CornerRadius="8" Background="#187C5CFC">
+                                    <FontIcon Glyph="&#xE735;" FontSize="14" Foreground="{ThemeResource AccentPurpleBrush}" />
+                                </Border>
+                                <TextBlock Text="连续游玩里程碑" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <!-- 成就体系 (Vertically Centered + Rich ToolTip) -->
+                            <Border HorizontalAlignment="Right" VerticalAlignment="Center" Background="#127C5CFC" CornerRadius="10" Padding="8,4">
+                                <ToolTipService.ToolTip>
+                                    <ToolTip Placement="Bottom" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="14,12">
+                                        <StackPanel Spacing="8" MaxWidth="280">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE735;" FontSize="13" Foreground="{ThemeResource AccentPurpleBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="连续游玩段位成就体系" FontSize="14" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                            </StackPanel>
+                                            <TextBlock Text="保持每日游玩，按连续天数自动解锁对应段位称号：" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            <MenuFlyoutSeparator Margin="-6,2,-6,2" />
+                                            <Grid RowSpacing="6">
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                </Grid.RowDefinitions>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <TextBlock Grid.Row="0" Grid.Column="0" Text="🏆 Lv.5" FontSize="12" FontWeight="Bold" Foreground="#F59E0B" />
+                                                <TextBlock Grid.Row="0" Grid.Column="1" Text="传说的无伤通关者" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Row="0" Grid.Column="2" Text="≥ 53天" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+
+                                                <TextBlock Grid.Row="1" Grid.Column="0" Text="💎 Lv.4" FontSize="12" FontWeight="Bold" Foreground="#7C5CFC" />
+                                                <TextBlock Grid.Row="1" Grid.Column="1" Text="全成就全收集狂人" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Row="1" Grid.Column="2" Text="31~52天" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+
+                                                <TextBlock Grid.Row="2" Grid.Column="0" Text="⭐ Lv.3" FontSize="12" FontWeight="Bold" Foreground="#4F8FFF" />
+                                                <TextBlock Grid.Row="2" Grid.Column="1" Text="掌握彩蛋位置的知情人" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Row="2" Grid.Column="2" Text="16~30天" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+
+                                                <TextBlock Grid.Row="3" Grid.Column="0" Text="🌿 Lv.2" FontSize="12" FontWeight="Bold" Foreground="#10B981" />
+                                                <TextBlock Grid.Row="3" Grid.Column="1" Text="背包塞满草药的玩家" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Row="3" Grid.Column="2" Text="6~15天" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+
+                                                <TextBlock Grid.Row="4" Grid.Column="0" Text="🎮 Lv.1" FontSize="12" FontWeight="Bold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                                <TextBlock Grid.Row="4" Grid.Column="1" Text="愿望单收集家" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Margin="6,0,0,0" />
+                                                <TextBlock Grid.Row="4" Grid.Column="2" Text="0~5天" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </ToolTip>
+                                </ToolTipService.ToolTip>
+                                <TextBlock Text="成就体系" FontSize="12" Foreground="{ThemeResource AccentPurpleBrush}" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+
+                        <!-- Middle: 左右结构 (勋章图标 on left, x天当前连续记录 on right) -->
+                        <Grid Grid.Row="1" VerticalAlignment="Center" Margin="0,8,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- 勋章图标 -->
+                            <Border Grid.Column="0" Width="76" Height="76" CornerRadius="38" Background="#124F8FFF" BorderBrush="#354F8FFF" BorderThickness="1.5" Margin="4,0,16,0">
+                                <Image Width="52" Height="52" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Image.Source>
+                                        <SvgImageSource UriSource="ms-appx:///Assets/achievements_completed.svg" RasterizePixelWidth="104" RasterizePixelHeight="104" />
+                                    </Image.Source>
+                                </Image>
+                            </Border>
+
+                            <!-- x天当前连续记录 (Tight alignment, no baseline gap) -->
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock Text="{x:Bind ViewModel.StreakDays, Mode=OneWay}" FontSize="38" FontWeight="Bold" FontFamily="Segoe UI Variable Display" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Bottom" />
+                                    <TextBlock Text="天" FontSize="17" FontWeight="Bold" Foreground="{ThemeResource AccentBlueBrush}" VerticalAlignment="Bottom" Margin="0,0,0,6" />
+                                </StackPanel>
+                                <TextBlock Text="当前连续记录" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <TextBlock Text="坚持每天游玩，点亮专属成就" FontSize="12" Foreground="{ThemeResource AccentPurpleBrush}" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Bottom: Milestone Status Pill (Moved up 10px via Margin="0,-10,0,0") -->
+                        <Border Grid.Row="2" Margin="0,-10,0,0" Background="#104F8FFF" BorderBrush="#254F8FFF" BorderThickness="1" CornerRadius="12" Padding="14,12">
+                            <StackPanel Spacing="8">
+                                <Grid>
+                                    <TextBlock Text="{x:Bind ViewModel.NextMilestoneText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                    <TextBlock Text="{x:Bind ViewModel.StreakRankTitle, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource AccentBlueBrush}" HorizontalAlignment="Right" FontWeight="Medium" />
+                                </Grid>
+                                <ProgressBar Value="{x:Bind ViewModel.StreakDays, Mode=OneWay}" Maximum="{x:Bind ViewModel.NextMilestoneTarget, Mode=OneWay}" Height="6" CornerRadius="3" Foreground="{ThemeResource ProgressBarGradientBrush}" Background="{ThemeResource CardBorderBrush}" />
+                                <TextBlock Text="保持热爱，让每次游玩都有迹可循。" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+            </StackPanel>
+
+        </Grid>
+    </ScrollViewer>
+</Page>

@@ -1,0 +1,40 @@
+# Config and secrets
+config.json
+*.env
+
+# SQLite Databases & WAL files
+*.db
+*.db-wal
+*.db-shm
+gametime.db*
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+
+# PyInstaller / Build
+build/
+dist/
+*.spec
+
+# .NET / WinUI 3
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# IDE
+.vscode/
+.idea/

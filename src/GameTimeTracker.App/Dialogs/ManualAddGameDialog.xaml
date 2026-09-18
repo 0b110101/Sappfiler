@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentDialog
+    x:Class="GameTimeTracker.App.Dialogs.ManualAddGameDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="🎮 手动添加游戏"
+    PrimaryButtonText="确认添加"
+    CloseButtonText="取消"
+    DefaultButton="Primary"
+    CornerRadius="14"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="16" MinWidth="380" MaxWidth="440" Margin="0,10,0,0">
+        <TextBlock Text="未被主流平台（Steam/Epic/Xbox等）自动扫描到的游戏，可在此直接手动添加路径进行监控。"
+                   FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+
+        <!-- Game Name Input -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="游戏名称 *" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+            <TextBox x:Name="GameNameBox" PlaceholderText="例如：博德之门3" />
+        </StackPanel>
+
+        <!-- Executable Path Input -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="可执行文件 (.exe) 或安装目录 *" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="PathBox" Grid.Column="0" PlaceholderText="例如：D:\Games\BaldursGate3\bin\bg3.exe" />
+                <Button Grid.Column="1" Click="OnBrowseClicked" Padding="12,6">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xED25;" FontSize="12" />
+                        <TextBlock Text="浏览..." FontSize="12" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </StackPanel>
+
+        <TextBlock x:Name="ErrorText" FontSize="11" Foreground="{ThemeResource StatusRedBrush}" Visibility="Collapsed" />
+    </StackPanel>
+</ContentDialog>

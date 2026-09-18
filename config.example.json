@@ -1,0 +1,31 @@
+{
+  "notion": {
+    "token": "your_token",
+    "game_database_id": "your_game_database_id",
+    "daily_database_id": "your_daily_database_id",
+    "game_title_property": "游戏名称",
+    "daily_date_property": "日期",
+    "daily_game_relation_property": "游戏",
+    "daily_playtime_property": "时长",
+    "auto_create_games": false
+  },
+  "tracker": {
+    "process_scan_interval_seconds": 5,
+    "session_heartbeat_interval_seconds": 15,
+    "sync_interval_minutes": 15,
+    "overlap_mode": "parallel",
+    "fuzzy_candidate_threshold": 80.0,
+    "fuzzy_score_gap_threshold": 15.0
+  },
+  "database": {
+    "db_path": "gametime.db"
+  },
+  "custom_paths": {
+    "steam_libraries": [],
+    "epic_manifests": [],
+    "custom_game_directories": [
+      "D:\\Games",
+      "E:\\Games"
+    ]
+  }
+}

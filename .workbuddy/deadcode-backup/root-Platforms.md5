@@ -1,0 +1,9 @@
+c05523ddfb04544177ff58e9f22e054a *Platforms/EaDetector.cs
+57c7f890611f3b4edab4625af36b383f *Platforms/EpicDetector.cs
+97a78e3ca0043e88635293dc9c36032b *Platforms/GameLibraryManager.cs
+c39c69a643e4bdc3879e3526a8c635be *Platforms/GogDetector.cs
+3431ca281e9cc9a17e462ced6cdda773 *Platforms/IPlatformDetector.cs
+a3eccb020db0b08a93d7c8a3313c7653 *Platforms/SteamDetector.cs
+bf45ee3b8411172c0cd53c8aedb11a91 *Platforms/UbisoftDetector.cs
+85d58fc89d2b1f94fbf0a75b8b1cf918 *Platforms/WeGameDetector.cs
+935773b0d487f9f1e6b6f724db9dc1ca *Platforms/XboxDetector.cs

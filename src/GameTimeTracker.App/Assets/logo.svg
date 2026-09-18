@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+
+    <!-- Needle gradient: blue → purple -->
+    <linearGradient id="needleGrad" x1="256" y1="268" x2="342" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#4f8fff"/>
+      <stop offset="100%" stop-color="#7c5cfc"/>
+    </linearGradient>
+
+    <!-- Optional: subtle ring gradient for depth -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#ccccff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ccccff" stop-opacity="1"/>
+    </linearGradient>
+
+  </defs>
+
+  <!-- ░░ Background: dark navy rounded square ░░ -->
+  <rect width="512" height="512" rx="108" ry="108" fill="#1a1b2e"/>
+
+  <!-- ░░ Clock ring ░░
+       Center: 256, 250 | Radius: 158 | Stroke: 17px
+       Color: #ccccff lavender at 88% opacity                    -->
+  <circle
+    cx="256" cy="250" r="158"
+    fill="none"
+    stroke="url(#ringGrad)"
+    stroke-width="17"
+    stroke-opacity="0.88"/>
+
+  <!-- ░░ 12 o'clock tick mark ░░
+       Sits at the top of the ring (y=92), pointing inward       -->
+  <line
+    x1="256" y1="80"
+    x2="256" y2="107"
+    stroke="#ccccff"
+    stroke-width="17"
+    stroke-linecap="round"
+    stroke-opacity="0.88"/>
+
+  <!-- ░░ Abstract game controller outline ░░
+       Fully original shape. Centered at (256, 260).
+       Width ≈ 202px, Height ≈ 112px. Stroke-only, no fill.
+       Both grips fully visible inside the ring.                  -->
+  <path
+    d="
+      M 160,258
+      C 151,246 148,228 156,218
+      C 164,208 180,204 196,204
+      C 213,204 229,212 244,214
+      L 268,214
+      C 283,212 299,204 316,204
+      C 332,204 348,208 356,218
+      C 364,228 361,246 352,258
+      C 357,265 361,278 358,292
+      C 355,306 345,315 333,315
+      C 321,315 311,306 309,293
+      L 306,276
+      C 291,273 274,271 256,271
+      C 238,271 221,273 206,276
+      L 203,293
+      C 201,306 191,315 179,315
+      C 167,315 157,306 154,292
+      C 151,278 155,265 160,258
+      Z"
+    fill="none"
+    stroke="#ccccff"
+    stroke-width="16"
+    stroke-opacity="0.88"
+    stroke-linejoin="round"
+    stroke-linecap="round"/>
+
+  <!-- ░░ Center pivot dot (analog stick hint) ░░ -->
+  <circle cx="256" cy="264" r="10" fill="#6b80ff"/>
+
+  <!-- ░░ Sweep needle / clock hand ░░
+       From center pivot → upper-right (~1 o'clock direction)
+       Gradient: #4f8fff blue at base → #7c5cfc purple at tip    -->
+  <line
+    x1="256" y1="264"
+    x2="342" y2="170"
+    stroke="url(#needleGrad)"
+    stroke-width="16"
+    stroke-linecap="round"/>
+
+</svg>

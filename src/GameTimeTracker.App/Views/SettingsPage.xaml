@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="GameTimeTracker.App.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer Padding="24" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="20" MaxWidth="640" HorizontalAlignment="Left">
+            <StackPanel Spacing="4">
+                <TextBlock Text="应用程序设置" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                <TextBlock Text="配置 Notion API 凭证、数据库 ID 以及监控轮询参数" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+            </StackPanel>
+
+            <!-- Test Connection InfoBar -->
+            <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="True" />
+
+            <!-- Appearance & Theme Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="外观与主题" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="深色模式 (Dark Theme)" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="切换专属深色星空主题" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="ThemeToggle" Grid.Column="1" Toggled="OnThemeToggled" OnContent="已开启" OffContent="已关闭" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Notion Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Notion 同步配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+
+                    <PasswordBox x:Name="TokenInput" Header="Notion Token" PlaceholderText="secret_xxxxxxxxxxxxxxxx"
+                                 MaxWidth="520" HorizontalAlignment="Stretch" />
+                    <TextBox x:Name="GameDbInput" Header="游戏总表 Database ID" PlaceholderText="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+                    <TextBox x:Name="DailyDbInput" Header="每日时长表 Database ID" PlaceholderText="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                        <Button Click="OnSaveClicked" Content="保存设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button Click="OnTestConnectionClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Tracker Performance Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="后台监控参数" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="进程轮询心跳: 5 秒 (极低 CPU 消耗)" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                    <TextBlock Text="本地数据库: SQLite WAL 高性能模式" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                    <TextBlock Text="系统托盘: 点击右上角 × 关闭按钮自动最小化至托盘" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+
+            <!-- Storage Location Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="存档位置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="数据库与封面缓存的存放位置。更改后自动把现有数据复制到新位置，重启程序生效。" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="StoragePathText" Grid.Column="0" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}"
+                                   TextWrapping="Wrap" VerticalAlignment="Center" FontFamily="Consolas" />
+                        <Button x:Name="ChangeStorageBtn" Grid.Column="1" Content="更改…" CornerRadius="8" Padding="14,6"
+                                Margin="12,0,0,0" Click="OnChangeStorageClicked" />
+                        <Button x:Name="ResetStorageBtn" Grid.Column="2" Content="恢复默认" CornerRadius="8" Padding="14,6"
+                                Margin="8,0,0,0" Click="OnResetStorageClicked" Visibility="Collapsed" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

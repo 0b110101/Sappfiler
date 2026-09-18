@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "GameTimeTracker.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "GameTimeTracker.App (Unpackaged)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "GAMETIME_DB_PATH": "E:\\gemini\\vi\\gametime.db"
+      }
+    }
+  }
+}
