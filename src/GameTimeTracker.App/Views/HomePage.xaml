@@ -9,8 +9,19 @@
     xmlns:vm="using:GameTimeTracker.App.ViewModels"
     mc:Ignorable="d">
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <Grid x:Name="RootContentGrid" Padding="24,16,24,24" ColumnSpacing="20" RowSpacing="20" SizeChanged="OnRootGridSizeChanged">
+    <!-- ⚠️ HorizontalScrollMode="Disabled" 不能省。
+         ScrollViewer 的 BarVisibility 与 ScrollMode 是两个独立开关：只写
+         BarVisibility="Disabled" 时滚动条确实不出现，但 ScrollMode 仍是默认的
+         Enabled → CanHorizontallyScroll=true → **测量子元素时给的是无限宽**。
+         于是热力图那 52 周 × 16px = 832px 的内容会把这个 Grid 撑到 ~1250px，
+         再叠加上下面的窄/宽布局判定（< 880 才切窄），就会在"热力图数据加载出来"的
+         瞬间把右列甩到屏幕外 —— 表现为"数据一多，右边的区块就掉了"。
+         见 2026-09-19 用户反馈的截图。 -->
+    <ScrollViewer x:Name="RootScroll"
+                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  HorizontalScrollMode="Disabled" VerticalScrollMode="Enabled"
+                  SizeChanged="OnRootGridSizeChanged">
+        <Grid x:Name="RootContentGrid" Padding="24,16,24,24" ColumnSpacing="20" RowSpacing="20">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="ColLeft" Width="*" MinWidth="0" />
                 <ColumnDefinition x:Name="ColRight" Width="340" />

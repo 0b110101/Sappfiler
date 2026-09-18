@@ -212,4 +212,54 @@ public class NotionWireFormatTests
             $"2 位小数应能精确还原 1..1440 全部分钟值，实际有 {mismatches.Count} 个不一致："
             + string.Join("、", mismatches.Take(5)));
     }
+
+    /// <summary>
+    /// 用户手工写的标题形如「致命躯壳2.2h」—— 时长紧贴名字、没有 · 分隔。
+    /// 旧后缀正则只认「名字 · 2.2 h」和「名字 (42分)」，于是一整串被当成游戏名；
+    /// 拉取时为每条这样的记录新建一个**永远绑不上总表**的游戏行，
+    /// 「待处理」的数字和「映射库全是未绑定」就是这么来的（2026-09-19 用户反馈）。
+    /// </summary>
+    [Fact]
+    public async Task QueryDailyRecords_ShouldStripHandwrittenDurationSuffix()
+    {
+        const string response = """
+        {
+          "results": [
+            {
+              "id": "d1",
+              "properties": {
+                "游戏动态": { "type": "title", "title": [ { "plain_text": "致命躯壳2.2h", "text": { "content": "致命躯壳2.2h" } } ] },
+                "日期": { "type": "date", "date": { "start": "2026-07-16" } },
+                "单次时长": { "type": "number", "number": 2.2 }
+              }
+            },
+            {
+              "id": "d2",
+              "properties": {
+                "游戏动态": { "type": "title", "title": [ { "plain_text": "不思议迷宫 · 0.7 h", "text": { "content": "不思议迷宫 · 0.7 h" } } ] },
+                "日期": { "type": "date", "date": { "start": "2026-07-16" } },
+                "单次时长": { "type": "number", "number": 0.7 }
+              }
+            },
+            {
+              "id": "d3",
+              "properties": {
+                "游戏动态": { "type": "title", "title": [ { "plain_text": "三国志11", "text": { "content": "三国志11" } } ] },
+                "日期": { "type": "date", "date": { "start": "2026-07-16" } },
+                "单次时长": { "type": "number", "number": 1 }
+              }
+            }
+          ],
+          "has_more": false
+        }
+        """;
+        var (client, _) = MakeClient(response);
+
+        var records = await client.QueryDailyRecordsAsync("db-1");
+
+        records.Should().HaveCount(3);
+        records[0].GameTitle.Should().Be("致命躯壳", "手写的紧贴时长后缀必须剥掉");
+        records[1].GameTitle.Should().Be("不思议迷宫", "程序写的「· X h」后缀照旧要剥");
+        records[2].GameTitle.Should().Be("三国志11", "以数字结尾的真名不能被误剥（数字后必须紧跟 h/min）");
+    }
 }

@@ -21,12 +21,21 @@ namespace GameTimeTracker.Infrastructure.Notion;
 internal static class DailyRecordTitle
 {
     /// <summary>
-    /// 标题里的时长后缀，形如「不思议迷宫 · 42 min」；
-    /// 同时兼容早期格式「不思议迷宫 (42分)」——Notion 里可能还留着旧行。
+    /// 标题里的时长后缀。三种形态都要认，因为用户的表里混着程序写的和手工写的：
+    ///   ① 程序写的新格式  「不思议迷宫 · 0.7 h」
+    ///   ② 程序写的旧格式  「不思议迷宫 (42分)」—— Notion 里可能还留着旧行
+    ///   ③ **用户手工写的紧贴格式** 「致命躯壳2.2h」「黑旗10.1h」—— 没有分隔符
     /// 从右往左锚定：游戏名自身可能含 · 或 |，不能从左切。
+    ///
+    /// ⚠️ ③ 是 2026-09-19 补的。原先只认 ①②，于是 "致命躯壳2.2h" 整串被当成游戏名，
+    ///    拉取时每条这样的记录都会新建一个**永远绑不上总表**的游戏行 ——
+    ///    用户看到的「待处理」堆积和「映射库全是未绑定」就是这么来的。
+    ///
+    /// 为什么这么写是安全的：数字后面必须紧跟 min/h，所以
+    /// "三国志11" / "F1 2023" / "Half-Life 2" 这类以数字结尾的真名不会被误剥。
     /// </summary>
     internal static readonly System.Text.RegularExpressions.Regex SuffixRegex =
-        new(@"\s*(?:[·|]\s*\d+(?:\.\d+)?\s*(?:min|h)|\(\s*\d+\s*分\s*\))\s*$",
+        new(@"\s*(?:(?:[·|]\s*)?\d+(?:\.\d+)?\s*(?:min|h)|\(\s*\d+\s*分\s*\))\s*$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase |
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
@@ -45,7 +54,7 @@ internal static class DailyRecordTitle
         => Math.Round(durationMinutes / 60.0, 2);
 
     /// <summary>
-    /// 拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。
+    /// 拼装每日记录标题：时长以小时显示（2 位小数），如「Master Key · 0.7 h」。
     /// 参数是**游戏名**，不是拼好的标题 —— 传完整标题进来会拼出「X · 0.7 h · 0.7 h」。
     /// </summary>
     internal static string Build(string gameName, int durationMinutes)
@@ -1069,6 +1078,15 @@ public class NotionSyncService : INotionSyncService
                 if (string.IsNullOrWhiteSpace(game.NotionPageId)) continue;
                 if (string.IsNullOrWhiteSpace(item.NotionPageId)) continue;
 
+                // ⚠️ 时长为 0 的记录**一律不参与回刷**。
+                // 回刷没法"只改标题"：标题串里就含时长（「游戏名 · X h」），
+                // UpdateDailyRecordAsync 必须同时写标题和「单次时长」属性。
+                // 于是拿本地的 0 去回刷 = 把 Notion 上原本的时长覆盖成 0，
+                // 页面标题也变成「游戏名 · 0 h」——**时长数据就这么没了**。
+                // 2026-09-19 QA 反馈的「喵门镖局 7/17 时长被清零」正是这个特征
+                // （该行标题恰好是程序格式「喵门镖局 · 0 h」，不是她手写的格式）。
+                if (item.DurationMinutes <= 0) continue;
+
                 var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
 
                 var expectedTitle = DailyRecordTitle.Build(displayName, item.DurationMinutes);
@@ -1470,6 +1488,24 @@ public class NotionSyncService : INotionSyncService
                     .ToHashSet();
 
                 var localSynced = await _repo.GetSyncedDailySummariesAsync();
+
+                // ⚠️ 保护：远端记录数骤减一半以上 → 判定为"这轮拉取不完整"，整段跳过。
+                //
+                // 下面只凭"本地这条的 page_id 不在远端集合里"就归档 + 删除本地记录，
+                // 前提是远端集合**完整**。而 QueryDailyRecordsAsync 会跳过解析不出来的行
+                // （日期属性为空、或标题与关联游戏都为空）—— 那些行的 page_id 自然不在
+                // remoteIds 里，本地对应记录就会被当成"Notion 已删除"而误删，
+                // 连带把它记录的时长一起抹掉。
+                // 宁可漏删（下一轮远端恢复正常后照样会删），也不能误删。
+                // 样本少于 20 条时不启用，避免小数据量下的正常删除被拦住。
+                if (localSynced.Count >= 20 && remoteDaily.Count * 2 < localSynced.Count)
+                {
+                    AppLog.Warn($"删除对账：远端只拉到 {remoteDaily.Count} 条，本地已同步 {localSynced.Count} 条，" +
+                                "疑似拉取不完整，本轮跳过（宁可漏删，不误删）");
+                    result.Skipped = true;
+                    return result;
+                }
+
                 // 只处理「本地认为已同步」的行：pending / error 的行本来就可能还没进 Notion，
                 // 不在远端集合里属于正常，不能删。
                 var orphanRows = localSynced

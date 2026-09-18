@@ -862,6 +862,15 @@ public class SqliteRepository : IDatabaseRepository
 
                         if (game == null)
                         {
+                            // 再用**总表条目名**认一条尚未绑定的本地行。
+                            // 这是「Notion 里手动补了 relation，程序里仍显示未绑定」的解法：
+                            // 记录标题是用户手写的（常带「2.2h」「通关」等噪音），
+                            // 但 relation 指向的总表条目名是权威的官方名。
+                            game = await FindUnboundGameByNameAsync(conn, catItem.Name);
+                        }
+
+                        if (game == null)
+                        {
                             var newId = await conn.ExecuteScalarAsync<int>(
                                 """
                                 INSERT INTO games (platform, platform_id, name, executable, executable_path, notion_page_id, status, created_at, updated_at)
@@ -880,7 +889,10 @@ public class SqliteRepository : IDatabaseRepository
             {
                 game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
                     "SELECT * FROM games WHERE LOWER(name) = LOWER(@title) LIMIT 1;",
-                    new { title = item.GameTitle });
+                    new { title = item.GameTitle })
+                    // 精确同名找不到时按归一化再认一次
+                    // （消掉标点、大小写、罗马数字、年份/版本后缀、时长后缀的差异）
+                    ?? await FindUnboundGameByNameAsync(conn, item.GameTitle);
             }
 
             if (game == null)
@@ -1097,6 +1109,45 @@ public class SqliteRepository : IDatabaseRepository
             Platform = (string)r.platform,
             PlatformId = (string)r.platform_id
         };
+    }
+
+    /// <summary>
+    /// 按**归一化名字**在本地找一条尚未绑定的游戏行。
+    ///
+    /// 用途：把 Notion 侧解析出来的官方名（总表条目名）对到本地已有的游戏上，
+    /// 避免因为写法差异（标点、大小写、罗马数字、年份/版本后缀、时长后缀）重复建行。
+    ///
+    /// ⚠️ 只匹配**未绑定**的行。已绑定的行各有归属，不能被抢。
+    ///
+    /// 为什么必须有这一步（2026-09-19 用户反馈）：
+    /// 用户手写的每日记录标题是「黑旗10.1h 通关」这种形态，
+    /// 而本地游戏很可能是「Assassin's Creed IV Black Flag」或「刺客信条4：黑旗」，
+    /// 两者用精确同名比对永远对不上 —— 于是每次拉取都新建一行，
+    /// 老行永远停在「未绑定」，用户看到的就是「映射库里一堆未绑定」
+    /// 和「待处理」上不断上涨的数字。
+    /// 而 relation 指向的总表条目名是权威的，用它去认就有落点。
+    /// </summary>
+    private static async Task<GameRecord?> FindUnboundGameByNameAsync(SqliteConnection conn, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+
+        var target = GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(name);
+        if (string.IsNullOrEmpty(target)) return null;
+
+        var unbound = await conn.QueryAsync<GameRecord>(
+            "SELECT * FROM games WHERE coalesce(notion_page_id, '') = '';");
+
+        foreach (var g in unbound)
+        {
+            if (string.IsNullOrWhiteSpace(g.Name)) continue;
+
+            // 名字与可执行文件都试：有些本地行的 name 是进程名，exe 才是真名（或反之）
+            if (GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(g.Name) == target) return g;
+            if (!string.IsNullOrWhiteSpace(g.Executable) &&
+                GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(g.Executable) == target) return g;
+        }
+
+        return null;
     }
 
     // ----------------- Notion Game Master Cache -----------------
