@@ -107,6 +107,37 @@
   把副本库的 `settings.notion_token` 清空（断开 Notion）+ 给目标游戏挂一个有 cover_url 的 page_id 即可离线复现。
 
 
+## 同步状态机的坑：非终态 + 粗筛条件 = 永远重试（2026-09-18，同类踩了 3 次）
+`daily_summary.sync_status` 取值：`pending` / `synced` / `unmapped` / `error`。
+
+- **`unmapped` = "已推到每日时长表，但游戏还没绑定总表"**，是**终态**（推完了）。
+- ⚠️ `GetPendingDailySummariesAsync` **必须排除 `unmapped`**：
+  ```sql
+  WHERE d.sync_status NOT IN ('synced', 'unmapped') AND d.duration_minutes > 0
+  ```
+  曾经写的是 `!= 'synced'` → `unmapped != 'synced'` 恒成立 →
+  **每轮同步把所有未绑定记录重打一遍，永远不停**（用户刚配好 Notion、
+  还没绑游戏的那段时间最明显，且随天数累积越来越慢）。
+- **不会漏推**：时长一增加，`AddSessionDurationToDailyAsync` 会把状态改回 `pending`；
+  拉取路径在"本地领先"时也会置 `pending`。
+- **守护用例**：`SyncPending_DoesNotRepushUnboundRecord_EveryRound`（性能护栏）、
+  `SyncPending_RepushesUnboundRecord_WhenDurationGrows`（防漏更新）、
+  `SyncPending_PushesUnboundRecord_ToDailyTableWithoutRelation`（设计意图）。
+
+**通用教训**：凡是"待处理"型查询，都要确认**每个状态值是否真的会离开结果集**。
+同类事故已经 3 次：
+1. 回刷标题时用 `iconUrl != null` 判断"需不需要更新" → 每轮都更新
+2. 回刷快照没落库 → 每轮都判定不一致
+3. 本条：`!= 'synced'` 把 `unmapped` 当成待处理
+
+## 同步的设计基调（用户明确，不要改）
+- **本地为主**：不管 Notion 连没连上，本地记录一直在走。
+- **是否绑定只影响总表**：未绑定的游戏**照样推送到每日时长表**，
+  只是不带 `游戏` relation、`绑定状态` 写「未绑定」。
+- **主流平台自动识别 + 其余手动添加**（见上文"识别策略"）。
+- 「待处理」页 = 把已识别的游戏绑到总表；**不绑也不影响每日表推送**，
+  所以对不用 Notion 的用户它只是"可选操作"，不是阻塞。
+
 ## 游戏检测链路（2026-09-18 踩坑，改这块前必看）
 **流程**：`MonitorLoopAsync`(5s) → `ScanRunningProcessesAsync`（取 exe 路径 + `ProcessFilter` 黑名单）
 → `GameLibraryManager.DetectGame`（靠 `_installedGames` 目录前缀匹配）→ `GetOrCreateGameAsync` → 开始计时。
