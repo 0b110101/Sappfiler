@@ -239,9 +239,9 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 ## Notion 表结构硬要求（改代码前必看）
 **每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——
 ```csharp
-["游戏动态"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）
+["游戏动态"] = title      // 格式「游戏名 · 0.25 h」（小时 2 位小数）
 ["日期"]     = date
-["单次时长"] = number     // ★ 单位是**小时**、保留 1 位小数（2026-09-19 从分钟改来）
+["单次时长"] = number     // ★ 单位是**小时**、保留 2 位小数（2026-09-19 从分钟改来）
 ["绑定状态"] = select     // 已绑定 / 未绑定
 ["关联游戏"] = relation   // 仅在有 gamePageId 时写入
 ```
