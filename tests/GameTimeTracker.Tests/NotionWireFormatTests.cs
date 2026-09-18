@@ -105,13 +105,19 @@ public class NotionWireFormatTests
     {
         // 关键回归点：读 Number 属性原先用的是 GetInt32，
         // 遇到 0.7 这种小数会直接抛异常，整条记录拉不回来。
+        // ⚠️ title 数组里必须带 `plain_text` —— NotionClient.ExtractTitle 读的是它，
+        //    不是 text.content。真实 Notion API 两个字段都会返回，
+        //    夹具若只给 text.content，标题会被解析成空串、整条记录被跳过。
         const string response = """
         {
           "results": [
             {
               "id": "daily-1",
               "properties": {
-                "游戏动态": { "type": "title", "title": [ { "text": { "content": "测试游戏 · 0.7 h" } } ] },
+                "游戏动态": {
+                  "type": "title",
+                  "title": [ { "plain_text": "测试游戏 · 0.7 h", "text": { "content": "测试游戏 · 0.7 h" } } ]
+                },
                 "日期": { "type": "date", "date": { "start": "2026-09-19" } },
                 "单次时长": { "type": "number", "number": 0.7 }
               }
@@ -140,7 +146,10 @@ public class NotionWireFormatTests
             {
               "id": "daily-legacy",
               "properties": {
-                "游戏动态": { "type": "title", "title": [ { "text": { "content": "老游戏 · 2.0 h" } } ] },
+                "游戏动态": {
+                  "type": "title",
+                  "title": [ { "plain_text": "老游戏 · 2.0 h", "text": { "content": "老游戏 · 2.0 h" } } ]
+                },
                 "日期": { "type": "date", "date": { "start": "2026-09-18" } },
                 "单次时长": { "type": "number", "number": 120 }
               }
@@ -181,7 +190,10 @@ public class NotionWireFormatTests
                 {
                   "id": "p",
                   "properties": {
-                    "游戏动态": { "type": "title", "title": [ { "text": { "content": "x" } } ] },
+                    "游戏动态": {
+                      "type": "title",
+                      "title": [ { "plain_text": "往返测试", "text": { "content": "往返测试" } } ]
+                    },
                     "日期": { "type": "date", "date": { "start": "2026-09-19" } },
                     "单次时长": { "type": "number", "number": {{hours}} }
                   }
