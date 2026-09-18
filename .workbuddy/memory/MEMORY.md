@@ -107,6 +107,36 @@
   把副本库的 `settings.notion_token` 清空（断开 Notion）+ 给目标游戏挂一个有 cover_url 的 page_id 即可离线复现。
 
 
+## 游戏匹配的设计原则（2026-09-18 用户澄清，改这块前必读）
+**匹配以游戏名（含别名）为主。** 不要推荐用户去填 `游戏标识`(steam:appid) ——
+库里几百个游戏逐个补不现实，多数人根本没存。`游戏标识` 只是可选加分项。
+
+**手段边界（重要）**：
+- **正则**负责去掉「**已知**的噪音」——年份、版本后缀。确定性、可解释。
+- **模糊**负责吸收「**未知**的差异」——错别字、标点、语序。
+- **不要把已知噪音丢给模糊去扛**：`TokenSortRatio` 对后缀很敏感，
+  `valheim` vs `valheim 2020` 只有 **73.7%**，卡在 80% 阈值下 → 候选为空 → 误判成新游戏。
+
+**⚠️ 不要靠"放宽阈值 / 改用 `PartialRatio`"来解决**：
+`PartialRatio` 做子串最优匹配，`doom` vs `doom eternal` 直接 100%
+→ 「Doom」会匹配上「Doom Eternal」这种**不同游戏**。降阈值同理，
+是用误匹配换召回，对游戏库这种要求精确归属的场景不可接受。
+**正确做法：把噪音在归一化阶段剥干净，模糊阈值保持不动。**
+
+`NormalizeTitle` 现有的剥离规则（**必须在去标点之前**做，否则认不出括号形式）：
+- `TrailingBracketedYearRegex`：末尾括号年份 `Valheim (2020)` → `valheim`
+- `TrailingEditionRegex`：末尾版本标记
+  `Deluxe/Ultimate/Definitive/Complete/Gold/Premium/Special/Collector's/Enhanced/Anniversary/Standard Edition`、
+  `Game of the Year Edition`、`GOTY Edition`、`Remastered`、`HD Remaster`
+- 两遍循环以兼容 `XX Deluxe Edition (2020)` 这类组合
+
+**明确排除，绝不能剥**（它们是游戏名的一部分）：
+`Remake` / `Rebirth` / `Eternal` / 数字序号 / **裸年份**
+—— `Football Manager 2024` 的年份剥了就会和 2023 代互相误匹配。
+
+守护用例：`MatchGame_MustNotConflateDifferentGames`
+（Doom↔Doom Eternal、Portal↔Portal 2、FM2023↔FM2024、FF7 Remake↔Rebirth）。
+
 ## 同步状态机的坑：非终态 + 粗筛条件 = 永远重试（2026-09-18，同类踩了 3 次）
 `daily_summary.sync_status` 取值：`pending` / `synced` / `unmapped` / `error`。
 
