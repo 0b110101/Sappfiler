@@ -47,8 +47,10 @@
 
 - **初始化 git 仓库**，基线提交 `d01cae5`。
 - **版本号正式定名 `0.9.5-alpha17`**：新增 `Directory.Build.props`，改 `Package.appxmanifest`，设置页加版本显示。
-  **已验证**：Release 构建 0 警告 0 错误、69 个测试全过、
+  **已验证**（在构建环境尚可用的窗口期内完成）：
+  Release 构建 0 警告 0 错误、69 个测试全过、
   程序集元数据实测 `FileVersion=0.9.5.17` / `InformationalVersion=0.9.5-alpha17+d01cae5` / `AssemblyVersion=0.9.5.0`。
+  源码改动本身与构建环境无关（纯 MSBuild 属性 + XAML 文本框 + 一个反射辅助方法），风险低。
 
 ### 尚未处理
 
@@ -212,8 +214,8 @@
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
   本地 `user.name=GameTimeTracker Dev` / `user.email=dev@localhost`。
 - 改完必须跑：`dotnet build GameTimeTracker.slnx -c Release`（目标 0 警告 0 错误）+ `dotnet test`（**69 个用例应全过**）。
-  **注意**：本机当前 `dotnet restore` 是坏的（见下文「本机构建环境的坑」）。
-  只要 `obj/` 还在，用 `dotnet build ... --no-restore` 与 `dotnet test --no-build` 即可正常验证。
+  **注意**：本机当前 `dotnet restore` / `build` 全部不可用（见下文「本机构建环境的坑」），
+  需要管理员修复后才能验证。**不要在未验证的情况下声称改动已通过构建。**
 - **起 GUI 程序时把 stderr 重定向到文件**——托管栈溢出（`Stack overflow.`）只在这里有可读栈，minidump 里取不到。
 - `%LocalAppData%\CrashDumps\` 下的 `.dmp`：`0xC00000FD` = 栈溢出，`0xC000027B` = 另一类 WinRT/XAML 问题。
   解析托管递归栈时**不要按模块统计整个镜像**（会被静态数据淹没），要取崩溃线程的栈内存。
@@ -244,9 +246,13 @@
 **永久修复（需要管理员权限）**：把该注册表值从 `%ProgramData%` 改成字面量 `C:\ProgramData`，
 或修复系统环境块补回 `ProgramData` / `APPDATA` / `ALLUSERSPROFILE`。修好后一切恢复正常。
 
-**有效绕过（不需要管理员权限）**：**保留 `obj/` 目录，不要清理它**。
-只要 `obj/project.assets.json` 还在，`dotnet build --no-restore` 就能编译，
-`dotnet test --no-build` 也能跑测试。不要在缺资产的机器上做 `--no-incremental`。
+**重要**：这个故障**连 `obj/project.assets.json` 已存在时也拦不住**——
+错误会从 `NuGet.targets(782)` 转成
+`Microsoft.PackageDependencyResolution.targets(266)` 的 `NETSDK1060`，
+因为**加载**资产文件同样要解析 `packageFolders` 的路径。
+所以「保留 obj + `--no-restore`」的偏方在本机也无效（实测）。
+**当前状态下无法构建也无法跑测试。** 在此之前不要清理 `obj/`，
+也不要尝试手工伪造 `project.assets.json`（伪造文件同样被 `path1` null 挡住）。
 
 **已证伪、不要再走一遍的假设**（每条都实测过）：
 - ❌ 缺 `C:\Program Files\dotnet\library-packs\` —— 补建后仍失败

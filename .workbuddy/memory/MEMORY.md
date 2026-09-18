@@ -136,9 +136,14 @@
   把该注册表值从 `%ProgramData%` 改成字面量 `C:\ProgramData`
   （或修复系统环境块，补回 `ProgramData` / `APPDATA` / `ALLUSERSPROFILE`）。
   修好后 `dotnet restore` / `build` / `test` 恢复正常。
-- **有效绕过（不需要管理员权限）**：只要 `obj/project.assets.json` 还存在，
-  `dotnet build --no-restore` 就能正常编译，`dotnet test --no-build` 也能跑。
-  即：**保留 `obj/` 目录，不要清理它**；不要在缺资产的机器上做 `--no-incremental`。
+- **重要**：这个故障**连 `obj/project.assets.json` 已存在时也拦不住**——
+  错误会从 `NuGet.targets(782)` 转成
+  `Microsoft.PackageDependencyResolution.targets(266)` 的 `NETSDK1060`，
+  因为**加载**资产文件同样要解析 `packageFolders` 的路径。
+  所以网上常见的「保留 obj + `--no-restore`」偏方在本机也无效（实测）。
+- **有效做法**：只能等管理员修好注册表/系统环境块。
+  在此之前**不要**清理 `obj/`（清了就彻底无法构建），也不要尝试手工伪造
+  `project.assets.json`（伪造的文件同样会被 `path1` null 挡住，已实测）。
 - **已证伪、不要再走一遍的假设**（每一条都实测过）：
   - ❌ 不是缺 `C:\Program Files\dotnet\library-packs\`（补建后仍失败）
   - ❌ 不是缺 `C:\ProgramData\NuGet\` 目录（补建后仍失败）
