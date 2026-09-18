@@ -18,9 +18,10 @@
 | 源码位置 | `E:\vi2`（**注意：与 `test/` 无关，工作目录里的 `GameTimeTracker-v*-win-x64` 只是发布产物**） |
 | 活跃数据库 | `%LocalAppData%\GameTimeTracker\gametime.db`（**不是**源码目录下的 `gametime.db`） |
 | 用户可读日志 | `<exe目录>\data\logs\app.log`（>2MB 轮转为 `app.old.log`） |
-| 测试 | `dotnet test`，xunit + FluentAssertions，**69 个用例**（2026-09-18 实测 69/69 通过） |
+| 测试 | `dotnet test`，xunit + FluentAssertions，**69 个用例基线**（alpha17 实测 69/69 通过；alpha18 新增 5 个，共 74，**待验证**） |
 | 构建 | `dotnet build GameTimeTracker.slnx`；发布走 `dist/` 下的 `-win-x64.zip` |
-| 版本号 | 仓库根 `Directory.Build.props` 统一定义为 **0.9.5-alpha17**（见 2.7） |
+| 版本号 | 仓库根 `Directory.Build.props` 统一定义，当前 **0.9.5-alpha18**（见 2.7） |
+| QA 协作 | alphaNN 是给 QA 的迭代序号，**每交一版调试包就 +1**（见 2.7） |
 
 ---
 
@@ -40,22 +41,29 @@
 
 ### 目前正在处理
 
-- **本轮（09-18）新增三项功能，代码已写完，但「尚未构建验证」**（构建环境仍不可用，见第 5 节）：
+- **`0.9.5-alpha18` 已就绪待验证**。本轮（09-18）新增三项功能，代码已写完并提交（`3c1ea37`），
+  但**「尚未构建验证」**（构建环境仍不可用，见第 5 节）：
   1. 每日记录「游戏名称」改为取总表名（relation 那个名字）+ 顺带写总表 page icon。
   2. 总表改名 / 补 icon 后**回刷**已同步记录的标题与图标（`RefreshDailyTitlesFromMasterAsync`）。
   3. 新用户首次保存 Notion 配置成功后自动跑一次同步。
   详见 **2.8**。
 - 已给回刷逻辑补了 5 个新测试（含"无事可做时不发 PATCH"和"升级库首轮补快照"两个关键场景），
-  同样受构建环境阻塞、待验证。
+  共 74 个用例，同样受构建环境阻塞、待验证。
+- **交 QA 前必须先做**：重启后用正常终端跑 `dotnet build` + `dotnet test`，确认 0 错误 / 74 全过，
+  再按 2.7 的清单打 `GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
+  **未验证的包不要交 QA**——否则 QA 报的 bug 分不清是这次改动引入的还是本来就有。
 
 ### 近期已完成（2026-09-18）
 
 - **初始化 git 仓库**，基线提交 `d01cae5`。
-- **版本号正式定名 `0.9.5-alpha17`**：新增 `Directory.Build.props`，改 `Package.appxmanifest`，设置页加版本显示。
+- **版本号体系落地（`0.9.5-alpha17`）**：新增 `Directory.Build.props`，改 `Package.appxmanifest`，设置页加版本显示。
   **已验证**（在构建环境尚可用的窗口期内完成）：
   Release 构建 0 警告 0 错误、69 个测试全过、
   程序集元数据实测 `FileVersion=0.9.5.17` / `InformationalVersion=0.9.5-alpha17+d01cae5` / `AssemblyVersion=0.9.5.0`。
   源码改动本身与构建环境无关（纯 MSBuild 属性 + XAML 文本框 + 一个反射辅助方法），风险低。
+- **升版到 `0.9.5-alpha18`**（配合上面三项功能）：`VersionSuffix=alpha18`、`FileVersion=0.9.5.18`、
+  `Package.appxmanifest` 的 `Version=0.9.5.18`。
+  起因是用户要**同时把包交给 QA 一起 debug** —— 不做版本区分的话 QA 无法分辨手里是改前还是改后。
 - **彻底定位构建环境故障的真实根因**（之前一轮的诊断有一处是错的）：
   .NET 在 Windows 上读的是**进程环境变量 `PROGRAMDATA`**，不是注册表 `User Shell Folders`。
   详见第 5 节。
@@ -155,13 +163,43 @@
 ### 2.7 版本号（2026-09-18 新增）
 
 - **版本号只在仓库根 `Directory.Build.props` 定义一处**，四个工程自动继承。**不要在单个 `.csproj` 里再写 `<Version>`**。
-  - `VersionPrefix=0.9.5`，`VersionSuffix=alpha17`
-  - `FileVersion=0.9.5.17`（必须是 4 段数字，给 Windows 文件属性用）
+  - `VersionPrefix=0.9.5`，`VersionSuffix=alpha18` ← **当前**
+  - `FileVersion=0.9.5.18`（必须是 4 段数字，给 Windows 文件属性用）
   - `AssemblyVersion=0.9.5.0`（只在大版本变更时改）
 - **为什么不叫 `1.2.1`**：用户明确表示项目**尚未正式发布**，之前的 `v1.2.1` 只是打包时随手起的名字，代码里从未体现过版本号。正式命名为 `0.9.5-alpha17`。
-- 设置页左下角显示 `GameTimeTracker v0.9.5-alpha17`，取自 `AssemblyInformationalVersion`（自动附带 `+<git短hash>` 后缀，显示时 `Split('+')[0]` 裁掉）。
-- **发布包命名必须与版本号一致**：`GameTimeTracker-v0.9.5-alpha17-win-x64.zip`。
-  历史上工作目录名 `GameTimeTracker-v0.9.5-alpha17-win-x64` 与 `v1.2.1` 指的是**同一个包**，只是改了名。
+- **`alphaNN` 是给 QA 的迭代序号，每交一版调试包就要 +1。**
+  用户会**同时把包交给 QA 一起 debug**，所以每一版必须有唯一、可见的版本标识，
+  否则 QA 无法分辨"这个包修了没有"、也说不清问题出在哪一版。
+  **升版本时必须同时改这几处**（漏一处就会出现"程序里显示 alpha18、exe 属性还是 17"的矛盾）：
+  1. `Directory.Build.props` 的 `VersionSuffix` → `alphaNN`
+  2. `Directory.Build.props` 的 `FileVersion` → `0.9.5.NN`（第三段跟 alpha 序号对齐）
+  3. `src/GameTimeTracker.App/Package.appxmanifest` 的 `Identity/@Version` → `0.9.5.NN`
+  4. 设置页那个注释里的示例字符串（只是注释，但别留着过期例子）
+
+  **别手工改上面这几处再手工打包** —— 用 `publish.ps1`（见下），它会自动读版本号并**校验 1/3 是否一致**，
+  不一致直接中止，从机制上避免漏改。
+- 设置页左下角显示 `GameTimeTracker v0.9.5-alphaNN`，取自 `AssemblyInformationalVersion`（自动附带 `+<git短hash>` 后缀，显示时 `Split('+')[0]` 裁掉）。
+  **`+<git短hash>` 很有用**：它让 QA 能直接对上具体提交，比只报 alpha 序号更精确。
+- **发布包命名必须与版本号一致**：`GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
+  **用 `publish.ps1` 生成**（仓库根），它会：
+  1. 从 `Directory.Build.props` 读版本号（**唯一来源，不维护第二份**）
+  2. 校验 `FileVersion` 与 `Package.appxmanifest` 的 `Version` 一致，不一致直接中止
+  3. 跑测试（`-SkipTests` 可跳过，但别养成习惯）
+  4. `dotnet publish` 到 `dist/GameTimeTracker-v<version>-win-x64/`
+  5. 写一份 `VERSION.txt`（版本 + commit 短 hash + 配置 + 打包时间 + 工作树是否脏）
+  6. 压成 `dist/GameTimeTracker-v<version>-win-x64.zip`
+  **工作树有未提交改动时会黄字警告** —— 包里含未入库代码的话 QA 无法定位问题，先 commit 再打包。
+- 历史上工作目录名 `GameTimeTracker-v0.9.5-alpha17-win-x64` 与 `v1.2.1` 指的是**同一个包**，只是改了名。
+  新一代的包建议直接叫 `GameTimeTracker-v0.9.5-alpha18-win-x64`，**不要沿用旧的 alpha17 目录名**——
+  目录名和内容版本不一致正是当初 `v1.2.1` 混乱的来源。
+- **配套维护 `CHANGELOG-QA.md`**（仓库根）：面向 QA 的版本变更记录，
+  每交一版在最上面加一节，写「改了什么 + 要重点验证什么 + 已知问题」。
+  HANDOVER.md 是给**接手开发者**看的，CHANGELOG-QA.md 是给**测试人员**看的，两者受众不同、都要维护。
+- **版本沿革**：
+  - `0.9.5-alpha17` — 版本号体系落地 + git 基线 `d01cae5`（**已验证**：0 警告 0 错误、69 测试全过）
+  - `0.9.5-alpha18` — 3 项 Notion 同步需求（总表名+icon / 改名回刷 / 首次配置自动同步）+ 同步链顺序修正（**待验证**）
+
+
 
 ### 2.8 每日记录的「游戏名称」与 page icon（2026-09-18 新增，用户明确要求）
 

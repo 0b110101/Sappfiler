@@ -110,14 +110,29 @@
 ## 版本号与版本控制（2026-09-18 确立）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
-- **版本号统一为 `0.9.5-alpha17`，只在仓库根 `Directory.Build.props` 定义一处**，四个工程自动继承：
-  `VersionPrefix=0.9.5` / `VersionSuffix=alpha17` / `FileVersion=0.9.5.17` / `AssemblyVersion=0.9.5.0`。
+- **当前版本 `0.9.5-alpha18`**，版本号只在仓库根 `Directory.Build.props` 定义一处，四个工程自动继承：
+  `VersionPrefix=0.9.5` / `VersionSuffix=alpha18` / `FileVersion=0.9.5.18` / `AssemblyVersion=0.9.5.0`。
   **不要在单个 `.csproj` 里再写 `<Version>`。**
-- 之前的 `v1.2.1` 只是打包 zip 的文件名，代码里从未体现过；用户明确项目**尚未正式发布**，故重命名为 `0.9.5-alpha17`。
-- 设置页底部显示 `GameTimeTracker v0.9.5-alpha17`，取自 `AssemblyInformationalVersion`
-  （该属性自带 `+<git短hash>` 后缀，显示时按 `+` 截断）。
-- 发布包命名须与之一致：`GameTimeTracker-v0.9.5-alpha17-win-x64.zip`。
-- 提交 `9ad2b53`。构建 0 警告 0 错误，**69 个测试全过**，程序集元数据已实测验证。
+- 之前的 `v1.2.1` 只是打包 zip 的文件名，代码里从未体现过；用户明确项目**尚未正式发布**，故重命名。
+- **`alphaNN` 是给 QA 的迭代序号，每交一版调试包就 +1。**
+  **用户要同时把包交给 QA 一起 debug**（2026-09-18 用户明确指出过一次我没升版本的疏漏）——
+  不升版本 QA 就无法分辨手握的是改前还是改后，也说不清问题出在哪一版。
+  **升版必须同时改这三处**（漏一处就会出现"程序里显示 alphaNN、exe 属性是旧的"矛盾）：
+  1. `Directory.Build.props` → `VersionSuffix` + `FileVersion`（第三段与 alpha 序号对齐）
+  2. `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version`
+  3. 设置页注释里的示例字符串
+- 设置页底部显示 `GameTimeTracker v0.9.5-alpha18`，取自 `AssemblyInformationalVersion`
+  （该属性自带 `+<git短hash>` 后缀，显示时按 `+` 截断；**这个 hash 对 QA 定位问题很有用**）。
+- **打包用 `E:\vi2\publish.ps1`，不要手工改版本号再手工打包**：
+  它从 `Directory.Build.props` 读版本（唯一来源）→ **校验 FileVersion 与 appxmanifest 一致**
+  （不一致直接中止，机制上防漏改）→ 跑测试 → `dotnet publish` →
+  写 `VERSION.txt`（版本+commit+配置+打包时间+工作树是否脏）→ 压 zip。
+  工作树有未提交改动时黄字警告（包里含未入库代码 QA 无法定位问题）。
+- 发布包命名：`GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
+  **配套维护 `CHANGELOG-QA.md`**（面向 QA：改了什么 / 重点验什么 / 已知问题）。
+  HANDOVER.md 给接手开发者，CHANGELOG-QA.md 给测试人员，**两者受众不同都要维护**。
+- **版本沿革**：`alpha17`（版本体系落地 + git 基线，已验证 0 警告 0 错误 / 69 测试全过）
+  → `alpha18`（3 项 Notion 同步需求 + 同步链顺序修正，**待验证**）。
 
 ## 每日记录的「游戏名称」与 page icon（2026-09-18 用户明确要求）
 - **标题格式 `{游戏名} · {X} h`，其中「游戏名」的来源分两种**：
