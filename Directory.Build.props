@@ -18,9 +18,9 @@
   -->
   <PropertyGroup>
     <VersionPrefix>0.9.5</VersionPrefix>
-    <VersionSuffix>alpha19</VersionSuffix>
+    <VersionSuffix>alpha20</VersionSuffix>
 
-    <FileVersion>0.9.5.19</FileVersion>
+    <FileVersion>0.9.5.20</FileVersion>
     <AssemblyVersion>0.9.5.0</AssemblyVersion>
 
     <Product>GameTimeTracker</Product>

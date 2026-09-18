@@ -25,7 +25,7 @@ public sealed partial class SettingsPage : Page
         base.OnNavigatedTo(e);
 
         // 版本号来自 AssemblyInformationalVersion（由仓库根 Directory.Build.props 统一注入）。
-        // 形如 "0.9.5-alpha19"，展示时补上 "v" 前缀。
+        // 形如 "0.9.5-alpha20"，展示时补上 "v" 前缀。
         VersionText.Text = $"GameTimeTracker v{GetAppVersion()}";
 
         if (e.Parameter is (IDatabaseRepository repo, TrackerConfig config, INotionClient client))
