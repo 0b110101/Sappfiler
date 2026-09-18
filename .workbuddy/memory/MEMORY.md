@@ -216,9 +216,13 @@
   | | 正常 | 被裁剪 |
   |---|---|---|
   | 文件数 | ~449 | ~101 |
-  | 体积 | ~285 MB | ~86 MB |
+  | 解压后体积 | ~285 MB | ~86 MB |
+  | zip 体积 | ~105 MB | ~38 MB |
   | `GameTimeTracker.App.dll` | ~753 KB | ~610 KB |
   | `Microsoft.UI.Xaml.dll` | 有 | **缺** |
+  - ⚠️ **区分 zip 和解压后体积**：用户交付/沟通时说的是 **zip（~105MB）**，
+    排查时看的是**解压后（~285MB）**。这两个数都是稳定的基线，不要混着比。
+    历史上 v1.0.3 ~ v1.2.1 的 zip 全是 105.2 MB，解压后 ~285MB（v1.0.7 实测 286MB）。
 - **已修**：csproj 恒定 `<PublishTrimmed>False</PublishTrimmed>`（附详细注释）；
   `publish.ps1` 显式传 `-p:PublishTrimmed=false -p:SelfContained=true
   -p:WindowsAppSDKSelfContained=true`，并新增**产物校验**
