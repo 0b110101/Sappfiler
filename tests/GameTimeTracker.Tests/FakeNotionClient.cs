@@ -37,24 +37,32 @@ internal sealed class FakeNotionClient : INotionClient
     }
 
     public Task<string> CreateDailyRecordAsync(
-        string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId,
+        string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId,
         string? iconUrl = null)
     {
-        CreatedDailyRecordTitles.Add(gameTitle);
+        CreatedDailyRecordTitles.Add(gameName);
+        CreatedDailyRecordIcons.Add(iconUrl);
         return Task.FromResult("created-page");
     }
 
+    /// <summary>每次 CreateDailyRecordAsync 收到的 page icon，用于断言"顺带设了总表图标"。</summary>
+    public List<string?> CreatedDailyRecordIcons { get; } = new();
+
     public List<(string PageId, int DurationMinutes)> UpdatedPages { get; } = new();
 
-    /// <summary>每次 UpdateDailyRecordAsync 收到的标题，用于断言"用的是总表名"。</summary>
+    /// <summary>每次 UpdateDailyRecordAsync 收到的**游戏名**（不是拼好的标题），用于断言"用的是总表名"。</summary>
     public List<string?> UpdatedTitles { get; } = new();
 
+    /// <summary>每次 UpdateDailyRecordAsync 收到的 page icon。</summary>
+    public List<string?> UpdatedIcons { get; } = new();
+
     public Task<bool> UpdateDailyRecordAsync(
-        string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null,
+        string pageId, int durationMinutes, string? gamePageId, string? gameName = null,
         string? iconUrl = null)
     {
         UpdatedPages.Add((pageId, durationMinutes));
-        UpdatedTitles.Add(gameTitle);
+        UpdatedTitles.Add(gameName);
+        UpdatedIcons.Add(iconUrl);
         return Task.FromResult(true);
     }
 

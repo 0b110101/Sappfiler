@@ -30,9 +30,12 @@ internal static class DailyRecordTitle
             System.Text.RegularExpressions.RegexOptions.IgnoreCase |
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。</summary>
-    internal static string Build(string gameTitle, int durationMinutes)
-        => $"{gameTitle} · {Math.Round(durationMinutes / 60.0, 1)} h";
+    /// <summary>
+    /// 拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。
+    /// 参数是**游戏名**，不是拼好的标题 —— 传完整标题进来会拼出「X · 0.7 h · 0.7 h」。
+    /// </summary>
+    internal static string Build(string gameName, int durationMinutes)
+        => $"{gameName} · {Math.Round(durationMinutes / 60.0, 1)} h";
 
     /// <summary>剥掉标题末尾的时长后缀，得到裸游戏名。</summary>
     internal static string StripSuffix(string rawTitle)
@@ -287,13 +290,13 @@ public class NotionClient : INotionClient
     public async Task<string> CreateDailyRecordAsync(
         string dailyDbId,
         string date,
-        string gameTitle,
+        string gameName,
         int durationMinutes,
         string? gamePageId,
         string? iconUrl = null)
     {
         var cleanDbId = dailyDbId.Replace("-", "");
-        var titleText = DailyRecordTitle.Build(gameTitle, durationMinutes);
+        var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
         var properties = new Dictionary<string, object>
         {
             ["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } },
@@ -326,7 +329,7 @@ public class NotionClient : INotionClient
         string pageId,
         int durationMinutes,
         string? gamePageId,
-        string? gameTitle = null,
+        string? gameName = null,
         string? iconUrl = null)
     {
         var cleanPageId = pageId.Replace("-", "");
@@ -335,12 +338,15 @@ public class NotionClient : INotionClient
             ["时长"] = new { number = durationMinutes }
         };
 
-        if (!string.IsNullOrEmpty(gameTitle))
+        if (!string.IsNullOrEmpty(gameName))
         {
-            // 永远按「gameTitle + 当前时长」重算整个标题，不做"只改游戏名那一段"的局部替换。
+            // 永远按「gameName + 当前时长」重算整个标题，不做"只改游戏名那一段"的局部替换。
             // 理由：时长本身也在标题里，且老行可能还是「(42分)」这种旧格式 ——
             // 局部替换反而会拼出「新名字 · 42 min」残留旧后缀的怪东西。
-            var titleText = DailyRecordTitle.Build(gameTitle, durationMinutes);
+            //
+            // ⚠️ 传进来的必须是**游戏名**。传拼好的完整标题会得到「X · 0.7 h · 0.7 h」。
+            // 这个参数以前叫 gameTitle，正是这个歧义导致过真实 bug（alpha18 回刷链路），故改名。
+            var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
             properties["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } };
         }
 
@@ -1022,11 +1028,15 @@ public class NotionSyncService : INotionSyncService
                 // 都是目标状态 → 什么都不做（绝大多数轮次都会走到这里）。
                 if (!titleChanged && !iconChanged) continue;
 
+                // 传**游戏名**（displayName），不是拼好的 expectedTitle：
+                // UpdateDailyRecordAsync 内部会自己调 DailyRecordTitle.Build 拼标题，
+                // 传完整标题进去会拼成「新名字 · 0.7 h · 0.7 h」——后缀重复。
+                // expectedTitle 只用于上面的比对。
                 await _client.UpdateDailyRecordAsync(
                     item.NotionPageId,
                     item.DurationMinutes,
                     game.NotionPageId,
-                    expectedTitle,
+                    displayName,
                     iconUrl);
 
                 // 两个快照一起落库，否则下一轮还会认为"不一致"、又打一次 Notion。

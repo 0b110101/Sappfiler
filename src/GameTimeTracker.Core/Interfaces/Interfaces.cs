@@ -91,14 +91,23 @@ public interface INotionClient
     Task<bool> TestConnectionAsync();
     Task<IReadOnlyList<NotionGameCatalogItem>> QueryGameMasterAsync(string databaseId);
     Task<IReadOnlyList<NotionDailyRecordItem>> QueryDailyRecordsAsync(string databaseId);
-    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId, string? iconUrl = null);
+    /// <summary>
+    /// 新建每日记录。gameName 是**游戏名**（不是拼好的标题），标题由实现方按
+    /// 「gameName · X h」拼装；iconUrl 非空时同时设置页面 icon。
+    /// </summary>
+    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId, string? iconUrl = null);
 
     /// <summary>
     /// 更新每日记录。iconUrl 非空时一并把该页面 icon 设为 external 图片；
-    /// gameTitle 非空时按「gameTitle + 当前时长」重算并写回页面标题
+    /// gameName 非空时按「gameName + 当前时长」重算并写回页面标题
     /// （所以传 null 才是"只改时长、不动标题"）。
     /// </summary>
-    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null, string? iconUrl = null);
+    /// <remarks>
+    /// ⚠️ gameName 必须是**游戏名**，不是拼好的完整标题 ——
+    /// 传完整标题进去会拼出「X · 0.7 h · 0.7 h」（后缀重复）。
+    /// 该参数原名 gameTitle，这个歧义导致过真实 bug，故改名。
+    /// </remarks>
+    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null);
     Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle);
     /// <summary>把页面移入 Notion 回收站（archived）。这是 Notion API 唯一的"删除"方式，30 天内可恢复。</summary>
     Task<bool> ArchivePageAsync(string pageId);

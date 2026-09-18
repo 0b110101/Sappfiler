@@ -234,12 +234,14 @@ public class NotionPullImportTests : IDisposable
         pushed.Should().Be(1);
         _client.CreatedDailyRecordTitles.Should().ContainSingle()
             .Which.Should().Be("不思议迷宫", "已绑定时要用总表里的名字，而不是本地进程名");
+        _client.CreatedDailyRecordIcons.Should().ContainSingle()
+            .Which.Should().Be("https://example.com/icon.png", "顺带把总表的 page icon 也设到这条记录上");
     }
 
     [Fact]
     public async Task SyncPending_KeepsProcessName_WhenGameIsNotBound()
     {
-        // 未绑定 → relation 无从读起，只能保持进程名。
+        // 未绑定 → relation 无从读起，只能保持进程名，也不该乱猜一个图标。
         var game = await _repo.GetOrCreateGameAsync(
             new GameIdentity("steam", "2002", "UnboundGame", "u.exe", @"C:\u.exe"));
         await _repo.AddSessionDurationToDailyAsync("2026-09-25", game.Id, 600);
@@ -248,6 +250,8 @@ public class NotionPullImportTests : IDisposable
 
         _client.CreatedDailyRecordTitles.Should().ContainSingle()
             .Which.Should().Be("UnboundGame", "未绑定总表时没有 relation 可读，只能退回进程名");
+        _client.CreatedDailyRecordIcons.Should().ContainSingle()
+            .Which.Should().BeNull("未绑定时不该凭空写一个图标");
     }
 
     // ================= 需求二：总表改名 / 补 icon 后回刷已同步记录 =================
@@ -282,7 +286,14 @@ public class NotionPullImportTests : IDisposable
         var refreshed = await _sync.RefreshDailyTitlesFromMasterAsync();
 
         refreshed.Should().Be(1, "总表改名后已同步的记录要被回刷");
-        _client.UpdatedTitles.Should().Contain("新名字", "回刷要把总表的新名字写回每日记录标题");
+
+        // 传出去的必须是**游戏名**（"新名字"），不是拼好的完整标题。
+        // 传完整标题的话 client 内部会再拼一次，变成「新名字 · 0.7 h · 0.7 h」——
+        // 这个断言就是为了钉住这个曾经真实发生过的 bug。
+        _client.UpdatedTitles.Should().ContainSingle()
+            .Which.Should().Be("新名字", "回刷要传总表里的游戏名，标题由 client 统一拼装");
+        _client.UpdatedIcons.Should().ContainSingle()
+            .Which.Should().Be("https://example.com/b.png", "换过的图标要一起写下去");
     }
 
     [Fact]
