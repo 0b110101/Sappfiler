@@ -181,7 +181,7 @@
 - 设置页左下角显示 `GameTimeTracker v0.9.5-alphaNN`，取自 `AssemblyInformationalVersion`（自动附带 `+<git短hash>` 后缀，显示时 `Split('+')[0]` 裁掉）。
   **`+<git短hash>` 很有用**：它让 QA 能直接对上具体提交，比只报 alpha 序号更精确。
 - **发布包命名必须与版本号一致**：`GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
-  **用 `publish.ps1` 生成**（仓库根），它会：
+  **用 `publish.cmd` 生成**（仓库根，双击或 `.\publish.cmd` 均可），它会转调 `publish.ps1`：
   1. 从 `Directory.Build.props` 读版本号（**唯一来源，不维护第二份**）
   2. 校验 `FileVersion` 与 `Package.appxmanifest` 的 `Version` 一致，不一致直接中止
   3. 跑测试（`-SkipTests` 可跳过，但别养成习惯）
@@ -189,6 +189,19 @@
   5. 写一份 `VERSION.txt`（版本 + commit 短 hash + 配置 + 打包时间 + 工作树是否脏）
   6. 压成 `dist/GameTimeTracker-v<version>-win-x64.zip`
   **工作树有未提交改动时会黄字警告** —— 包里含未入库代码的话 QA 无法定位问题，先 commit 再打包。
+
+  **为什么要有个 `.cmd` 包装**：Windows 客户端默认 `ExecutionPolicy` 是 `Restricted`
+  （本机实测确认），直接 `.\publish.ps1` 会报「在此系统上禁止运行脚本」。
+  `publish.cmd` 用 `-ExecutionPolicy Bypass` 起 PowerShell，**只影响这一次调用**，
+  不改系统的持久设置。所以**优先用 `publish.cmd`**，别去动全局执行策略。
+
+  **两个写脚本时踩过的坑**（已在文件里注释，改脚本前先看）：
+  - `.ps1` **必须存成 UTF-8 with BOM**。Windows PowerShell 5.1 读无 BOM 的 `.ps1` 时按 ANSI 解码，
+    中文会破坏字符串字面量，报出「字符串缺少终止符」这种看起来毫不相干的错。
+  - 双引号 here-string 里**不要**写 `$(if (...) {...} else {...})`，
+    5.1 的词法分析器会报「缺少右括号」。先算好变量再插值。
+  - `.cmd` 文件**保持纯 ASCII + CRLF**，中文内容会被控制台代码页搞坏。
+
 - 历史上工作目录名 `GameTimeTracker-v0.9.5-alpha17-win-x64` 与 `v1.2.1` 指的是**同一个包**，只是改了名。
   新一代的包建议直接叫 `GameTimeTracker-v0.9.5-alpha18-win-x64`，**不要沿用旧的 alpha17 目录名**——
   目录名和内容版本不一致正是当初 `v1.2.1` 混乱的来源。
