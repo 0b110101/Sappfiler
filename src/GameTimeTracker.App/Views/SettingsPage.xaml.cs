@@ -23,6 +23,11 @@ public sealed partial class SettingsPage : Page
     protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
+
+        // 版本号来自 AssemblyInformationalVersion（由仓库根 Directory.Build.props 统一注入）。
+        // 形如 "0.9.5-alpha17"，展示时补上 "v" 前缀。
+        VersionText.Text = $"GameTimeTracker v{GetAppVersion()}";
+
         if (e.Parameter is (IDatabaseRepository repo, TrackerConfig config, INotionClient client))
         {
             _repo = repo;
@@ -40,6 +45,17 @@ public sealed partial class SettingsPage : Page
 
             RefreshStorageUi();
         }
+    }
+
+    /// <summary>读取程序集信息版本；取不到时回退到程序集版本，避免界面出现空白。</summary>
+    private static string GetAppVersion()
+    {
+        var asm = typeof(SettingsPage).Assembly;
+        return asm.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                   is [System.Reflection.AssemblyInformationalVersionAttribute info, ..]
+                   && !string.IsNullOrWhiteSpace(info.InformationalVersion)
+            ? info.InformationalVersion.Split('+')[0]
+            : asm.GetName().Version?.ToString() ?? "unknown";
     }
 
     private async void OnThemeToggled(object sender, RoutedEventArgs e)

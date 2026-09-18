@@ -16,4 +16,6 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!-- 版本号集中在 Directory.Build.props（仓库根），此处不重复定义。 -->
+
 </Project>

@@ -101,6 +101,13 @@
                     </Grid>
                 </StackPanel>
             </Border>
+
+            <!-- Version footer -->
+            <TextBlock x:Name="VersionText"
+                       HorizontalAlignment="Center"
+                       Margin="0,4,0,8"
+                       FontSize="12"
+                       Foreground="{ThemeResource TextSecondaryBrush}" />
         </StackPanel>
     </ScrollViewer>
 </Page>
