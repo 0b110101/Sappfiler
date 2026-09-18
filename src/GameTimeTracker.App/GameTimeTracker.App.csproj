@@ -106,5 +106,22 @@
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
+
+    <!--
+      只保留中/英文的本地化资源。
+
+      WinUI 的 native 库（Microsoft.ui.xaml.dll 等）会带 86 个语言的 .mui 卫星资源，
+      默认全部复制进发布目录 —— 于是包根目录多出 86 个语言文件夹（共约 3.7MB）。
+      它们只提供 WinUI **内部**字符串（主要是 XAML 报错信息）的本地化，
+      与本程序的界面无关（界面文案是硬编码中文，走 GameTimeTracker.App.pri）。
+
+      裁掉后不影响功能：Windows 的 MUI 机制找不到对应语言时会回退到
+      DLL 内嵌的英文中性资源。所以非中英文 Windows 上，WinUI 内部报错会显示英文。
+
+      ⚠️ 顶层的 .pri 文件（GameTimeTracker.App.pri / Microsoft.UI.Xaml.Controls.pri /
+         Microsoft.WindowsAppRuntime.pri）是**必需的应用资源，绝不能删**。
+         本属性只影响 .mui 卫星资源，不会碰 .pri。
+    -->
+    <SatelliteResourceLanguages>zh-CN;en-US</SatelliteResourceLanguages>
   </PropertyGroup>
 </Project>

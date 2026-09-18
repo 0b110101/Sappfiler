@@ -125,6 +125,39 @@ dotnet publish (Join-Path $repoRoot 'src/GameTimeTracker.App') `
 
 if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish 失败' }
 
+# ---- 4a. 清理多余的语言资源目录 ----
+# WinUI 的 native 库自带 86 个语言的 .mui 卫星资源，默认全被复制进来，
+# 于是包根目录多出 86 个语言文件夹（约 3.7MB）。它们只影响 WinUI **内部**
+# 字符串（主要是 XAML 报错）的本地化，与本程序界面无关（界面走 App.pri）。
+#
+# csproj 里已设 SatelliteResourceLanguages 做同样的事，但那只对 NuGet 卫星资源生效；
+# WinUI 的 .mui 是 WindowsAppSDK 目标复制的内容文件，不保证被它过滤，所以这里兜底。
+#
+# 只删「目录名像语言代码」**且**「里面只有 .mui」的目录 ——
+# 顶层的 .pri（App.pri / Microsoft.UI.Xaml.Controls.pri 等）是必需应用资源，绝不能被误删。
+$keepLocales = @('zh-CN', 'en-us', 'en-US', 'zh-Hans', 'zh-Hant')
+$removedLocales = @()
+foreach ($dir in Get-ChildItem $outDir -Directory) {
+    if ($keepLocales -contains $dir.Name) { continue }
+
+    # 目录名必须是语言代码形态：xx / xx-YY / xx-Script-YY
+    #   ja-JP、zh-CN、sr-Cyrl-RS、ca-Es-VALENCIA
+    # 不匹配 Assets / data / Microsoft.UI.Xaml.Resources 这类正常目录。
+    if ($dir.Name -notmatch '^[a-zA-Z]{2,3}(-[a-zA-Z]{2,4})?(-[a-zA-Z]{2,8})?$') { continue }
+
+    $files = Get-ChildItem $dir.FullName -File -Recurse
+    if ($files.Count -eq 0) { continue }
+    # 里面必须**只有** .mui —— 有任何其它文件就跳过，宁可留着也不误删
+    if ($files | Where-Object { $_.Extension -ne '.mui' }) { continue }
+
+    Remove-Item $dir.FullName -Recurse -Force
+    $removedLocales += $dir.Name
+}
+
+if ($removedLocales.Count -gt 0) {
+    Write-Host "已清理 $($removedLocales.Count) 个多余语言目录（保留 zh-CN / en-us）" -ForegroundColor DarkGray
+}
+
 # ---- 4b. 产物校验：拦下"能生成但跑不起来"的包 ----
 # 2026-09-18 就是栽在这里：Release 裁剪把 WinUI native 和 WinRT 投影删掉了，
 # 包正常生成、测试也全过，但程序一启动就崩。这种问题必须在打包阶段拦住，
@@ -138,7 +171,10 @@ $requiredFiles = @(
     'DWriteCore.dll',
     'GameTimeTracker.App.dll',
     'hostpolicy.dll',
-    'coreclr.dll'
+    'coreclr.dll',
+    'GameTimeTracker.App.pri',            # 应用资源（界面文案/资源），删了界面会出问题
+    'Microsoft.UI.Xaml.Controls.pri',
+    'Microsoft.WindowsAppRuntime.pri'
 )
 $missing = @()
 foreach ($f in $requiredFiles) {
