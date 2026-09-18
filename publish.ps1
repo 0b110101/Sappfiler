@@ -125,6 +125,23 @@ dotnet publish (Join-Path $repoRoot 'src/GameTimeTracker.App') `
 
 if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish 失败' }
 
+# ---- 3b. 把使用文档放进包 ----
+# QA / 用户拿到 zip 后应能直接看说明，不必回头找仓库。
+# README 是给使用者的（配置 Notion、更新方法、常见问题），
+# CHANGELOG 是给 QA 的（本版改了什么 / 重点验什么 / 已知问题）。
+$docCopies = @(
+    @{ Src = (Join-Path $repoRoot 'README.md');        Dst = 'README.md' },
+    @{ Src = (Join-Path $repoRoot 'CHANGELOG-QA.md');  Dst = '更新说明.md' }
+)
+foreach ($d in $docCopies) {
+    if (Test-Path $d.Src) {
+        Copy-Item $d.Src (Join-Path $outDir $d.Dst) -Force
+    } else {
+        Write-Host "  提示: 未找到 $($d.Src)，跳过" -ForegroundColor Yellow
+    }
+}
+Write-Host "已随包附带 README.md 与 更新说明.md" -ForegroundColor DarkGray
+
 # ---- 4a. 清理多余的语言资源目录 ----
 # WinUI 的 native 库自带 86 个语言的 .mui 卫星资源，默认全被复制进来，
 # 于是包根目录多出 86 个语言文件夹（约 3.7MB）。它们只影响 WinUI **内部**
@@ -167,6 +184,7 @@ $requiredFiles = @(
     'Microsoft.UI.Xaml.Controls.dll',
     'Microsoft.WinUI.dll',                # WinRT 投影
     'Microsoft.WindowsAppRuntime.Bootstrap.dll',
+    'Microsoft.WindowsAppRuntime.dll',    # 运行时本体（改依赖集后补入，防止漏引）
     'CoreMessagingXP.dll',
     'DWriteCore.dll',
     'GameTimeTracker.App.dll',

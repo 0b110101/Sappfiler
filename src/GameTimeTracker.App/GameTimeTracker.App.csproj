@@ -65,7 +65,36 @@
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+
+    <!--
+      ⚠️ 刻意**不引用** Microsoft.WindowsAppSDK 元包，改为只引用需要的子包。
+
+      元包本身是纯聚合包（build/*.targets 是空的，props 只声明 VS 的 ProjectCapability），
+      但它会连带拉进 4 个本程序完全用不到的组件：
+
+        Microsoft.WindowsAppSDK.AI       → 14 个 dll（AiFabric / AICapabilities / ContentSafety…）
+                                        → 还传递依赖 microsoft.windows.ai.machinelearning
+                                          带来 onnxruntime.dll(20.7MB) + DirectML.dll(17.8MB)
+        Microsoft.WindowsAppSDK.ML       → ML 包装层
+        Microsoft.WindowsAppSDK.Search   → Microsoft.Windows.Search.dll(3.3MB)
+        Microsoft.WindowsAppSDK.Widgets  → Microsoft.Windows.Widgets.dll(2.4MB)
+
+      合计约 55MB（发布包 285MB 的 19%，zip 约省 20MB）。
+      本程序不做 AI/ML、不接 Windows 搜索、不挂小组件，这些文件在包里纯属浪费。
+
+      版本号取自元包 2.5.1 的 nuspec 依赖清单，与其完全一致，避免版本漂移。
+
+      ⚠️ 改这里**必须实际构建 + 启动验证**：少引一个子包会导致
+         Microsoft.UI.Xaml.dll / WindowsAppRuntime.Bootstrap.dll 等缺失。
+         publish.ps1 的「产物校验」会拦住这类明显的缺失（见该脚本第 4b 节）。
+    -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="2.0.4" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.12" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.DWrite" Version="2.1.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
+
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.6.1" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
