@@ -228,14 +228,17 @@
 **任何工程都会中招**——连一个全新的、零依赖的 `net10.0` 控制台项目也还原失败。
 `dotnet --info` 正常；`obj/project.assets.json` 已存在时 `dotnet build --no-restore` 也正常。
 
-**真正的根因**（机器级 Windows 配置损坏，**与本项目无关**）：
-注册表值
-`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders\Common AppData`
-存的是**未展开的字符串 `%ProgramData%`**，而本机系统环境块里 **`ProgramData` 变量缺失**
-（`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 下
-`ProgramData` / `APPDATA` / `ALLUSERSPROFILE` 全为空）。
-展开 `%ProgramData%` 得到空串 → `.NET` 的 `Environment.GetFolderPath(CommonApplicationData)`
-返回 null → NuGet 的 `NuGetEnvironment.CalculateFolderPath` 里
+**真正的根因**（机器级 Windows 配置问题，**与本项目无关**）：
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 下
+**系统环境变量块缺失了标准文件夹变量**：`ProgramData` / `PUBLIC` / `ALLUSERSPROFILE` /
+`APPDATA` / `LOCALAPPDATA` / `USERPROFILE`（该键下只剩 15 个杂项变量，全是处理器信息之类）。
+
+由于 `ProgramData` 变量不存在，注册表里所有 `REG_EXPAND_SZ` 值的 `%ProgramData%` 都展开成空串：
+- `User Shell Folders\Common AppData` = `%ProgramData%` → 展开为空
+- 同键下 `Common Programs` / `Common Start Menu` / `Common Startup` / `Common Templates` 全依赖它
+
+于是 `.NET` 的 `Environment.GetFolderPath(CommonApplicationData)` 返回 null，
+NuGet 的 `NuGetEnvironment.CalculateFolderPath` 里
 `Path.Combine(null, "NuGet")` 抛 `ArgumentNullException('path1')`。
 
 完整调用栈（`-v:diag` 可见）：
@@ -243,21 +246,57 @@
 `XPlatMachineWideSetting..ctor` → `NuGetEnvironment.GetFolderPath` →
 `NuGetEnvironment.CalculateFolderPath` → `Path.Combine` → 抛异常。
 
-**永久修复（需要管理员权限）**：把该注册表值从 `%ProgramData%` 改成字面量 `C:\ProgramData`，
-或修复系统环境块补回 `ProgramData` / `APPDATA` / `ALLUSERSPROFILE`。修好后一切恢复正常。
+**快速自检命令**（不需要构建就能确认这个故障）：
+```
+dotnet nuget locals http-cache --list
+```
+正常应输出缓存路径；本故障下会报 `error: Value cannot be null. (Parameter 'path1')`。
+`all` / `global-packages` / `temp` / `plugins-cache` 同样会失败。
+
+**修复（需要管理员权限，改完必须重启或注销重登）**
+
+⚠️ **不要把注册表值改成写死的 `C:\ProgramData`。** 那是掩盖症状的错修法：
+`User Shell Folders` 下的值本来就该是 `REG_EXPAND_SZ` 的 `%ProgramData%`，
+因为系统盘符/位置可能不同、企业环境可能重定向。**要修的是变量本身缺失，不是引用方式。**
+
+第 1 步 —— 确保注册表值是原本应有的可展开写法（若你之前已改成字面量，请改回来）：
+```powershell
+Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" `
+  -Name "Common AppData" -Value "%ProgramData%" -Type ExpandString
+```
+
+第 2 步 —— 补齐系统环境变量块里缺失的标准变量：
+```powershell
+$k = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+$pc = [char]0x25 + "USERPROFILE" + [char]0x25
+Set-ItemProperty $k -Name "ProgramData"     -Value "C:\ProgramData"           -Type ExpandString
+Set-ItemProperty $k -Name "PUBLIC"          -Value "C:\Users\Public"          -Type ExpandString
+Set-ItemProperty $k -Name "ALLUSERSPROFILE" -Value "C:\ProgramData"           -Type ExpandString
+Set-ItemProperty $k -Name "APPDATA"         -Value ($pc + "\AppData\Roaming") -Type ExpandString
+Set-ItemProperty $k -Name "LOCALAPPDATA"    -Value ($pc + "\AppData\Local")   -Type ExpandString
+Set-ItemProperty $k -Name "USERPROFILE"     -Value "C:\Users\bbbab"           -Type ExpandString
+```
+
+> 这里 Windows 系统环境块里 `ProgramData` / `PUBLIC` / `ALLUSERSPROFILE` / `USERPROFILE`
+> 存的就是**字面路径**（这是 Windows 自身约定），只有 `APPDATA` / `LOCALAPPDATA`
+> 才写成 `%USERPROFILE%\...` 展开式。所以上面的写法是符合系统规范的，不是临时凑合。
+
+第 3 步 —— **重启或注销重登**。Windows 需要重建环境块并广播给所有进程。
+**注意：改注册表对已在运行的进程无效**（本会话实测：在新 `cmd` 里手动 `set` 这些变量也救不回来，
+因为 .NET 不会按进程环境重新展开注册表里的 `%VAR%`）。所以要重开会话才能验证。
 
 **重要**：这个故障**连 `obj/project.assets.json` 已存在时也拦不住**——
 错误会从 `NuGet.targets(782)` 转成
 `Microsoft.PackageDependencyResolution.targets(266)` 的 `NETSDK1060`，
 因为**加载**资产文件同样要解析 `packageFolders` 的路径。
 所以「保留 obj + `--no-restore`」的偏方在本机也无效（实测）。
-**当前状态下无法构建也无法跑测试。** 在此之前不要清理 `obj/`，
+在环境修好之前**无法构建也无法跑测试**。不要清理 `obj/`，
 也不要尝试手工伪造 `project.assets.json`（伪造文件同样被 `path1` null 挡住）。
 
 **已证伪、不要再走一遍的假设**（每条都实测过）：
 - ❌ 缺 `C:\Program Files\dotnet\library-packs\` —— 补建后仍失败
-- ❌ 缺 `C:\ProgramData\NuGet\` —— 补建后仍失败
-- ❌ `APPDATA` 为空 —— 显式设置后仍失败
+- ❌ 缺 `C:\ProgramData\NuGet\` 目录 —— 补建后仍失败
+- ❌ 把注册表值写死成 `C:\ProgramData` —— 治标不治本（详见上面警告）
 - ❌ `Directory.Build.props` 引起 —— 移走仍失败
 - ❌ `obj/` 脏 —— 删干净后仍失败
 - ❌ 缺 `NuGet.Config` —— 补上仍失败，且是**不该提交**的文件
@@ -267,7 +306,10 @@
 - ❌ 在 `.cmd` 里 `set ProgramData=...` —— 无效
 - ❌ 直接跑 `MSBuild.dll`、完整重建标准 Windows 环境、禁用节点复用 —— 全失败
 
-**结论：不要在项目里"修"它，不要提交任何 `NuGet.Config` 变通文件。**
+**结论**：这是**跟着机器走、不跟着发布包走**的问题——
+任何 .NET 项目在这台机器上都会中招（已用零依赖的新控制台项目复现），
+但用户下载发布包运行时用的是他们自己正常的 Windows，不受影响。
+**不要在项目里"修"它，不要提交任何 `NuGet.Config` 变通文件。**
 
 ### 已经踩过、代价很大的坑（务必牢记）
 
