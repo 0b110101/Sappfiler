@@ -150,14 +150,38 @@
 ## 每日记录标题的「回刷」机制（2026-09-18，用户选 B 方案）
 - **问题**：Pull 只同步时长、不碰标题，所以总表改名后历史记录**永远停在旧名上**。
 - **方案**：`NotionSyncService.RefreshDailyTitlesFromMasterAsync()`，已挂进全部四条同步链。
-- **性能关键**：`daily_summary.notion_title` 存**远端标题快照**，逐条比对「快照 vs 期望标题」，
-  只有真不一致才 PATCH。没有快照的话每轮要 PATCH 全部历史记录（随天数线性增长，不可接受）。
-  - 首轮 `notion_title` 为空的记录会被判为"需回刷"一次，之后就有快照。
-  - `NotionDailyRecordItem.RawTitle`（**保留时长后缀的原文**）专供比对。
+- **性能关键**：`daily_summary` 存**两份远端快照** —— `notion_title` + `notion_icon_url`，
+  逐条比对「快照 vs 期望值」，只有真不一致才 PATCH。
+  没有快照的话每轮要 PATCH 全部历史记录（随天数线性增长，不可接受）。
+  - **两份快照必须一起比对、一起写。** 只比标题是个**隐蔽的性能陷阱**：
+    `iconUrl != null` 只表示"总表里设了图标"，不代表"这个页面图标不对"，
+    所以只要总表有条目设了图标，所有历史记录就**每轮都被 PATCH**。
+    守护用例：`RefreshTitles_IsNoOp_WhenNothingChanged`（**别删**）。
+  - **推送成功后立刻落快照**（`RecordRemoteSnapshotAsync`）。不落的话本地就是**明知故犯地错**：
+    刚把图标写上去、快照还写着"没有图标"，下轮多做一次多余 PATCH。
+    不变式：快照 = "最近一次写入或观察到的远端值"。
+    守护用例：`SyncPending_RecordsSnapshot_SoBackRefreshDoesNotRepatch`。
+  - 首轮快照为空的记录会被判为"需回刷"一次，之后就有快照。
+  - `NotionDailyRecordItem.RawTitle`（**保留时长后缀的原文**）专供标题比对。
     **不要用 `GameTitle`**（已剥后缀的裸名）——那会把每条都误判成不一致，反复 PATCH。
 - **必须排在 `SyncPendingDailyRecordsAsync` 之后**（刚推上去的记录才有快照）。
 - `EnsureMasterPageIconsAsync()` 已从 `BackfillRelationsAsync` 末尾挪到**开头**：
   回填时要从 `game_catalog.IconUrl` 取图，而 Steam 图标正是这一步写进缓存/总表页面的。
+- **标题格式的唯一定义是 `internal static class DailyRecordTitle`**（`Build` / `StripSuffix` / `SuffixRegex`）。
+  **不要在 `NotionClient` 或 `NotionSyncService` 里各写一份** ——
+  "写标题"和"比对标题"必须共用同一套规则，否则格式一旦漂移（改小数位、换分隔符），
+  回刷会永远判定不一致、每轮白打 Notion。
+  （alpha18 首轮构建失败就是这个坑：`BuildDailyRecordTitle` 曾是 `NotionClient` 私有方法。）
+
+## page id 匹配必须连字符不敏感（2026-09-18 踩坑）
+- Notion 的 page id 有时带连字符（8-4-4-4-12）有时不带，
+  而 `games.notion_page_id` 与 `game_catalog.page_id` 的来源路径不同，**不能假设两边形式一致**。
+- 已修：`GetCatalogItemByPageIdAsync` 与 `UpdateDailyRecordFromNotionAsync`
+  都改为 `page_id = @raw OR REPLACE(page_id,'-','') = @normalized`。
+- **只做精确匹配的后果是静默失败**：返回 null / 0 行不报错，
+  表现为"每日记录用了进程名而不是总表名、图标也没了"或"回刷永远不收敛"，极难查。
+  （`EnsureMasterPageIconsAsync` 里手工 `Replace("-","")` 就是前人踩过这坑的痕迹。）
+- 同理：快照写回 0 行时必须打警告，否则症状只是"同步一直很慢"。
 
 ## 新用户首次保存配置后自动同步（2026-09-18）
 - 触发条件是**状态跃迁**：`保存前 !IsNotionConfigured && 保存后 IsNotionConfigured`。
@@ -168,6 +192,13 @@
   同步期间禁用「保存/测试连接」按钮防重复点击。
 
 ## 本机构建环境坑：NuGet 文件夹解析返回 null（2026-09-18 彻底排查结论）
+- **当前状态（09-18 晚）**：用户重启后**自己的终端已可正常构建**（`publish.cmd` 跑通了还原与编译）。
+  但 **WorkBuddy 工具自己的 shell 仍然是坏的**（`dotnet` 依旧报 `path1`），
+  所以 AI 无法在本会话内构建/跑测试，**只能做静态复查，验证靠用户执行 `publish.cmd`**。
+- **`ExecutionPolicy = Restricted`**（本机实测）：直接 `.\publish.ps1` 会被拒绝执行
+  （「在此系统上禁止运行脚本」）。故仓库根提供 **`publish.cmd`** 包装
+  （`powershell -ExecutionPolicy Bypass -File`，**只影响单次调用**，不改系统持久设置）。
+  **打包一律用 `publish.cmd`，不要去动全局执行策略。**
 - **症状**：`dotnet restore` / `build` 报
   `NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')`。
   **任何工程都会中招**——连一个全新的、零依赖的 `net10.0` 控制台项目也还原失败。
