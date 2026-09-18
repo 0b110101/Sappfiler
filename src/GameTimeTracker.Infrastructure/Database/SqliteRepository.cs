@@ -933,7 +933,14 @@ public class SqliteRepository : IDatabaseRepository
                 // 本地时长领先（Notion 还停在旧值）时必须保留 pending，
                 // 否则每轮 Pull 都会把心跳刚标记的 pending 洗成 synced，
                 // 推送永远查不到待上传记录 —— Notion 时长就停在首次创建时的值。
-                bool localAhead = existingSeconds > item.DurationMinutes * 60;
+                //
+                // ⚠️ 必须带容差：远端「单次时长」的单位是**小时且只保留 1 位小数**，
+                //    换算回分钟的粒度是 6 分钟，最多差 ±3 分钟。
+                //    用精确比较的话，本地 15 分钟对应远端 0.2h(=12分)，
+                //    会永远被判成"本地领先"→ 每轮重推 → 停不下来。
+                //    （与 unmapped 那次是同一类问题：某个状态永远命中筛选条件。）
+                const int MinutesPerHour10th = 3;   // 0.1h = 6 分钟，取整最多差半个粒度
+                bool localAhead = existingSeconds > (item.DurationMinutes + MinutesPerHour10th) * 60;
 
                 await conn.ExecuteAsync(
                     """

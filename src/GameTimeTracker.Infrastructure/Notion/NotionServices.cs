@@ -31,11 +31,18 @@ internal static class DailyRecordTitle
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
+    /// 分钟 → 小时（保留 1 位小数）。「单次时长」数值属性与标题后缀共用这一个换算，
+    /// 保证两者永远一致（曾出现过标题是小时、数值是分钟的不一致）。
+    /// </summary>
+    internal static double MinutesToHours(int durationMinutes)
+        => Math.Round(durationMinutes / 60.0, 1);
+
+    /// <summary>
     /// 拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。
     /// 参数是**游戏名**，不是拼好的标题 —— 传完整标题进来会拼出「X · 0.7 h · 0.7 h」。
     /// </summary>
     internal static string Build(string gameName, int durationMinutes)
-        => $"{gameName} · {Math.Round(durationMinutes / 60.0, 1)} h";
+        => $"{gameName} · {MinutesToHours(durationMinutes)} h";
 
     /// <summary>剥掉标题末尾的时长后缀，得到裸游戏名。</summary>
     internal static string StripSuffix(string rawTitle)
@@ -261,7 +268,11 @@ public class NotionClient : INotionClient
                     // 新名优先，旧名兜底 —— 2026-09-18 用户把属性改名了
                     // （时长 → 单次时长、游戏 → 关联游戏），但别人的表可能还没改，
                     // 读的时候两种都认，免得拉不回老数据。
-                    var duration = ExtractNumber(props, "单次时长", "时长", "时长(分)", "Duration", "DurationMinutes");
+                    //
+                    // ⚠️ 「单次时长」的值是**小时**（1 位小数），本地模型一律用**分钟**，
+                    //    所以这里必须换算，并且要兼容"旧行存的是分钟"。
+                    var durationRaw = ExtractDouble(props, "单次时长", "时长", "时长(分)", "Duration", "DurationMinutes");
+                    var duration = RawDurationToMinutes(durationRaw);
                     var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
 
@@ -308,7 +319,8 @@ public class NotionClient : INotionClient
         {
             ["游戏动态"] = new { title = new[] { new { text = new { content = titleText } } } },
             ["日期"] = new { date = new { start = date } },
-            ["单次时长"] = new { number = durationMinutes },
+            // 值是**小时**（1 位小数），不是分钟 —— 与标题后缀保持一致。
+            ["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) },
             ["绑定状态"] = new { select = new { name = !string.IsNullOrEmpty(gamePageId) ? "已绑定" : "未绑定" } }
         };
 
@@ -343,7 +355,8 @@ public class NotionClient : INotionClient
         // 属性名同 CreateDailyRecordAsync：游戏动态 / 单次时长 / 关联游戏
         var properties = new Dictionary<string, object>
         {
-            ["单次时长"] = new { number = durationMinutes }
+            // 值是**小时**（1 位小数），与创建时以及标题后缀保持一致
+            ["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) }
         };
 
         if (!string.IsNullOrEmpty(gameName))
@@ -556,7 +569,14 @@ public class NotionClient : INotionClient
         return string.Empty;
     }
 
-    private static int ExtractNumber(JsonElement props, params string[] propertyNames)
+    /// <summary>
+    /// 读取 Number 属性为 double。取不到返回 null。
+    /// </summary>
+    /// <remarks>
+    /// 必须用 GetDouble 而不是 GetInt32：「单次时长」现在是**小时且带 1 位小数**（如 0.7），
+    /// 对小数调用 GetInt32 会直接抛异常，整条记录拉不回来。
+    /// </remarks>
+    private static double? ExtractDouble(JsonElement props, params string[] propertyNames)
     {
         foreach (var pName in propertyNames)
         {
@@ -564,11 +584,32 @@ public class NotionClient : INotionClient
             {
                 if (type.GetString() == "number" && pObj.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number)
                 {
-                    return n.GetInt32();
+                    return n.GetDouble();
                 }
             }
         }
-        return 0;
+        return null;
+    }
+
+    /// <summary>
+    /// 把「单次时长」属性里的原始值换算成**分钟**（本地模型一律用分钟）。
+    /// </summary>
+    /// <remarks>
+    /// 属性现在的单位是**小时**（1 位小数），但历史行里存的是**分钟**。
+    /// 判别方式：一款游戏单日时长不可能超过 24 小时，
+    /// 所以值 &gt; 24 的必然是旧的分钟格式，直接按分钟用。
+    ///
+    /// 取舍说明：旧格式里 ≤ 24 的值（例如某天只玩了 15 分钟）会被误判成 15 小时。
+    /// 这种情况少见，且影响有界；相比"把 42 分钟读成 42 小时"的破坏性小得多。
+    /// </remarks>
+    private static int RawDurationToMinutes(double? raw)
+    {
+        if (raw is not { } value || value <= 0) return 0;
+
+        const double MaxPlausibleHours = 24.0;
+        return value > MaxPlausibleHours
+            ? (int)Math.Round(value)            // 旧格式：本来就是分钟
+            : (int)Math.Round(value * 60.0);    // 新格式：小时 → 分钟
     }
 
     private static string? ExtractRelationId(JsonElement props, params string[] propertyNames)
