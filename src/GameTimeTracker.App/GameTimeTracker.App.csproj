@@ -83,11 +83,28 @@
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
 
-  <!-- Publish Properties -->
+  <!--
+    Publish Properties
+
+    ⚠️ PublishTrimmed 必须保持 false。WinUI 3 **不支持裁剪**：
+    XAML 的数据绑定、{x:Bind}、资源查找、WinRT 投影全都靠反射按名字解析类型，
+    裁剪器静态分析看不到这些引用，会把 Microsoft.UI.Xaml.* 等 native 实现
+    和 *.Projection.dll 一起删掉。
+
+    实测症状（2026-09-18）：Release 发布后程序一启动就崩，
+    日志里是 WinRT 投影层的 NullReferenceException：
+        at WinRT.TypeExtensions.GetAbiToProjectionVftblPtr(Type helperType)
+        at ABI.Microsoft.UI.Xaml.Controls.IItemsRepeaterMethods.set_ItemsSource(...)
+        at HomePage.HomePage_obj1_Bindings.Update_ViewModel(...)
+    产物对比：裁剪后 101 文件 / 86MB（Microsoft.UI.Xaml.dll 等全缺），
+    不裁剪 449 文件 / 285MB（正常）。
+
+    之前这里写的是 `Configuration != Debug → True`，是个藏了很久的地雷：
+    只要有人用 Release 发布就会产出必崩的包。已改为恒定 false。
+  -->
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
 </Project>

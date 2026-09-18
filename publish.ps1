@@ -108,13 +108,57 @@ Write-Host ""
 Write-Host "发布到 $outDir ..." -ForegroundColor Cyan
 if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
 
+# 这些参数**显式传**，不依赖 csproj 的默认值 —— 它们任何一项搞错都会产出
+# "能生成、但一启动就崩"的包，而且崩在 XAML 里、报错和原因完全对不上。
+#   PublishTrimmed=false         WinUI 3 不支持裁剪（见 csproj 里的详细说明）
+#   WindowsAppSDKSelfContained   把 WinUI 的 native 实现打进包里，
+#                                否则依赖机器上装没装 WindowsAppRuntime
+#   SelfContained                自带 .NET 运行时，QA 机器无需预装
 dotnet publish (Join-Path $repoRoot 'src/GameTimeTracker.App') `
     -c $Configuration `
     -r $RuntimeIdentifier `
+    -p:PublishTrimmed=false `
+    -p:SelfContained=true `
+    -p:WindowsAppSDKSelfContained=true `
     --nologo `
     -o $outDir
 
 if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish 失败' }
+
+# ---- 4b. 产物校验：拦下"能生成但跑不起来"的包 ----
+# 2026-09-18 就是栽在这里：Release 裁剪把 WinUI native 和 WinRT 投影删掉了，
+# 包正常生成、测试也全过，但程序一启动就崩。这种问题必须在打包阶段拦住，
+# 否则 QA 拿到的是个必崩的包。
+$requiredFiles = @(
+    'Microsoft.UI.Xaml.dll',              # WinUI XAML 的 native 实现
+    'Microsoft.UI.Xaml.Controls.dll',
+    'Microsoft.WinUI.dll',                # WinRT 投影
+    'Microsoft.WindowsAppRuntime.Bootstrap.dll',
+    'CoreMessagingXP.dll',
+    'DWriteCore.dll',
+    'GameTimeTracker.App.dll',
+    'hostpolicy.dll',
+    'coreclr.dll'
+)
+$missing = @()
+foreach ($f in $requiredFiles) {
+    if (-not (Test-Path (Join-Path $outDir $f))) { $missing += $f }
+}
+
+if ($missing.Count -gt 0) {
+    Write-Host ""
+    Write-Host "产物校验失败：缺少以下关键文件" -ForegroundColor Red
+    foreach ($f in $missing) { Write-Host "  - $f" -ForegroundColor Red }
+    Fail @"
+缺文件通常意味着 PublishTrimmed 被打开了（WinUI 3 不支持裁剪），
+或 WindowsAppSDKSelfContained / SelfContained 没生效。
+这样的包能生成但一启动就崩，不要交给 QA。
+请检查 GameTimeTracker.App.csproj 的 Publish Properties 段。
+"@
+}
+
+$fileCount = (Get-ChildItem $outDir -File -Recurse | Measure-Object).Count
+Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐全）" -ForegroundColor Green
 
 # ---- 5. 写 VERSION.txt ----
 $versionFile = Join-Path $outDir 'VERSION.txt'

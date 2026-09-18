@@ -492,6 +492,41 @@ Set-ItemProperty $k -Name "USERPROFILE"     -Value "C:\Users\bbbab"           -T
     从 Bash 直接调 `cmd.exe /c`、`reg.exe`、`msbuild` 会被安全层拦截（判定为绕过校验），
     必须写成 `./x.cmd` 形式执行。
 
+11. **⚠️ WinUI 3 绝对不能开 `PublishTrimmed`（2026-09-18 真实事故，代价很大）。**
+    `GameTimeTracker.App.csproj` 里原本写着 `Configuration != Debug → PublishTrimmed=True`，
+    是个藏了很久的地雷：**只要用 Release 发布就会产出必崩的包**。
+
+    **症状**：程序一启动就崩，日志里是 WinRT 投影层的 `NullReferenceException`，
+    和真实原因完全对不上：
+    ```
+    NullReferenceException: Object reference not set to an instance of an object.
+       at WinRT.TypeExtensions.GetAbiToProjectionVftblPtr(Type helperType)
+       at ABI.Microsoft.UI.Xaml.Controls.IItemsRepeaterMethods.set_ItemsSource(...)
+       at HomePage.HomePage_obj1_Bindings.Update_ViewModel(...)
+    ```
+
+    **原因**：XAML 数据绑定、`{x:Bind}`、资源查找、WinRT 投影**全靠反射按名字解析类型**，
+    裁剪器静态分析看不到这些引用，就把 `Microsoft.UI.Xaml.dll` / `Microsoft.UI.Xaml.Controls.dll` /
+    `CoreMessagingXP.dll` / `DWriteCore.dll` 等 native 实现、以及所有 `*.Projection.dll` 一起删了。
+    `GetAbiToProjectionVftblPtr` 返回 null 就是投影程序集被删的直接后果。
+
+    **怎么识别**（产物对比，一眼就能看出来）：
+    | | 正常 | 被裁剪 |
+    |---|---|---|
+    | 文件数 | ~449 | ~101 |
+    | 体积 | ~285 MB | ~86 MB |
+    | `GameTimeTracker.App.dll` | ~753 KB | ~610 KB |
+    | `Microsoft.UI.Xaml.dll` | 有 | **缺** |
+
+    **已修**：csproj 里改成恒定 `<PublishTrimmed>False</PublishTrimmed>`（附详细注释）；
+    `publish.ps1` 另外显式传 `-p:PublishTrimmed=false`，
+    并新增**产物校验**——发布后检查 `Microsoft.UI.Xaml.dll` 等 9 个关键文件，
+    缺任何一个就中止打包。**这类"包能生成、测试也全过、但一跑就崩"的问题必须在打包阶段拦住。**
+
+    教训：`publish.ps1` 里 `PublishTrimmed` / `SelfContained` / `WindowsAppSDKSelfContained`
+    这三项**一律显式传参**，不要依赖 csproj 默认值——它们的默认值会随 Configuration 变化，
+    而且错了之后的报错完全指不到原因。
+
 ---
 
 ## 6. 维护节奏建议
