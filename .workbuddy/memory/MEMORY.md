@@ -113,27 +113,48 @@
 - 发布包命名须与之一致：`GameTimeTracker-v0.9.5-alpha17-win-x64.zip`。
 - 提交 `9ad2b53`。构建 0 警告 0 错误，**69 个测试全过**，程序集元数据已实测验证。
 
-## 本机构建环境坑：NuGet 回退目录缺失（2026-09-18 排查结论）
-- **症状**：`dotnet restore` / `build` 对**四个工程全部**报
-  `NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')`，
-  失败位置在 `_GetRestoreSettings` → `GetRestoreSettingsTask`。而 `dotnet --info` 完全正常。
-- **根因**：本机 **`C:\Program Files\dotnet\library-packs\` 目录不存在**（正常 SDK 安装会创建它）。
-  NuGet 解析回退文件夹（fallback folders）时拿到空路径，在 `GetRestoreSettingsTask` 里路径运算抛 null。
-- **不是项目缺陷**：在未经任何修改的 `dist/GameTimeTracker-github/` 副本上同样复现。
-- **唯一有效的绕过**：给 restore/build 加 **`-p:RestoreFallbackFolders=`**（显式清空）。
-  例：`dotnet build GameTimeTracker.slnx -c Release -p:RestoreFallbackFolders=`
-- **永久修复**（需管理员权限，当前会话无权限）：创建该目录，或重新运行 .NET SDK 安装程序做修复安装。
-  **修好之后就不需要 `-p:RestoreFallbackFolders=` 了。**
-- **已证伪、不要再走一遍的假设**：
-  - 不是 `APPDATA` 为空（本机 shell 里 `APPDATA` 确实是空串，但显式设置后错误照旧）
-  - 不是 `Directory.Build.props` 引起（把它移走仍失败）
-  - 不是 `obj/` 缓存脏（四个工程的 `obj/` 全删后仍失败）
-  - 不是缺 `NuGet.Config`（补上后仍失败；而且补了反而多一个**不该提交**的文件，已删除）
-  - 不是 `globalPackagesFolder` 配置问题（包目录 `C:\Users\bbbab\.nuget\packages` 一直是正确的）
-- **自动化 shell 的两个怪癖**：
-  1. `APPDATA` 是空串（会影响部分工具链）
-  2. PowerShell 工具在本环境**会吞掉 stdout**，不返回任何输出。
-     需要看命令输出时：写成 `.cmd` 文件执行，输出重定向到文件再读。
-     另注：从 Bash 直接调用 `cmd.exe /c` 会被安全层拦截（判定为绕过校验），
-     必须写成 `.cmd` 文件后以 `./x.cmd` 形式执行。
+## 本机构建环境坑：NuGet 文件夹解析返回 null（2026-09-18 彻底排查结论）
+- **症状**：`dotnet restore` / `build` 报
+  `NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')`。
+  **任何工程都会中招**——连一个全新的、零依赖的 `net10.0` 控制台项目也还原失败。
+  但 `dotnet --info`、`dotnet build`（在 `obj/` 资产已存在时）都正常。
+- **真正的根因**：注册表值
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders\Common AppData`
+  存的是**未展开的字符串 `%ProgramData%`**，
+  而本机系统环境块里 **`ProgramData` 变量缺失**
+  （`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 下
+  `ProgramData` / `APPDATA` / `ALLUSERSPROFILE` 全为空）。
+  于是展开 `%ProgramData%` 得到空串，`.NET` 的
+  `Environment.GetFolderPath(CommonApplicationData)` 返回 null，
+  NuGet 的 `NuGetEnvironment.CalculateFolderPath` 里
+  `Path.Combine(null, "NuGet")` 抛 `ArgumentNullException('path1')`。
+- **完整调用栈**（`-v:diag` 可见）：
+  `GetRestoreSettingsTask.Execute` → `RestoreSettingsUtils.ReadSettings`
+  → `XPlatMachineWideSetting..ctor` → `NuGetEnvironment.GetFolderPath`
+  → `NuGetEnvironment.CalculateFolderPath` → `Path.Combine` → 抛异常。
+- **永久修复（需要管理员权限，当前会话无权限，已确认被拒）**：
+  把该注册表值从 `%ProgramData%` 改成字面量 `C:\ProgramData`
+  （或修复系统环境块，补回 `ProgramData` / `APPDATA` / `ALLUSERSPROFILE`）。
+  修好后 `dotnet restore` / `build` / `test` 恢复正常。
+- **有效绕过（不需要管理员权限）**：只要 `obj/project.assets.json` 还存在，
+  `dotnet build --no-restore` 就能正常编译，`dotnet test --no-build` 也能跑。
+  即：**保留 `obj/` 目录，不要清理它**；不要在缺资产的机器上做 `--no-incremental`。
+- **已证伪、不要再走一遍的假设**（每一条都实测过）：
+  - ❌ 不是缺 `C:\Program Files\dotnet\library-packs\`（补建后仍失败）
+  - ❌ 不是缺 `C:\ProgramData\NuGet\` 目录（补建后仍失败）
+  - ❌ 不是 `APPDATA` 为空（显式设置后仍失败）
+  - ❌ 不是 `Directory.Build.props` 引起（移走仍失败）
+  - ❌ 不是 `obj/` 缓存脏（删干净后仍失败；脏的只是"没有资产"这个后果）
+  - ❌ 不是缺 `NuGet.Config`（补上仍失败；且是**不该提交**的文件，已删）
+  - ❌ `-p:RestoreFallbackFolders=` 无效（错误从 782 行移到 198 行，仍在同一根因上）
+  - ❌ `-p:UserProfileDir=` / `-p:ProgramData=` / `-p:RestoreConfigFile` 等 MSBuild 属性无效
+    （NuGet 直接调 OS 文件夹 API，不读 MSBuild 属性）
+  - ❌ `NUGET_COMMON_APPLICATION_DATA` 环境变量无效（该变量只在 Unix/macOS 分支生效）
+  - ❌ 在 `.cmd` 里 `set ProgramData=...` 无效（.NET 不按进程环境重新展开注册表里的 `%VAR%`）
+  - ❌ PowerShell 工具在本环境**吞掉 stdout**，必须重定向落盘再读
+- **旁证**：绕过 dotnet CLI 直接跑 `MSBuild.dll`、用完整重建的标准 Windows 环境启动、
+  禁用 MSBuild 节点复用（`-nodeReuse:false` / `MSBUILDDISABLENODEREUSE=1`）——全都失败。
+  这排除了 CLI 包装器、节点复用、环境继承这三类猜测。
+- **注意**：这是**机器级 Windows 配置损坏**，与 GameTimeTracker 项目本身无关，
+  不要试图在项目里"修"它（不要提交任何 `NuGet.Config` 变通文件）。
 
