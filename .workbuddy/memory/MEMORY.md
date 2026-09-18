@@ -200,6 +200,35 @@
 - 进度提示用 `StatusInfoBar` 文案切换即可（用户明确说**不需要进度条**），
   同步期间禁用「保存/测试连接」按钮防重复点击。
 
+## ⚠️ WinUI 3 绝对不能开 PublishTrimmed（2026-09-18 真实事故）
+- **症状**：Release 包一启动就崩，日志是 WinRT 投影层 `NullReferenceException`，
+  **和真实原因完全对不上**：
+  ```
+  at WinRT.TypeExtensions.GetAbiToProjectionVftblPtr(Type helperType)
+  at ABI.Microsoft.UI.Xaml.Controls.IItemsRepeaterMethods.set_ItemsSource(...)
+  at HomePage.HomePage_obj1_Bindings.Update_ViewModel(...)
+  ```
+- **原因**：XAML 绑定 / `{x:Bind}` / 资源查找 / WinRT 投影全靠反射按名字解析类型，
+  裁剪器静态分析看不到这些引用，会把 `Microsoft.UI.Xaml.dll` / `Microsoft.UI.Xaml.Controls.dll` /
+  `CoreMessagingXP.dll` / `DWriteCore.dll` 等 native 实现 + 全部 `*.Projection.dll` 删掉。
+  `GetAbiToProjectionVftblPtr` 返回 null 就是投影程序集被删的直接后果。
+- **产物对比（一眼可辨，先看这个）**：
+  | | 正常 | 被裁剪 |
+  |---|---|---|
+  | 文件数 | ~449 | ~101 |
+  | 体积 | ~285 MB | ~86 MB |
+  | `GameTimeTracker.App.dll` | ~753 KB | ~610 KB |
+  | `Microsoft.UI.Xaml.dll` | 有 | **缺** |
+- **已修**：csproj 恒定 `<PublishTrimmed>False</PublishTrimmed>`（附详细注释）；
+  `publish.ps1` 显式传 `-p:PublishTrimmed=false -p:SelfContained=true
+  -p:WindowsAppSDKSelfContained=true`，并新增**产物校验**
+  （检查 9 个关键文件，缺任何一个中止打包）。
+- **通用教训**：
+  - **"测试全过 + 构建零错误" ≠ 包能用**。测试跑的是普通构建，发布配置是另一套参数。
+  - 打包脚本**必须做产物校验**，把"能生成但跑不起来"拦在交付前。
+  - 影响发布行为的关键参数（`PublishTrimmed` / `SelfContained` / `WindowsAppSDKSelfContained`）
+    **一律显式传参**，不要依赖会随 Configuration 变化的 csproj 默认值。
+
 ## 本机构建环境坑：NuGet 文件夹解析返回 null（2026-09-18 彻底排查结论）
 - **当前状态（09-18 晚）**：用户重启后**自己的终端已可正常构建**（`publish.cmd` 跑通了还原与编译）。
   但 **WorkBuddy 工具自己的 shell 仍然是坏的**（`dotnet` 依旧报 `path1`），
