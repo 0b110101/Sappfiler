@@ -16,10 +16,37 @@ public class GameMatcherTests
     [InlineData("Final Fantasy VII Rebirth", "final fantasy 7 rebirth")]
     [InlineData("Grand Theft Auto V", "grand theft auto 5")]
     [InlineData("Monster Hunter: World", "monster hunter world")]
+    // 末尾括号里的年份要剥掉（总表「别名」常写成这样，而进程名不带）
+    [InlineData("Valheim (2020)", "valheim")]
+    [InlineData("Doom (2016)", "doom")]
+    [InlineData("Prey [2017]", "prey")]
+    // 但裸年份不能剥 —— 那是游戏名的组成部分，剥了会让不同代互相误匹配
+    [InlineData("Football Manager 2024", "football manager 2024")]
+    [InlineData("F1 2023", "f1 2023")]
+    [InlineData("NBA 2K24", "nba 2k24")]
     public void NormalizeTitle_ShouldNormalizeProperly(string input, string expected)
     {
         var result = _matcher.NormalizeTitle(input);
         result.Should().Be(expected);
+    }
+
+    [Fact]
+    public void MatchGame_ShouldMatchAliasWithTrailingYear()
+    {
+        // QA 实测场景（2026-09-18）：总表主名称是中文「英灵神殿」，
+        // 别名写成「Valheim (2020)」，而正在玩的进程名是 Valheim。
+        // 修复前归一化结果是 "valheim 2020"，精确匹配失败、
+        // 模糊相似度只有 73.7% 卡在 80% 阈值下 → 候选为空 → 被判定成"新游戏"。
+        var catalog = new List<NotionGameCatalogItem>
+        {
+            new() { PageId = "p1", Name = "英灵神殿", Aliases = new() { "Valheim (2020)" } }
+        };
+
+        var matches = _matcher.MatchGame("Valheim", catalog);
+
+        matches.Should().NotBeEmpty("别名带年份后缀也必须能匹配上");
+        matches[0].PageId.Should().Be("p1");
+        matches[0].MatchType.Should().Be("normalized", "剥掉年份后应命中归一化匹配");
     }
 
     [Fact]

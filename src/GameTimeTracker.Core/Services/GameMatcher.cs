@@ -29,6 +29,22 @@ public class GameMatcher : IGameMatcher
     private static readonly Regex MultiSpaceRegex = new(@"\s+", RegexOptions.Compiled);
     private static readonly Regex SteamCoverAppIdRegex = new(@"/apps/(\d+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>
+    /// 标题末尾**括号包裹**的年份，例如「Valheim (2020)」「Doom (2016)」「Prey [2017]」。
+    /// </summary>
+    /// <remarks>
+    /// 为什么要剥掉：总表的「别名」常写成带年份的形式，而进程名/游戏名不带。
+    /// 不剥的话归一化后是 `valheim 2020` 而不是 `valheim`，
+    /// 精确匹配失败，模糊相似度也只有约 74% —— 卡在 80% 阈值之下，
+    /// 于是候选列表为空、被判定成"新游戏"。2026-09-18 QA 实测就是这个原因。
+    ///
+    /// **只剥括号形式**（`(2020)` / `[2020]`），不剥裸年份 ——
+    /// 「Football Manager 2024」「F1 2023」这类游戏名里年份是有意义的一部分，
+    /// 剥掉会让 2023 和 2024 两代互相误匹配。
+    /// </remarks>
+    private static readonly Regex TrailingBracketedYearRegex =
+        new(@"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*$", RegexOptions.Compiled);
+
     private readonly HttpClient _httpClient;
     private readonly Dictionary<string, string?> _steamCnCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly double _fuzzyThreshold;
@@ -59,6 +75,10 @@ public class GameMatcher : IGameMatcher
 
         // NFKC normalization & lowercase
         var normalized = title.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
+
+        // 剥掉末尾括号里的年份（Valheim (2020) → Valheim）。
+        // 必须在去标点之前做 —— 去标点会把括号换成空格，那时就认不出括号形式了。
+        normalized = TrailingBracketedYearRegex.Replace(normalized, "");
 
         // Strip apostrophes
         normalized = ApostropheRegex.Replace(normalized, "");
