@@ -33,9 +33,9 @@ public class GameMatcherTests
     [InlineData("NBA 2K24", "nba 2k24")]
     // ⚠️ 以下绝不能剥 —— 它们是游戏名的一部分，不是版本标记
     //    （放进来会让「Doom」匹配上「Doom Eternal」这类不同游戏）
+    //    注：Rebirth 已在上方作为基础用例出现过，此处不重复列举，否则 xUnit1025 会告警
     [InlineData("Doom Eternal", "doom eternal")]
     [InlineData("Final Fantasy VII Remake", "final fantasy 7 remake")]
-    [InlineData("Final Fantasy VII Rebirth", "final fantasy 7 rebirth")]
     public void NormalizeTitle_ShouldNormalizeProperly(string input, string expected)
     {
         var result = _matcher.NormalizeTitle(input);
@@ -83,6 +83,14 @@ public class GameMatcherTests
         //   Doom / Doom Eternal          —— 副标题不是版本标记
         //   Portal / Portal 2            —— 数字序号不是年份
         //   FM 2023 / FM 2024            —— 裸年份是名字的一部分
+        //   FF VII Remake / Rebirth      —— 副标题不同就是两款游戏
+        //
+        // ⚠️ 断言的是"没有**确定性**匹配"，不是"没有候选"。
+        //    模糊相似度天生分不开 Portal 和 Portal 2（86%），
+        //    所以它们会作为 fuzzy_candidate 出现在候选列表里 —— 这是**设计如此**：
+        //    AutoLinkGamesFromCatalogAsync 只接受 identifier_match/exact/normalized，
+        //    fuzzy_candidate 仅供用户人工确认，绝不会自动绑定。
+        //    真正要守住的红线是"不会自动绑错"。
         var catalog = new List<NotionGameCatalogItem>
         {
             new() { PageId = "doom-eternal", Name = "Doom Eternal" },
@@ -91,14 +99,48 @@ public class GameMatcherTests
             new() { PageId = "ff7r", Name = "Final Fantasy VII Rebirth" },
         };
 
-        _matcher.MatchGame("Doom", catalog)
-            .Should().NotContain(c => c.PageId == "doom-eternal", "Doom ≠ Doom Eternal");
-        _matcher.MatchGame("Portal", catalog)
-            .Should().NotContain(c => c.PageId == "portal-2", "Portal ≠ Portal 2");
-        _matcher.MatchGame("Football Manager 2023", catalog)
-            .Should().NotContain(c => c.PageId == "fm2024", "不同年份是不同代游戏");
-        _matcher.MatchGame("Final Fantasy VII Remake", catalog)
-            .Should().NotContain(c => c.PageId == "ff7r", "Remake ≠ Rebirth");
+        var deterministicTypes = new[] { "identifier_match", "exact", "normalized" };
+
+        AssertNoDeterministicMatch("Doom", "doom-eternal", "Doom ≠ Doom Eternal");
+        AssertNoDeterministicMatch("Portal", "portal-2", "Portal ≠ Portal 2");
+        AssertNoDeterministicMatch("Football Manager 2023", "fm2024", "不同年份是不同代游戏");
+        AssertNoDeterministicMatch("Final Fantasy VII Remake", "ff7r", "Remake ≠ Rebirth");
+
+        void AssertNoDeterministicMatch(string query, string forbiddenPageId, string because)
+        {
+            var hit = _matcher.MatchGame(query, catalog)
+                .FirstOrDefault(c => c.PageId == forbiddenPageId
+                                     && deterministicTypes.Contains(c.MatchType));
+
+            hit.Should().BeNull(
+                $"{because}；可以出现在模糊候选里，但绝不能构成确定性匹配（否则会被自动绑定）");
+        }
+    }
+
+    [Fact]
+    public void MatchGame_FuzzyCandidates_AreNeverAutoBindable()
+    {
+        // 守住"自动绑定只认确定性匹配"这条线：
+        // 近似但不同的游戏名必须落成 fuzzy_candidate，而不是 exact/normalized，
+        // 否则 AutoLinkGamesFromCatalogAsync 会把时长记到错误的游戏上。
+        var catalog = new List<NotionGameCatalogItem>
+        {
+            new() { PageId = "portal-2", Name = "Portal 2" },
+            new() { PageId = "hl2", Name = "Half-Life 2" },
+        };
+
+        foreach (var query in new[] { "Portal", "Half-Life" })
+        {
+            var matches = _matcher.MatchGame(query, catalog);
+            matches.Should().NotBeEmpty($"「{query}」应产生模糊候选（否则本用例是空转的）");
+
+            foreach (var m in matches)
+            {
+                m.MatchType.Should().Be("fuzzy_candidate",
+                    $"「{query}」只能得到模糊候选，不能是 {m.MatchType}");
+                m.Score.Should().BeLessThan(100.0, "确定性匹配才是 100 分");
+            }
+        }
     }
 
     [Fact]
