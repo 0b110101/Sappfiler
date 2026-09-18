@@ -302,6 +302,25 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
   原手工列若为分钟，Formula 要写 `prop("原有列") + prop("GT累计") * 60`。
 - Rollup **只统计已绑定的记录**（没 relation 的算不进去），所以绑定是 Rollup 的前提。
 
+## 发布包构成与瘦身（2026-09-19）
+- **随包附文档**：`publish.ps1` 第 3b 步把 `README.md` 与 `CHANGELOG-QA.md`
+  复制进发布目录（后者改名为「更新说明.md」）。改文档后重跑 publish 即生效。
+- **不引 WindowsAppSDK 元包**（2026-09-19 起）：元包会连带拉进
+  `.AI`（含传递依赖 `microsoft.windows.ai.machinelearning` → onnxruntime 20.7MB + DirectML 17.8MB）、
+  `.ML`、`.Search`、`.Widgets`，合计约 **55MB**（包的 19%），本程序全用不到。
+  改为只引 6 个子包：`Base 2.0.4` / `Foundation 2.3.12` /
+  `InteractiveExperiences 2.1.9` / `WinUI 2.3.9` / `DWrite 2.1.0` / `Runtime 2.5.1`
+  （版本取自元包 nuspec，保持一致）。
+  元包是**纯聚合包**（targets 为空、props 只声明 VS ProjectCapability），拆开安全。
+- **产物校验的 requiredFiles 是安全网**：改依赖集后已补入
+  `Microsoft.WindowsAppRuntime.dll`。少引子包会缺核心 dll，这道校验会拦下。
+- **winmd（53 个 / 2.7MB）保持原样**：主要是上面那些组件的产物、随之消失；
+  剩下的来自 WinUI/Foundation，运行时是否读取无法静态确认，不做无把握的删除。
+- **`.mui` 语言目录**：已用 `SatelliteResourceLanguages=zh-CN;en-US` +
+  publish.ps1 清理步骤（本地化安全约束见该脚本注释：只删「名字像语言码」且「只含 .mui」的目录）。
+- 观察：`dist/` 里堆了 15 个历史 zip、共约 **2.4GB**（含 v1.0.x~v1.2.1 的旧产物）。
+  是否清理交给用户决定，我没动。
+
 ## 版本号与版本控制（2026-09-18 确立）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
