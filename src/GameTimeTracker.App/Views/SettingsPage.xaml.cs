@@ -74,6 +74,10 @@ public sealed partial class SettingsPage : Page
         var gameDb = GameDbInput.Text.Trim();
         var dailyDb = DailyDbInput.Text.Trim();
 
+        // 先记下"保存前"是否已配置：新用户从「没配」变成「配好了」的那一刻要触发一次同步。
+        // 已经配好的人反复点保存不该再触发 —— 那只会让每点一次都打一轮 Notion。
+        var wasConfigured = _config.IsNotionConfigured;
+
         await _repo.SetSettingAsync("notion_token", token);
         await _repo.SetSettingAsync("game_database_id", gameDb);
         await _repo.SetSettingAsync("daily_database_id", dailyDb);
@@ -87,10 +91,57 @@ public sealed partial class SettingsPage : Page
         // 用户改完 Token 不重启的话，业务请求会一直 401（测试连接用的是输入框的新值，所以显示"验证通过"，极具误导性）。
         _notionClient?.UpdateToken(token);
 
+        var nowConfigured = _config.IsNotionConfigured;
+
         StatusInfoBar.Severity = InfoBarSeverity.Success;
         StatusInfoBar.Title = "保存成功";
         StatusInfoBar.Message = "Notion 凭证与数据库 ID 已保存并即时生效。";
         StatusInfoBar.IsOpen = true;
+
+        if (!wasConfigured && nowConfigured)
+        {
+            await RunFirstTimeSyncAsync();
+        }
+    }
+
+    /// <summary>
+    /// 新用户首次保存配置后的第一次同步。
+    /// 目的是把既有的本地游戏/时长推上去、把 Notion 里已有的记录拉下来，
+    /// 否则用户会看到一条空列表，得干等到下一个 15 分钟周期。
+    /// 用 InfoBar 做最简单的进度提示（成功/失败都覆盖），不做进度条。
+    /// </summary>
+    private async Task RunFirstTimeSyncAsync()
+    {
+        var main = MainWindow.CurrentWindow;
+        if (main == null) return;
+
+        SaveBtn.IsEnabled = false;
+        TestBtn.IsEnabled = false;
+        StatusInfoBar.Severity = InfoBarSeverity.Informational;
+        StatusInfoBar.Title = "正在首次同步";
+        StatusInfoBar.Message = "正在读取游戏总表并同步记录，请稍候…";
+        StatusInfoBar.IsOpen = true;
+
+        try
+        {
+            await main.RunInitialSyncAsync();
+
+            StatusInfoBar.Severity = InfoBarSeverity.Success;
+            StatusInfoBar.Title = "首次同步完成";
+            StatusInfoBar.Message = "已拉取 Notion 总表与每日时长记录，本地记录也已同步上去。";
+        }
+        catch (Exception ex)
+        {
+            StatusInfoBar.Severity = InfoBarSeverity.Warning;
+            StatusInfoBar.Title = "配置已保存，但首次同步未完成";
+            StatusInfoBar.Message = $"{ex.Message} 程序会在后台按周期自动重试。";
+        }
+        finally
+        {
+            StatusInfoBar.IsOpen = true;
+            SaveBtn.IsEnabled = true;
+            TestBtn.IsEnabled = true;
+        }
     }
 
     private async void OnTestConnectionClicked(object sender, RoutedEventArgs e)

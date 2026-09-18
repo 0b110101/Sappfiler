@@ -37,7 +37,8 @@ internal sealed class FakeNotionClient : INotionClient
     }
 
     public Task<string> CreateDailyRecordAsync(
-        string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId)
+        string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId,
+        string? iconUrl = null)
     {
         CreatedDailyRecordTitles.Add(gameTitle);
         return Task.FromResult("created-page");
@@ -45,10 +46,15 @@ internal sealed class FakeNotionClient : INotionClient
 
     public List<(string PageId, int DurationMinutes)> UpdatedPages { get; } = new();
 
+    /// <summary>每次 UpdateDailyRecordAsync 收到的标题，用于断言"用的是总表名"。</summary>
+    public List<string?> UpdatedTitles { get; } = new();
+
     public Task<bool> UpdateDailyRecordAsync(
-        string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null)
+        string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null,
+        string? iconUrl = null)
     {
         UpdatedPages.Add((pageId, durationMinutes));
+        UpdatedTitles.Add(gameTitle);
         return Task.FromResult(true);
     }
 

@@ -84,6 +84,32 @@ public sealed partial class MainWindow : Window
 
     public static MainWindow? CurrentWindow { get; private set; }
 
+    /// <summary>
+    /// 供设置页使用：新用户第一次保存 Notion 配置成功后，立刻跑一遍完整同步链。
+    /// 不需要新开窗口引用 —— 设置页通过 CurrentWindow 拿。
+    /// </summary>
+    public INotionSyncService SyncService => _syncService;
+
+    /// <summary>
+    /// 首次配置成功后的一次性同步：目录 → 对账 → 自动关联 → 拉取 → 回填 → 推送 → 回刷标题。
+    /// 顺序与启动链/周期链保持一致，避免"拉取没跑就推送"造成重复行。
+    /// 进度通过 SyncService.SyncStatusChanged 事件反馈（侧边栏状态条已经在监听）。
+    /// </summary>
+    public async Task RunInitialSyncAsync()
+    {
+        if (!_config.IsNotionConfigured) return;
+
+        await _syncService.RefreshGameCatalogCacheAsync();
+        await _syncService.ReconcileNotionDeletionsAsync();
+        await _syncService.AutoLinkGamesFromCatalogAsync();
+        await _syncService.PullDailyRecordsFromNotionAsync();
+        await _syncService.BackfillRelationsAsync();
+        await _syncService.SyncPendingDailyRecordsAsync();
+        await _syncService.RefreshDailyTitlesFromMasterAsync();
+        _ = _coverCache.EnsureLibraryCoversAsync(_repo);
+        await _homeViewModel.RefreshAllDataAsync();
+    }
+
     public void ApplyTheme(ElementTheme theme)
     {
         if (Content is FrameworkElement root)
@@ -383,6 +409,8 @@ public sealed partial class MainWindow : Window
                     await _syncService.PullDailyRecordsFromNotionAsync();
                     await _syncService.BackfillRelationsAsync();
                     await _syncService.SyncPendingDailyRecordsAsync();
+                    // 回刷必须在推送之后：这轮刚推上去的记录此时才有 notion_title 快照。
+                    await _syncService.RefreshDailyTitlesFromMasterAsync();
                     _ = _coverCache.EnsureLibraryCoversAsync(_repo);
                     await _homeViewModel.RefreshAllDataAsync();
                 });
@@ -452,6 +480,8 @@ public sealed partial class MainWindow : Window
                     await _syncService.PullDailyRecordsFromNotionAsync();
                     await _syncService.BackfillRelationsAsync();
                     await _syncService.SyncPendingDailyRecordsAsync();
+                    // 总表改名的回刷：拉取只同步时长，不会碰标题，所以每轮都要补这一下。
+                    await _syncService.RefreshDailyTitlesFromMasterAsync();
                     _ = _coverCache.EnsureLibraryCoversAsync(_repo);
                     await _homeViewModel.RefreshAllDataAsync();
                 }

@@ -208,4 +208,136 @@ public class NotionPullImportTests : IDisposable
         pushed.Should().Be(1, "已有 notion_page_id 的记录走 Update 路径");
         _client.UpdatedPages.Should().Contain(("daily-mk", 41));
     }
+
+    // ================= 需求一：每日记录的「游戏名称」用总表名 + 总表 page icon =================
+
+    [Fact]
+    public async Task SyncPending_UsesMasterTableName_WhenGameIsBound()
+    {
+        // 本地进程名是英文，用户在总表里改成了中文名 —— 推上去的标题必须用中文名。
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-cn",
+            Name = "不思议迷宫",
+            IconUrl = "https://example.com/icon.png",
+            IconType = "external"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "2001", "Gumballs", "g.exe", @"C:\g.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-cn");
+        await _repo.AddSessionDurationToDailyAsync("2026-09-24", game.Id, 42 * 60);
+
+        var pushed = await _sync.SyncPendingDailyRecordsAsync();
+
+        pushed.Should().Be(1);
+        _client.CreatedDailyRecordTitles.Should().ContainSingle()
+            .Which.Should().Be("不思议迷宫", "已绑定时要用总表里的名字，而不是本地进程名");
+    }
+
+    [Fact]
+    public async Task SyncPending_KeepsProcessName_WhenGameIsNotBound()
+    {
+        // 未绑定 → relation 无从读起，只能保持进程名。
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "2002", "UnboundGame", "u.exe", @"C:\u.exe"));
+        await _repo.AddSessionDurationToDailyAsync("2026-09-25", game.Id, 600);
+
+        await _sync.SyncPendingDailyRecordsAsync();
+
+        _client.CreatedDailyRecordTitles.Should().ContainSingle()
+            .Which.Should().Be("UnboundGame", "未绑定总表时没有 relation 可读，只能退回进程名");
+    }
+
+    // ================= 需求二：总表改名 / 补 icon 后回刷已同步记录 =================
+
+    [Fact]
+    public async Task RefreshTitles_UpdatesSyncedRecord_WhenMasterNameChanged()
+    {
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-rn", Name = "旧名字", IconType = "external", IconUrl = "https://example.com/a.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "3001", "ProcName", "p.exe", @"C:\p.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-rn");
+        await _repo.AddSessionDurationToDailyAsync("2026-09-26", game.Id, 42 * 60);
+
+        var daily = (await _repo.GetDailySummariesByDateAsync("2026-09-26")).Single();
+        await _repo.UpdateDailySyncStatusAsync(daily.Id, "synced", "daily-rn");
+        // 远端快照还是旧名字
+        await _repo.UpdateDailyRecordFromNotionAsync("daily-rn", "旧名字 · 0.7 h");
+
+        // 用户在总表里改名 + 换图标，下一轮目录刷新会带下新值
+        _client.GameMasterItems.Clear();
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-rn", Name = "新名字", IconType = "external", IconUrl = "https://example.com/b.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var refreshed = await _sync.RefreshDailyTitlesFromMasterAsync();
+
+        refreshed.Should().Be(1, "总表改名后已同步的记录要被回刷");
+        _client.UpdatedTitles.Should().Contain("新名字", "回刷要把总表的新名字写回每日记录标题");
+    }
+
+    [Fact]
+    public async Task RefreshTitles_IsNoOp_WhenNothingChanged()
+    {
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-same", Name = "不变的游戏", IconType = "external", IconUrl = "https://example.com/c.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "3002", "Same", "s.exe", @"C:\s.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-same");
+        await _repo.AddSessionDurationToDailyAsync("2026-09-27", game.Id, 42 * 60);
+
+        var daily = (await _repo.GetDailySummariesByDateAsync("2026-09-27")).Single();
+        await _repo.UpdateDailySyncStatusAsync(daily.Id, "synced", "daily-same");
+        // 快照与期望标题一致（42 min → 0.7 h）
+        await _repo.UpdateDailyRecordFromNotionAsync("daily-same", "不变的游戏 · 0.7 h");
+
+        var before = _client.UpdatedPages.Count;
+        var refreshed = await _sync.RefreshDailyTitlesFromMasterAsync();
+
+        refreshed.Should().Be(0, "标题和图标都没变就不该再打 Notion");
+        _client.UpdatedPages.Count.Should().Be(before, "无事可做时一次 PATCH 都不该发");
+    }
+
+    [Fact]
+    public async Task RefreshTitles_Backfills_WhenSnapshotMissing()
+    {
+        // 首轮：记录早就 synced 了，但本地没有 notion_title 快照（老版本升级上来的库）。
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-old", Name = "老库游戏", IconType = "external", IconUrl = "https://example.com/d.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "3003", "OldDb", "o.exe", @"C:\o.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-old");
+        await _repo.AddSessionDurationToDailyAsync("2026-09-28", game.Id, 42 * 60);
+
+        var daily = (await _repo.GetDailySummariesByDateAsync("2026-09-28")).Single();
+        await _repo.UpdateDailySyncStatusAsync(daily.Id, "synced", "daily-old");
+        // 刻意不写 notion_title，模拟升级场景
+
+        var refreshed = await _sync.RefreshDailyTitlesFromMasterAsync();
+
+        refreshed.Should().Be(1, "没有快照的老记录应被判为需要回刷一次");
+        var after = (await _repo.GetDailySummariesByDateAsync("2026-09-28")).Single();
+        after.NotionTitle.Should().Be("老库游戏 · 0.7 h", "回刷后要落快照，后续轮次才会变成空操作");
+
+        // 第二轮应当无事可做
+        _client.UpdatedPages.Clear();
+        (await _sync.RefreshDailyTitlesFromMasterAsync()).Should().Be(0, "快照补齐后不应反复 PATCH");
+    }
 }

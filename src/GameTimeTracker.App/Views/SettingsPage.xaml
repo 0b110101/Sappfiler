@@ -56,8 +56,8 @@
                              MaxWidth="520" HorizontalAlignment="Stretch" />
 
                     <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
-                        <Button Click="OnSaveClicked" Content="保存设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
-                        <Button Click="OnTestConnectionClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
+                        <Button x:Name="SaveBtn" Click="OnSaveClicked" Content="保存设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button x:Name="TestBtn" Click="OnTestConnectionClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
                     </StackPanel>
                 </StackPanel>
             </Border>

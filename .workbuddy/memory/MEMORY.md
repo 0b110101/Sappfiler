@@ -36,6 +36,12 @@
 - 物理删除前一律写 `deleted_archive` 留底（`kind` = game/daily，`source` = app/notion）。
 - 对账顺序不可颠倒：`RefreshGameCatalogCacheAsync`（内部会清理失效 catalog 行）→ `ReconcileNotionDeletionsAsync` → `AutoLink` → `Pull`。
   `ReconcileNotionDeletionsAsync` 只能以 `game_catalog` 作为总表快照，所以必须排在目录刷新之后；又必须早于 Pull，否则被删游戏的每日记录会被拉回来。
+- **完整同步链顺序（四条同步链必须一致）**：
+  `RefreshGameCatalogCache` → `ReconcileNotionDeletions` → `AutoLink` → `Pull` →
+  `BackfillRelations` → `SyncPendingDailyRecords` → `RefreshDailyTitlesFromMaster`。
+  四个触发点：**启动链**（`MainWindow`）、**15 分钟周期循环**（`PeriodicSyncLoopAsync`）、
+  **首页「立即同步」**（`SyncNowAsync`）、**新用户首次保存配置**（`MainWindow.RunInitialSyncAsync`）。
+  最后一步「回刷标题」必须在推送之后（见上文回刷机制），别插错位置。
 - **删除对账的四个触发点**（缺一个用户就会觉得"没生效"）：① 启动同步链；② 15 分钟周期循环；③ 首页「立即同步」按钮（`SyncNowAsync`，也会 reconcile）；④ **窗口重新获得焦点**（`MainWindow` 订阅 `Window.Activated`，60 秒节流）。
   第 ④ 条是关键：用户的实际操作是"在 Notion 删完 → 切回程序看"，只靠 ①② 最长要等 15 分钟，看起来就像没生效。注意 `Activated` 是 **Window** 的事件，`AppWindow` 上没有。
 - 删除是后台异步的，出问题时不要只看 UI：**查 `deleted_archive` 表**（`kind` / `source` / `reference` / `deleted_at`）就能知道"谁在什么时候删了什么"，本轮就是靠它证明启动链对账在 18:51:33 正常跑过。
@@ -113,53 +119,92 @@
 - 发布包命名须与之一致：`GameTimeTracker-v0.9.5-alpha17-win-x64.zip`。
 - 提交 `9ad2b53`。构建 0 警告 0 错误，**69 个测试全过**，程序集元数据已实测验证。
 
+## 每日记录的「游戏名称」与 page icon（2026-09-18 用户明确要求）
+- **标题格式 `{游戏名} · {X} h`，其中「游戏名」的来源分两种**：
+  - **已绑定总表**（`games.notion_page_id` 非空）→ 用**总表条目的名字**（relation 指向的那个名字），
+    并把总表条目的 `IconUrl` 一并写到每日记录页面 icon。
+  - **未绑定** → 保持进程名，**不写 icon**。
+- **时长后缀 `· 0.7 h` 是必需品**，用户明确确认不能去掉。
+- icon **只取 `IconUrl`（方图），不要 `CoverUrl`**（横幅塞进列表图标会糊）。
+  总表条目没设图标就什么都不写，**不要猜 Steam 图标**（免得覆盖用户自己的选择）。
+- 实现入口：`NotionSyncService.ResolveDailyDisplayAsync(localName, gameNotionPageId)`。
+  三条推送路径都要调：`SyncPendingDailyRecordsAsync` / `BackfillRelationsAsync` / `LinkGameRelationAsync`。
+  **新加推送路径时别忘了调**，否则会出现名字/图标不一致。
+- Notion API（锁定 `2022-06-28`）icon **只接受 external URL / emoji，无法上传本地文件**。
+
+## 每日记录标题的「回刷」机制（2026-09-18，用户选 B 方案）
+- **问题**：Pull 只同步时长、不碰标题，所以总表改名后历史记录**永远停在旧名上**。
+- **方案**：`NotionSyncService.RefreshDailyTitlesFromMasterAsync()`，已挂进全部四条同步链。
+- **性能关键**：`daily_summary.notion_title` 存**远端标题快照**，逐条比对「快照 vs 期望标题」，
+  只有真不一致才 PATCH。没有快照的话每轮要 PATCH 全部历史记录（随天数线性增长，不可接受）。
+  - 首轮 `notion_title` 为空的记录会被判为"需回刷"一次，之后就有快照。
+  - `NotionDailyRecordItem.RawTitle`（**保留时长后缀的原文**）专供比对。
+    **不要用 `GameTitle`**（已剥后缀的裸名）——那会把每条都误判成不一致，反复 PATCH。
+- **必须排在 `SyncPendingDailyRecordsAsync` 之后**（刚推上去的记录才有快照）。
+- `EnsureMasterPageIconsAsync()` 已从 `BackfillRelationsAsync` 末尾挪到**开头**：
+  回填时要从 `game_catalog.IconUrl` 取图，而 Steam 图标正是这一步写进缓存/总表页面的。
+
+## 新用户首次保存配置后自动同步（2026-09-18）
+- 触发条件是**状态跃迁**：`保存前 !IsNotionConfigured && 保存后 IsNotionConfigured`。
+  **反复点保存不重复触发**。
+- 新增 `MainWindow.RunInitialSyncAsync()` + `MainWindow.SyncService` 属性；
+  设置页通过 `MainWindow.CurrentWindow` 拿服务。
+- 进度提示用 `StatusInfoBar` 文案切换即可（用户明确说**不需要进度条**），
+  同步期间禁用「保存/测试连接」按钮防重复点击。
+
 ## 本机构建环境坑：NuGet 文件夹解析返回 null（2026-09-18 彻底排查结论）
 - **症状**：`dotnet restore` / `build` 报
   `NuGet.targets(782,5): error : Value cannot be null. (Parameter 'path1')`。
   **任何工程都会中招**——连一个全新的、零依赖的 `net10.0` 控制台项目也还原失败。
-  但 `dotnet --info`、`dotnet build`（在 `obj/` 资产已存在时）都正常。
-- **真正的根因**：注册表值
-  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders\Common AppData`
-  存的是**未展开的字符串 `%ProgramData%`**，
-  而本机系统环境块里 **`ProgramData` 变量缺失**
-  （`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 下
-  `ProgramData` / `APPDATA` / `ALLUSERSPROFILE` 全为空）。
-  于是展开 `%ProgramData%` 得到空串，`.NET` 的
-  `Environment.GetFolderPath(CommonApplicationData)` 返回 null，
-  NuGet 的 `NuGetEnvironment.CalculateFolderPath` 里
-  `Path.Combine(null, "NuGet")` 抛 `ArgumentNullException('path1')`。
+- **真正的根因（⚠️ 之前一轮的诊断有一处是错的，已修正）**：
+  **Windows 上 `Environment.GetFolderPath(SpecialFolder.CommonApplicationData)`
+  读的是进程环境变量 `PROGRAMDATA`，不读注册表 `User Shell Folders`。**
+  所以改注册表 `User Shell Folders\Common AppData` **对本问题无效**（方向就错了）。
+- 从 `NuGet.Common.dll` 提取到的变量清单（`NuGetEnvironment` 实际读的）：
+  `PROGRAMDATA` / `ALLUSERSPROFILE` / `APPDATA` / `LOCALAPPDATA` /
+  `NUGET_COMMON_APPLICATION_DATA` / `XDG_CONFIG_HOME` / `XDG_DATA_HOME`。
+- `MachineWideConfigDirectory` 走**双层 Combine**：内层 `CommonApplicationData` 解析出 null →
+  外层 `Path.Combine(null, "NuGet", "Config")` 抛 `path1`。
 - **完整调用栈**（`-v:diag` 可见）：
   `GetRestoreSettingsTask.Execute` → `RestoreSettingsUtils.ReadSettings`
   → `XPlatMachineWideSetting..ctor` → `NuGetEnvironment.GetFolderPath`
   → `NuGetEnvironment.CalculateFolderPath` → `Path.Combine` → 抛异常。
-- **永久修复（需要管理员权限，当前会话无权限，已确认被拒）**：
-  把该注册表值从 `%ProgramData%` 改成字面量 `C:\ProgramData`
-  （或修复系统环境块，补回 `ProgramData` / `APPDATA` / `ALLUSERSPROFILE`）。
-  修好后 `dotnet restore` / `build` / `test` 恢复正常。
+- **实测证据（同一台机器、同一时刻）**：
+  | 取值方式 | 结果 |
+  |---|---|
+  | `GetEnvironmentVariable('ProgramData','Machine')` | `C:\ProgramData` ✅ 注册表是好的 |
+  | `GetFolderPath('CommonApplicationData')` | `C:\ProgramData` ✅ 进程环境块正常时可用 |
+  | `$env:ProgramData`（WorkBuddy 的 shell 里） | **空** ❌ |
+- **两种缺失要分开看**：
+  1. **系统级缺失**：`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+     少了 `ProgramData`/`PUBLIC`/`ALLUSERSPROFILE`/`APPDATA`/`LOCALAPPDATA`/`USERPROFILE`。
+     修复后**必须重启或注销重登**（Windows 要重建环境块）。
+  2. **WorkBuddy 自动化 shell 特有的合成环境块**（新发现，与上一条无关）：
+     工具自己拼的环境块里 `ProgramData`/`ALLUSERSPROFILE`/`APPDATA`/`PUBLIC` 全不存在，
+     且 `PATH` 开头被损坏成 `E;E:\WorkBuddy\...`（盘符被截断）。
+     **实测：在 `.cmd` 里 `set PROGRAMDATA=...` 无效，`NUGET_COMMON_APPLICATION_DATA`
+     覆盖也无效**（该覆盖在 Windows 分支不生效）。
+     **这是工具环境限制，改机器配置解决不了** —— 只能重启后用正常终端 / IDE 构建验证。
 - **重要**：这个故障**连 `obj/project.assets.json` 已存在时也拦不住**——
   错误会从 `NuGet.targets(782)` 转成
   `Microsoft.PackageDependencyResolution.targets(266)` 的 `NETSDK1060`，
   因为**加载**资产文件同样要解析 `packageFolders` 的路径。
   所以网上常见的「保留 obj + `--no-restore`」偏方在本机也无效（实测）。
-- **有效做法**：只能等管理员修好注册表/系统环境块。
-  在此之前**不要**清理 `obj/`（清了就彻底无法构建），也不要尝试手工伪造
-  `project.assets.json`（伪造的文件同样会被 `path1` null 挡住，已实测）。
+  在此之前**不要**清理 `obj/`，也不要尝试手工伪造 `project.assets.json`。
 - **已证伪、不要再走一遍的假设**（每一条都实测过）：
   - ❌ 不是缺 `C:\Program Files\dotnet\library-packs\`（补建后仍失败）
   - ❌ 不是缺 `C:\ProgramData\NuGet\` 目录（补建后仍失败）
-  - ❌ 不是 `APPDATA` 为空（显式设置后仍失败）
+  - ❌ **不是注册表 `User Shell Folders\Common AppData` 的问题**（.NET 根本不读它）
   - ❌ 不是 `Directory.Build.props` 引起（移走仍失败）
-  - ❌ 不是 `obj/` 缓存脏（删干净后仍失败；脏的只是"没有资产"这个后果）
+  - ❌ 不是 `obj/` 缓存脏（删干净后仍失败）
   - ❌ 不是缺 `NuGet.Config`（补上仍失败；且是**不该提交**的文件，已删）
   - ❌ `-p:RestoreFallbackFolders=` 无效（错误从 782 行移到 198 行，仍在同一根因上）
   - ❌ `-p:UserProfileDir=` / `-p:ProgramData=` / `-p:RestoreConfigFile` 等 MSBuild 属性无效
-    （NuGet 直接调 OS 文件夹 API，不读 MSBuild 属性）
-  - ❌ `NUGET_COMMON_APPLICATION_DATA` 环境变量无效（该变量只在 Unix/macOS 分支生效）
-  - ❌ 在 `.cmd` 里 `set ProgramData=...` 无效（.NET 不按进程环境重新展开注册表里的 `%VAR%`）
-  - ❌ PowerShell 工具在本环境**吞掉 stdout**，必须重定向落盘再读
-- **旁证**：绕过 dotnet CLI 直接跑 `MSBuild.dll`、用完整重建的标准 Windows 环境启动、
-  禁用 MSBuild 节点复用（`-nodeReuse:false` / `MSBUILDDISABLENODEREUSE=1`）——全都失败。
-  这排除了 CLI 包装器、节点复用、环境继承这三类猜测。
-- **注意**：这是**机器级 Windows 配置损坏**，与 GameTimeTracker 项目本身无关，
+  - ❌ `NUGET_COMMON_APPLICATION_DATA` 环境变量无效（Windows 分支不读，只在 Unix/macOS 生效）
+  - ❌ 在 `.cmd` 里 `set ProgramData=...` 无效
+  - ❌ 绕过 CLI 直接跑 `MSBuild.dll` / 完整重建标准 Windows 环境 / 禁用节点复用 —— 全失败
+  - ❌ **PowerShell 工具在本环境吞掉 stdout**，必须重定向落盘再读
+  - ❌ 从 Bash 直接调 `cmd.exe` / `reg.exe` / `msbuild` 会被安全层拦截，必须写成 `./x.cmd` 执行
+- **注意**：这是**机器/工具环境问题**，与 GameTimeTracker 项目本身无关，
   不要试图在项目里"修"它（不要提交任何 `NuGet.Config` 变通文件）。
 

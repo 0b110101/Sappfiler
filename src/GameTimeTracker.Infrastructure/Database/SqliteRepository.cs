@@ -99,6 +99,9 @@ public class SqliteRepository : IDatabaseRepository
                 notion_page_id TEXT,
                 last_sync_at DATETIME,
                 error_message TEXT,
+                -- 这条记录在 Notion 上的标题（含时长后缀）。仅用于回刷时比对：
+                -- 总表改名后，用它和"期望标题"比较即可知道要不要 PATCH，避免每轮都白打一次 Notion。
+                notion_title TEXT,
                 UNIQUE(date, game_id)
             );
             CREATE INDEX IF NOT EXISTS idx_daily_sync ON daily_summary(sync_status);
@@ -164,6 +167,14 @@ public class SqliteRepository : IDatabaseRepository
             using var alterCmd4 = conn.CreateCommand();
             alterCmd4.CommandText = "ALTER TABLE game_catalog ADD COLUMN icon_type TEXT;";
             alterCmd4.ExecuteNonQuery();
+        }
+        catch { }
+
+        try
+        {
+            using var alterCmd5 = conn.CreateCommand();
+            alterCmd5.CommandText = "ALTER TABLE daily_summary ADD COLUMN notion_title TEXT;";
+            alterCmd5.ExecuteNonQuery();
         }
         catch { }
     }
@@ -905,11 +916,24 @@ public class SqliteRepository : IDatabaseRepository
                     SET duration_seconds = @finalSeconds,
                         duration_minutes = @finalMinutes,
                         notion_page_id = @pageId,
+                        notion_title = COALESCE(@title, notion_title),
                         sync_status = @newStatus,
                         last_sync_at = CURRENT_TIMESTAMP
                     WHERE id = @id;
                     """,
-                    new { finalSeconds, finalMinutes, pageId = item.PageId, newStatus = localAhead ? "pending" : "synced", id = (int)existing.id });
+                    new
+                    {
+                        finalSeconds,
+                        finalMinutes,
+                        pageId = item.PageId,
+                        // Pull 拿到的标题就是远端现状 —— 记下来，回刷时用它比对即可跳过无变化的记录。
+                        // 但要防呆：有些路径只给 pageId 不给标题（GameTitle 是被剥过时长后缀的裸名），
+                        // 那种情况必须传 null 保住旧快照，否则会把「不思议迷宫 · 0.7 h」写成裸名，
+                        // 下一轮回刷就会误判为"不一致"而反复 PATCH。
+                        title = string.IsNullOrWhiteSpace(item.RawTitle) ? null : item.RawTitle,
+                        newStatus = localAhead ? "pending" : "synced",
+                        id = (int)existing.id
+                    });
 
                 return (int)existing.id;
             }
@@ -939,6 +963,32 @@ public class SqliteRepository : IDatabaseRepository
         }
     }
 
+    /// <summary>
+    /// 把某条 Notion 每日记录页面的标题回写到本地，用于回刷时比对
+    /// （见 <c>NotionSyncService.RefreshDailyTitlesFromMasterAsync</c>）。
+    ///
+    /// 只认 notion_page_id 精确匹配，且只改 title 一个字段 —— 不碰 sync_status，
+    /// 否则会把"本地时长领先、正等上传"的 pending 状态洗掉。
+    /// 返回受影响行数（0 表示本地没有这条记录）。
+    /// </summary>
+    public async Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title)
+    {
+        if (string.IsNullOrWhiteSpace(notionPageId)) return 0;
+
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            return await conn.ExecuteAsync(
+                "UPDATE daily_summary SET notion_title = @title WHERE notion_page_id = @notionPageId;",
+                new { notionPageId = notionPageId.Replace("-", ""), title });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     public async Task<IReadOnlyList<DailySummary>> GetTopGamesByDateAsync(string date, int limit = 5)
     {
         using var conn = CreateConnection();
@@ -956,6 +1006,27 @@ public class SqliteRepository : IDatabaseRepository
         return rows.Select(MapDailySummary).ToList();
     }
 
+    /// <summary>
+    /// 从 Dapper 的 dynamic 行里安全取一个可能不存在的列。
+    /// </summary>
+    /// <remarks>
+    /// 存在的理由：`notion_title` 是后加的列，用 ALTER TABLE 补。
+    /// 不是所有查询都 SELECT 它（有的写死列名），Dapper 的 DynamicRow 访问不存在的属性会抛异常 ——
+    /// 而 MapDailySummary 是所有每日汇总查询的公共出口，一处漏掉就会让整条查询挂掉。
+    /// </remarks>
+    private static string? TryGetString(dynamic row, string column)
+    {
+        try
+        {
+            var dict = (IDictionary<string, object>)row;
+            return dict.TryGetValue(column, out var v) ? v as string : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static DailySummary MapDailySummary(dynamic r)
     {
         return new DailySummary
@@ -970,6 +1041,7 @@ public class SqliteRepository : IDatabaseRepository
             NotionPageId = (string?)r.notion_page_id,
             LastSyncAt = r.last_sync_at != null ? DateTime.Parse((string)r.last_sync_at) : null,
             ErrorMessage = (string?)r.error_message,
+            NotionTitle = TryGetString(r, "notion_title"),
             GameName = (string)r.game_name,
             Platform = (string)r.platform,
             PlatformId = (string)r.platform_id

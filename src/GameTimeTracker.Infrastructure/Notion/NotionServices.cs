@@ -248,6 +248,7 @@ public class NotionClient : INotionClient
                         {
                             PageId = pageId,
                             GameTitle = title,
+                            RawTitle = rawTitle.Trim(),
                             Date = date,
                             DurationMinutes = duration,
                             GameMasterPageId = gameMasterPageId,
@@ -271,7 +272,8 @@ public class NotionClient : INotionClient
         string date,
         string gameTitle,
         int durationMinutes,
-        string? gamePageId)
+        string? gamePageId,
+        string? iconUrl = null)
     {
         var cleanDbId = dailyDbId.Replace("-", "");
         var titleText = BuildDailyRecordTitle(gameTitle, durationMinutes);
@@ -291,7 +293,11 @@ public class NotionClient : INotionClient
         var payload = new
         {
             parent = new { database_id = cleanDbId },
-            properties
+            properties,
+            // 顺带把总表的 page icon 用到每日记录页面上（外部 URL，无需上传）。
+            icon = string.IsNullOrWhiteSpace(iconUrl)
+                ? null
+                : new { type = "external", external = new { url = iconUrl } }
         };
 
         using var req = CreateRequest(HttpMethod.Post, "/pages", payload);
@@ -299,7 +305,12 @@ public class NotionClient : INotionClient
         return res.GetProperty("id").GetString() ?? "";
     }
 
-    public async Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null)
+    public async Task<bool> UpdateDailyRecordAsync(
+        string pageId,
+        int durationMinutes,
+        string? gamePageId,
+        string? gameTitle = null,
+        string? iconUrl = null)
     {
         var cleanPageId = pageId.Replace("-", "");
         var properties = new Dictionary<string, object>
@@ -309,6 +320,9 @@ public class NotionClient : INotionClient
 
         if (!string.IsNullOrEmpty(gameTitle))
         {
+            // 永远按「gameTitle + 当前时长」重算整个标题，不做"只改游戏名那一段"的局部替换。
+            // 理由：时长本身也在标题里，且老行可能还是「(42分)」这种旧格式 ——
+            // 局部替换反而会拼出「新名字 · 42 min」残留旧后缀的怪东西。
             var titleText = BuildDailyRecordTitle(gameTitle, durationMinutes);
             properties["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } };
         }
@@ -319,7 +333,11 @@ public class NotionClient : INotionClient
             properties["绑定状态"] = new { select = new { name = "已绑定" } };
         }
 
-        using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", new { properties });
+        var payload = string.IsNullOrWhiteSpace(iconUrl)
+            ? (object)new { properties }
+            : new { properties, icon = new { type = "external", external = new { url = iconUrl } } };
+
+        using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", payload);
         var res = await SendWithRetryAsync(req);
         return res.TryGetProperty("id", out _);
     }
@@ -605,6 +623,42 @@ public class NotionSyncService : INotionSyncService
             scoreGapThreshold: config.FuzzyScoreGapThreshold);
     }
 
+    /// <summary>
+    /// 推送每日记录时，标题该用哪个名字、page icon 该用哪张图。
+    /// </summary>
+    /// <remarks>
+    /// 设计意图（用户要求）：
+    /// 每日记录的「游戏名称」以前一直用本地进程名（`games.name`）。但游戏一旦绑定到总表，
+    /// 用户在总表里改过的名字（可能已本地化成中文）才是他真正想看到的，
+    /// 而 relation 指向的就是那个条目 —— 所以已绑定时以总表名称为准。
+    ///
+    /// page icon 同理：优先用总表条目的方形小图（`IconUrl`），而不是横幅 `CoverUrl`
+    /// （横幅是给 Hero 背景用的，塞进列表图标会糊）。总表条目没设图标就什么都不写，
+    /// 不去猜一个 Steam 图标 —— 免得覆盖用户自己的选择。
+    ///
+    /// 未绑定时保持原样（用进程名、不写 icon），避免"没绑定就先改了名字"的意外。
+    /// </remarks>
+    private async Task<(string DisplayName, string? IconUrl)> ResolveDailyDisplayAsync(
+        string localName, string? gameNotionPageId)
+    {
+        if (string.IsNullOrWhiteSpace(gameNotionPageId)) return (localName, null);
+
+        try
+        {
+            var cat = await _repo.GetCatalogItemByPageIdAsync(gameNotionPageId);
+            if (cat == null) return (localName, null);
+
+            var displayName = string.IsNullOrWhiteSpace(cat.Name) ? localName : cat.Name;
+            var iconUrl = string.IsNullOrWhiteSpace(cat.IconUrl) ? null : cat.IconUrl;
+            return (displayName, iconUrl);
+        }
+        catch
+        {
+            // 取目录失败不该阻断同步本身；退回进程名即可。
+            return (localName, null);
+        }
+    }
+
     public async Task RefreshGameCatalogCacheAsync()
     {
         if (!_config.IsNotionConfigured) return;
@@ -728,20 +782,26 @@ public class NotionSyncService : INotionSyncService
                 var gameNotionId = game?.NotionPageId;
                 var isBound = !string.IsNullOrEmpty(gameNotionId);
 
+                // 标题与图标以总表（relation 指向的条目）为准：已绑定时用户在总表里
+                // 改过的名字（多为中文名）才是他真正想看的。未绑定则退回进程名、不写图标。
+                var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, gameNotionId);
+
                 if (string.IsNullOrEmpty(item.NotionPageId))
                 {
                     var newPageId = await _client.CreateDailyRecordAsync(
                         _config.DailyDatabaseId,
                         item.Date,
-                        item.GameName,
+                        displayName,
                         item.DurationMinutes,
-                        gameNotionId);
+                        gameNotionId,
+                        iconUrl);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped", newPageId);
                 }
                 else
                 {
-                    await _client.UpdateDailyRecordAsync(item.NotionPageId, item.DurationMinutes, gameNotionId, item.GameName);
+                    await _client.UpdateDailyRecordAsync(
+                        item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
                 }
                 count++;
@@ -777,6 +837,13 @@ public class NotionSyncService : INotionSyncService
     {
         if (!_config.IsNotionConfigured) return 0;
 
+        // 先补总表 page icon，再回填每日记录。
+        // 顺序不能反：下面的 ResolveDailyDisplayAsync 是从 game_catalog 的 IconUrl 取图标的，
+        // 而 Steam 图标恰恰是 EnsureMasterPageIconsAsync 写进目录缓存和总表页面的。
+        // 放在循环后面的话，每款游戏第一次回填时 icon 还是空的 —— 用户会看到
+        // "图标要等下一轮同步才出现"，看起来像坏了。
+        await EnsureMasterPageIconsAsync();
+
         var unmapped = await _repo.GetUnmappedDailySummariesAsync();
         int backfilled = 0;
 
@@ -787,20 +854,25 @@ public class NotionSyncService : INotionSyncService
 
             try
             {
+                // 与 SyncPendingDailyRecordsAsync 保持一致：改用总表名称 + 总表 page icon。
+                var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
+
                 if (string.IsNullOrEmpty(item.NotionPageId))
                 {
                     var newPageId = await _client.CreateDailyRecordAsync(
                         _config.DailyDatabaseId,
                         item.Date,
-                        item.GameName,
+                        displayName,
                         item.DurationMinutes,
-                        game.NotionPageId);
+                        game.NotionPageId,
+                        iconUrl);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
                 }
                 else
                 {
-                    await _client.UpdateDailyRecordAsync(item.NotionPageId, item.DurationMinutes, game.NotionPageId, item.GameName);
+                    await _client.UpdateDailyRecordAsync(
+                        item.NotionPageId, item.DurationMinutes, game.NotionPageId, displayName, iconUrl);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
                 }
                 backfilled++;
@@ -833,8 +905,91 @@ public class NotionSyncService : INotionSyncService
             SyncStatusChanged?.Invoke(this, $"已为 {backfilled} 条每日记录关联游戏总表");
         }
 
-        await EnsureMasterPageIconsAsync();
         return backfilled;
+    }
+
+    /// <summary>
+    /// 回刷：总表改名或补了 page icon 之后，把已同步的每日记录标题/图标跟着改过来。
+    /// </summary>
+    /// <remarks>
+    /// 为什么需要这一步：
+    /// 每日记录的标题里嵌着游戏名（「不思议迷宫 · 0.7 h」）。用户在总表里改名
+    /// （例如把英文进程名改成中文）后，relation 已经指向新名字，但**已经推送过的每日记录**标题
+    /// 还是旧名 —— 拉取（Pull）只同步时长，不会碰标题，
+    /// 于是历史记录会永远停在旧名上。这里补上这条回刷链路。
+    ///
+    /// 为什么不能每轮无条件 PATCH：
+    /// 记录条数会随天数线性增长，每轮同步都全量 PATCH 既慢又浪费 Notion 配额。
+    /// 因此逐条比对本地记录的 <c>notion_title</c>（远端标题的快照）与"期望标题"，
+    /// 只有真的不一致才发 PATCH。首轮 notion_title 为空的记录会被判为"需要回刷"，
+    /// 之后就有了快照，后续轮次即为空操作。
+    ///
+    /// 只处理已绑定（notion_page_id 非空）的记录：未绑定的压根没有 relation 可读，
+    /// 名字只能保持在进程名上。
+    /// </remarks>
+    public async Task<int> RefreshDailyTitlesFromMasterAsync()
+    {
+        if (!_config.IsNotionConfigured) return 0;
+
+        IReadOnlyList<DailySummary> synced;
+        try
+        {
+            synced = await _repo.GetSyncedDailySummariesAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"回刷每日记录标题失败（读取本地记录）: {ex.Message}");
+            return 0;
+        }
+        if (synced.Count == 0) return 0;
+
+        // 总表快照一次性读进内存：不要放在循环里逐条查库 —— 记录多时是 N 次查询。
+        var games = await _repo.GetAllGamesAsync();
+        var gameById = games.ToDictionary(g => g.Id);
+
+        int refreshed = 0;
+        foreach (var item in synced)
+        {
+            try
+            {
+                if (!gameById.TryGetValue(item.GameId, out var game)) continue;
+                if (string.IsNullOrWhiteSpace(game.NotionPageId)) continue;
+                if (string.IsNullOrWhiteSpace(item.NotionPageId)) continue;
+
+                var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
+
+                var expectedTitle = BuildDailyRecordTitle(displayName, item.DurationMinutes);
+                var currentTitle = item.NotionTitle;
+
+                // 标题和图标都已经是目标状态 → 什么都不做（绝大多数轮次都会走到这里）。
+                if (string.Equals(currentTitle, expectedTitle, StringComparison.Ordinal) && iconUrl == null)
+                    continue;
+
+                // forceTitle 不需要：只要传了 expectedTitle，标题就会被重算发出，
+                // 恰好覆盖"标题没变但图标要补写"这种情况。
+                await _client.UpdateDailyRecordAsync(
+                    item.NotionPageId,
+                    item.DurationMinutes,
+                    game.NotionPageId,
+                    expectedTitle,
+                    iconUrl);
+
+                await _repo.UpdateDailyRecordFromNotionAsync(item.NotionPageId, expectedTitle);
+                refreshed++;
+            }
+            catch (Exception ex)
+            {
+                // 单条失败不阻断其余记录：回刷是尽力而为的补偿动作，下轮还会再来。
+                AppLog.Warn($"回刷每日记录标题失败（{item.Date} {item.GameName}）: {ex.Message}");
+            }
+        }
+
+        if (refreshed > 0)
+        {
+            SyncStatusChanged?.Invoke(this, $"已按总表更新 {refreshed} 条每日记录的标题");
+        }
+
+        return refreshed;
     }
 
     /// <summary>
@@ -960,20 +1115,25 @@ public class NotionSyncService : INotionSyncService
             {
                 try
                 {
+                    // 刚绑定总表 → 这批记录的名字/图标也应该按总表来，而不是继续用进程名。
+                    var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, notionPageId);
+
                     if (string.IsNullOrEmpty(item.NotionPageId))
                     {
                         var newPageId = await _client.CreateDailyRecordAsync(
                             _config.DailyDatabaseId,
                             item.Date,
-                            item.GameName,
+                            displayName,
                             item.DurationMinutes,
-                            notionPageId);
+                            notionPageId,
+                            iconUrl);
 
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
                     }
                     else
                     {
-                        await _client.UpdateDailyRecordAsync(item.NotionPageId, item.DurationMinutes, notionPageId, item.GameName);
+                        await _client.UpdateDailyRecordAsync(
+                            item.NotionPageId, item.DurationMinutes, notionPageId, displayName, iconUrl);
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
                     }
                 }

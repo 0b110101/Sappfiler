@@ -556,6 +556,8 @@ public partial class HomeViewModel : ObservableObject
             await _syncService.PullDailyRecordsFromNotionAsync();
             var count = await _syncService.SyncPendingDailyRecordsAsync();
             await _syncService.BackfillRelationsAsync();
+            // 手动同步也要回刷标题，否则用户在总表改名后点「立即同步」看不到任何变化。
+            await _syncService.RefreshDailyTitlesFromMasterAsync();
             _ = _coverCache.EnsureLibraryCoversAsync(_repo);
             _dispatcherQueue.TryEnqueue(() =>
             {

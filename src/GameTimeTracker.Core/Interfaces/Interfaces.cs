@@ -48,6 +48,12 @@ public interface IDatabaseRepository
     Task<int> SyncDailyRecordFromNotionAsync(NotionDailyRecordItem item);
     Task<IReadOnlyList<DailySummary>> GetTopGamesByDateAsync(string date, int limit = 5);
 
+    /// <summary>
+    /// 回写一条已同步每日记录在 Notion 侧的标题。用途：总表改名后回刷每日记录标题，
+    /// 用它和期望标题比对即可判断"是否需要 PATCH"，避免每轮同步都无谓地打 Notion。
+    /// </summary>
+    Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title);
+
     // Notion Game Master Catalog Cache
     Task<IReadOnlyList<NotionGameCatalogItem>> GetCatalogItemsAsync();
     Task<NotionGameCatalogItem?> GetCatalogItemByPageIdAsync(string pageId);
@@ -84,8 +90,14 @@ public interface INotionClient
     Task<bool> TestConnectionAsync();
     Task<IReadOnlyList<NotionGameCatalogItem>> QueryGameMasterAsync(string databaseId);
     Task<IReadOnlyList<NotionDailyRecordItem>> QueryDailyRecordsAsync(string databaseId);
-    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId);
-    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null);
+    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameTitle, int durationMinutes, string? gamePageId, string? iconUrl = null);
+
+    /// <summary>
+    /// 更新每日记录。iconUrl 非空时一并把该页面 icon 设为 external 图片；
+    /// gameTitle 非空时按「gameTitle + 当前时长」重算并写回页面标题
+    /// （所以传 null 才是"只改时长、不动标题"）。
+    /// </summary>
+    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameTitle = null, string? iconUrl = null);
     Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle);
     /// <summary>把页面移入 Notion 回收站（archived）。这是 Notion API 唯一的"删除"方式，30 天内可恢复。</summary>
     Task<bool> ArchivePageAsync(string pageId);
@@ -104,6 +116,12 @@ public interface INotionSyncService
     Task<int> SyncPendingDailyRecordsAsync();
     Task<int> PullDailyRecordsFromNotionAsync();
     Task<int> BackfillRelationsAsync();
+
+    /// <summary>
+    /// 回刷：总表改名 / 补 page icon 后，把**已同步**的每日记录标题与图标跟着更新。
+    /// 逐条比对本地快照，只有真的不一致才 PATCH，因此可以安全地放进每轮同步链。
+    /// </summary>
+    Task<int> RefreshDailyTitlesFromMasterAsync();
     Task<int> AutoLinkGamesFromCatalogAsync();
     Task RefreshGameCatalogCacheAsync();
     Task LinkGameRelationAsync(int gameId, string notionPageId);

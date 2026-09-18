@@ -81,6 +81,12 @@ public class DailySummary
     public DateTime? LastSyncAt { get; set; }
     public string? ErrorMessage { get; set; }
 
+    /// <summary>
+    /// 这条记录在 Notion 页面上的标题原文（形如「不思议迷宫 · 0.7 h」）。
+    /// 只在"回刷标题"时用来比对，判断是否真的需要再 PATCH 一次 Notion。
+    /// </summary>
+    public string? NotionTitle { get; set; }
+
     // Navigation / joined fields
     public string GameName { get; set; } = string.Empty;
     public string Platform { get; set; } = string.Empty;
@@ -122,7 +128,17 @@ public record DetectedProcess(
 public class NotionDailyRecordItem
 {
     public string PageId { get; set; } = string.Empty;
+
+    /// <summary>已剥掉末尾时长后缀的裸游戏名（「不思议迷宫 · 0.7 h」→「不思议迷宫」）。</summary>
     public string GameTitle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Notion 页面上标题的原文（「不思议迷宫 · 0.7 h」）。
+    /// 与 <see cref="GameTitle"/> 的区别是它保留了时长后缀 —— 回刷标题时要用原文跟期望标题比对，
+    /// 用裸名比会把每条记录都误判成"需要更新"。
+    /// </summary>
+    public string? RawTitle { get; set; }
+
     public string Date { get; set; } = string.Empty;
     public int DurationMinutes { get; set; }
     public string? GameMasterPageId { get; set; }
