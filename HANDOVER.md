@@ -523,6 +523,19 @@ Set-ItemProperty $k -Name "USERPROFILE"     -Value "C:\Users\bbbab"           -T
     并新增**产物校验**——发布后检查 `Microsoft.UI.Xaml.dll` 等 9 个关键文件，
     缺任何一个就中止打包。**这类"包能生成、测试也全过、但一跑就崩"的问题必须在打包阶段拦住。**
 
+    **拿到任何一个包（zip / 7z / 解压目录）都能这样快速自检**：
+    ```powershell
+    # 解压后看这两个文件在不在 —— 缺了就是坏包，别交 QA
+    Test-Path .\Microsoft.ui.xaml.dll
+    Test-Path .\Microsoft.UI.Xaml.Controls.dll
+
+    # 文件数：正常约 449 个顶层条目；只有 ~101 就是被裁剪了
+    (Get-ChildItem . | Measure-Object).Count
+    ```
+    > 注意区分**压缩包体积**和**解压后体积**：交付时说的是 zip（约 105MB，7z 约 70MB），
+    > 排查时看的是解压后（约 285MB）。两者都是稳定基线，别混着比。
+    > 历史上 v1.0.3 ~ v1.2.1 的 zip 全是 105.2MB，解压后约 285MB（v1.0.7 实测 286MB）。
+
     教训：`publish.ps1` 里 `PublishTrimmed` / `SelfContained` / `WindowsAppSDKSelfContained`
     这三项**一律显式传参**，不要依赖 csproj 默认值——它们的默认值会随 Configuration 变化，
     而且错了之后的报错完全指不到原因。
