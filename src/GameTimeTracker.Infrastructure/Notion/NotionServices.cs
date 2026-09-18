@@ -258,8 +258,11 @@ public class NotionClient : INotionClient
                     }
 
                     var date = ExtractDate(props);
-                    var duration = ExtractNumber(props, "时长", "时长(分)", "Duration", "DurationMinutes");
-                    var gameMasterPageId = ExtractRelationId(props, "游戏", "游戏总表", "Game");
+                    // 新名优先，旧名兜底 —— 2026-09-18 用户把属性改名了
+                    // （时长 → 单次时长、游戏 → 关联游戏），但别人的表可能还没改，
+                    // 读的时候两种都认，免得拉不回老数据。
+                    var duration = ExtractNumber(props, "单次时长", "时长", "时长(分)", "Duration", "DurationMinutes");
+                    var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
 
                     if (!string.IsNullOrWhiteSpace(date) && (!string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(gameMasterPageId)))
@@ -297,17 +300,21 @@ public class NotionClient : INotionClient
     {
         var cleanDbId = dailyDbId.Replace("-", "");
         var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
+        // ⚠️ 每日时长表的属性名（2026-09-18 由用户改名，见 README「版本更新」）：
+        //    游戏名称 → 游戏动态 ／ 时长 → 单次时长 ／ 游戏 → 关联游戏
+        //    写错名字 Notion 会返回 400（property does not exist），同步直接失败。
+        //    注意**总表**的 title 属性仍叫「游戏名称」，别一起改了。
         var properties = new Dictionary<string, object>
         {
-            ["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } },
+            ["游戏动态"] = new { title = new[] { new { text = new { content = titleText } } } },
             ["日期"] = new { date = new { start = date } },
-            ["时长"] = new { number = durationMinutes },
+            ["单次时长"] = new { number = durationMinutes },
             ["绑定状态"] = new { select = new { name = !string.IsNullOrEmpty(gamePageId) ? "已绑定" : "未绑定" } }
         };
 
         if (!string.IsNullOrEmpty(gamePageId))
         {
-            properties["游戏"] = new { relation = new[] { new { id = gamePageId } } };
+            properties["关联游戏"] = new { relation = new[] { new { id = gamePageId } } };
         }
 
         var payload = new
@@ -333,9 +340,10 @@ public class NotionClient : INotionClient
         string? iconUrl = null)
     {
         var cleanPageId = pageId.Replace("-", "");
+        // 属性名同 CreateDailyRecordAsync：游戏动态 / 单次时长 / 关联游戏
         var properties = new Dictionary<string, object>
         {
-            ["时长"] = new { number = durationMinutes }
+            ["单次时长"] = new { number = durationMinutes }
         };
 
         if (!string.IsNullOrEmpty(gameName))
@@ -347,12 +355,12 @@ public class NotionClient : INotionClient
             // ⚠️ 传进来的必须是**游戏名**。传拼好的完整标题会得到「X · 0.7 h · 0.7 h」。
             // 这个参数以前叫 gameTitle，正是这个歧义导致过真实 bug（alpha18 回刷链路），故改名。
             var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
-            properties["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } };
+            properties["游戏动态"] = new { title = new[] { new { text = new { content = titleText } } } };
         }
 
         if (!string.IsNullOrEmpty(gamePageId))
         {
-            properties["游戏"] = new { relation = new[] { new { id = gamePageId } } };
+            properties["关联游戏"] = new { relation = new[] { new { id = gamePageId } } };
             properties["绑定状态"] = new { select = new { name = "已绑定" } };
         }
 
