@@ -49,10 +49,11 @@ public interface IDatabaseRepository
     Task<IReadOnlyList<DailySummary>> GetTopGamesByDateAsync(string date, int limit = 5);
 
     /// <summary>
-    /// 回写一条已同步每日记录在 Notion 侧的标题。用途：总表改名后回刷每日记录标题，
-    /// 用它和期望标题比对即可判断"是否需要 PATCH"，避免每轮同步都无谓地打 Notion。
+    /// 回写一条已同步每日记录在 Notion 侧的标题与图标快照。
+    /// 用途：总表改名 / 补 icon 后回刷时，用它和期望值比对即可判断"是否需要 PATCH"，
+    /// 避免每轮同步都无谓地打 Notion。两个快照必须一起写，否则会退化成每轮都 PATCH。
     /// </summary>
-    Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title);
+    Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title, string? iconUrl);
 
     // Notion Game Master Catalog Cache
     Task<IReadOnlyList<NotionGameCatalogItem>> GetCatalogItemsAsync();

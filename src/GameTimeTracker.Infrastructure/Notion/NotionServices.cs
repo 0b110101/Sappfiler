@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -8,6 +8,37 @@ using GameTimeTracker.Core.Services;
 
 namespace GameTimeTracker.Infrastructure.Notion;
 
+/// <summary>
+/// 每日记录标题的拼装与解析（格式 `{游戏名} · {X} h`）。
+/// </summary>
+/// <remarks>
+/// 单独抽成一个类，而不是塞在 <see cref="NotionClient"/> 里当私有方法，是因为
+/// **写**标题的 <see cref="NotionClient"/> 和**比对**标题的
+/// <c>NotionSyncService.RefreshDailyTitlesFromMasterAsync</c> 必须共用同一套规则。
+/// 两边各留一份实现的话，只要格式有一点漂移（比如改小数位数、换分隔符），
+/// 回刷就会永远判定"标题不一致"，每轮同步都白打一次 Notion。
+/// </remarks>
+internal static class DailyRecordTitle
+{
+    /// <summary>
+    /// 标题里的时长后缀，形如「不思议迷宫 · 42 min」；
+    /// 同时兼容早期格式「不思议迷宫 (42分)」——Notion 里可能还留着旧行。
+    /// 从右往左锚定：游戏名自身可能含 · 或 |，不能从左切。
+    /// </summary>
+    internal static readonly System.Text.RegularExpressions.Regex SuffixRegex =
+        new(@"\s*(?:[·|]\s*\d+(?:\.\d+)?\s*(?:min|h)|\(\s*\d+\s*分\s*\))\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。</summary>
+    internal static string Build(string gameTitle, int durationMinutes)
+        => $"{gameTitle} · {Math.Round(durationMinutes / 60.0, 1)} h";
+
+    /// <summary>剥掉标题末尾的时长后缀，得到裸游戏名。</summary>
+    internal static string StripSuffix(string rawTitle)
+        => SuffixRegex.Replace(rawTitle, string.Empty).Trim();
+}
+
 public class NotionClient : INotionClient
 {
     private const string BaseUrl = "https://api.notion.com/v1";
@@ -16,20 +47,6 @@ public class NotionClient : INotionClient
     private readonly HttpClient _httpClient;
     private string _token;
     private readonly int _maxRetries;
-
-    /// <summary>
-    /// 每日记录标题里的时长后缀，形如「不思议迷宫 · 42 min」；
-    /// 同时兼容早期格式「不思议迷宫 (42分)」——Notion 里可能还留着旧行。
-    /// 从右往左锚定：游戏名自身可能含 · 或 |，不能从左切。
-    /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex DurationSuffixRegex =
-        new(@"\s*(?:[·|]\s*\d+(?:\.\d+)?\s*(?:min|h)|\(\s*\d+\s*分\s*\))\s*$",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
-            System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    /// <summary>拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。</summary>
-    private static string BuildDailyRecordTitle(string gameTitle, int durationMinutes)
-        => $"{gameTitle} · {Math.Round(durationMinutes / 60.0, 1)} h";
 
     public NotionClient(string token, HttpClient? httpClient = null, int maxRetries = 3)
     {
@@ -231,7 +248,7 @@ public class NotionClient : INotionClient
 
                     var rawTitle = ExtractTitle(props);
                     // 标题形如「游戏名 · 42 min」（旧行是「游戏名 (42分)」），只剔除末尾的时长后缀。
-                    var title = DurationSuffixRegex.Replace(rawTitle, string.Empty).Trim();
+                    var title = DailyRecordTitle.StripSuffix(rawTitle);
                     if (string.IsNullOrWhiteSpace(title))
                     {
                         title = rawTitle.Trim();
@@ -276,7 +293,7 @@ public class NotionClient : INotionClient
         string? iconUrl = null)
     {
         var cleanDbId = dailyDbId.Replace("-", "");
-        var titleText = BuildDailyRecordTitle(gameTitle, durationMinutes);
+        var titleText = DailyRecordTitle.Build(gameTitle, durationMinutes);
         var properties = new Dictionary<string, object>
         {
             ["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } },
@@ -323,7 +340,7 @@ public class NotionClient : INotionClient
             // 永远按「gameTitle + 当前时长」重算整个标题，不做"只改游戏名那一段"的局部替换。
             // 理由：时长本身也在标题里，且老行可能还是「(42分)」这种旧格式 ——
             // 局部替换反而会拼出「新名字 · 42 min」残留旧后缀的怪东西。
-            var titleText = BuildDailyRecordTitle(gameTitle, durationMinutes);
+            var titleText = DailyRecordTitle.Build(gameTitle, durationMinutes);
             properties["游戏名称"] = new { title = new[] { new { text = new { content = titleText } } } };
         }
 
@@ -659,6 +676,33 @@ public class NotionSyncService : INotionSyncService
         }
     }
 
+    /// <summary>
+    /// 推送成功后，把"远端现在长什么样"记进本地快照。
+    /// </summary>
+    /// <remarks>
+    /// 不记的话本地状态就是**明知故犯地错**：明明刚把图标写上去，快照还写着"没有图标"，
+    /// 于是下一轮回刷会为这条记录多做一次完全多余的 PATCH。
+    /// 记下来之后，不变式成立：`notion_title` / `notion_icon_url` 始终等于
+    /// "我们最近一次写入或观察到的远端值"。
+    ///
+    /// 快照只是优化手段，写失败不该影响推送本身 —— 下一轮回刷会自然补上，所以这里吞异常。
+    /// </remarks>
+    private async Task RecordRemoteSnapshotAsync(
+        string pageId, string displayName, int durationMinutes, string? iconUrl)
+    {
+        if (string.IsNullOrWhiteSpace(pageId)) return;
+
+        try
+        {
+            await _repo.UpdateDailyRecordFromNotionAsync(
+                pageId, DailyRecordTitle.Build(displayName, durationMinutes), iconUrl);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"写入每日记录快照失败（page={pageId}）: {ex.Message}");
+        }
+    }
+
     public async Task RefreshGameCatalogCacheAsync()
     {
         if (!_config.IsNotionConfigured) return;
@@ -797,12 +841,14 @@ public class NotionSyncService : INotionSyncService
                         iconUrl);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped", newPageId);
+                    await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
                 }
                 else
                 {
                     await _client.UpdateDailyRecordAsync(
                         item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
+                    await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
                 }
                 count++;
             }
@@ -868,12 +914,14 @@ public class NotionSyncService : INotionSyncService
                         iconUrl);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
+                    await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
                 }
                 else
                 {
                     await _client.UpdateDailyRecordAsync(
                         item.NotionPageId, item.DurationMinutes, game.NotionPageId, displayName, iconUrl);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
+                    await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
                 }
                 backfilled++;
             }
@@ -909,7 +957,7 @@ public class NotionSyncService : INotionSyncService
     }
 
     /// <summary>
-    /// 回刷：总表改名或补了 page icon 之后，把已同步的每日记录标题/图标跟着改过来。
+    /// 回刷：总表改名或补了 page icon 之后，把已同步的每日记录的标题与图标跟着改过来。
     /// </summary>
     /// <remarks>
     /// 为什么需要这一步：
@@ -917,12 +965,17 @@ public class NotionSyncService : INotionSyncService
     /// （例如把英文进程名改成中文）后，relation 已经指向新名字，但**已经推送过的每日记录**标题
     /// 还是旧名 —— 拉取（Pull）只同步时长，不会碰标题，
     /// 于是历史记录会永远停在旧名上。这里补上这条回刷链路。
+    /// 图标同理：绑定之后用户才给总表条目设图标的话，历史记录页面上是空的。
     ///
     /// 为什么不能每轮无条件 PATCH：
     /// 记录条数会随天数线性增长，每轮同步都全量 PATCH 既慢又浪费 Notion 配额。
-    /// 因此逐条比对本地记录的 <c>notion_title</c>（远端标题的快照）与"期望标题"，
-    /// 只有真的不一致才发 PATCH。首轮 notion_title 为空的记录会被判为"需要回刷"，
+    /// 因此逐条比对本地记录的快照（<c>notion_title</c> + <c>notion_icon_url</c>）与"期望值"，
+    /// 只有真的不一致才发 PATCH。首轮快照为空的记录会被判为"需要回刷"，
     /// 之后就有了快照，后续轮次即为空操作。
+    ///
+    /// **标题与图标必须一起比对、一起写快照**。只比标题的话，
+    /// "总表有条目设了图标"会让每一轮都判定需要更新（`iconUrl` 非空 ≠ 页面图标不对），
+    /// 所有历史记录被反复 PATCH —— 正好把这个设计本来要解决的问题又引入回来。
     ///
     /// 只处理已绑定（notion_page_id 非空）的记录：未绑定的压根没有 relation 可读，
     /// 名字只能保持在进程名上。
@@ -958,15 +1011,17 @@ public class NotionSyncService : INotionSyncService
 
                 var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
 
-                var expectedTitle = BuildDailyRecordTitle(displayName, item.DurationMinutes);
-                var currentTitle = item.NotionTitle;
+                var expectedTitle = DailyRecordTitle.Build(displayName, item.DurationMinutes);
 
-                // 标题和图标都已经是目标状态 → 什么都不做（绝大多数轮次都会走到这里）。
-                if (string.Equals(currentTitle, expectedTitle, StringComparison.Ordinal) && iconUrl == null)
-                    continue;
+                // 标题与图标**都要**比对。只比标题的话，"总表设了图标"会让每一轮都判定
+                // 需要更新（因为 iconUrl 非空 ≠ 页面图标不对），于是所有历史记录被反复 PATCH，
+                // 正好把回刷本来要解决的性能问题又引入回来。
+                var titleChanged = !string.Equals(item.NotionTitle, expectedTitle, StringComparison.Ordinal);
+                var iconChanged = !string.Equals(item.NotionIconUrl, iconUrl, StringComparison.Ordinal);
 
-                // forceTitle 不需要：只要传了 expectedTitle，标题就会被重算发出，
-                // 恰好覆盖"标题没变但图标要补写"这种情况。
+                // 都是目标状态 → 什么都不做（绝大多数轮次都会走到这里）。
+                if (!titleChanged && !iconChanged) continue;
+
                 await _client.UpdateDailyRecordAsync(
                     item.NotionPageId,
                     item.DurationMinutes,
@@ -974,7 +1029,15 @@ public class NotionSyncService : INotionSyncService
                     expectedTitle,
                     iconUrl);
 
-                await _repo.UpdateDailyRecordFromNotionAsync(item.NotionPageId, expectedTitle);
+                // 两个快照一起落库，否则下一轮还会认为"不一致"、又打一次 Notion。
+                // 写回 0 行意味着本地找不到这条 page_id —— 属于数据异常，要留下痕迹，
+                // 不然症状只是"同步一直很慢"，极难定位。
+                var snapshotRows = await _repo.UpdateDailyRecordFromNotionAsync(
+                    item.NotionPageId, expectedTitle, iconUrl);
+                if (snapshotRows == 0)
+                {
+                    AppLog.Warn($"回刷：快照写回 0 行（notion_page_id={item.NotionPageId} 本地未匹配），下轮会重复请求");
+                }
                 refreshed++;
             }
             catch (Exception ex)
@@ -1129,12 +1192,14 @@ public class NotionSyncService : INotionSyncService
                             iconUrl);
 
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
+                        await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
                     }
                     else
                     {
                         await _client.UpdateDailyRecordAsync(
                             item.NotionPageId, item.DurationMinutes, notionPageId, displayName, iconUrl);
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
+                        await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
                     }
                 }
                 catch (Exception ex)

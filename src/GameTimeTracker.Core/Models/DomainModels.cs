@@ -87,6 +87,13 @@ public class DailySummary
     /// </summary>
     public string? NotionTitle { get; set; }
 
+    /// <summary>
+    /// 这条记录在 Notion 页面上的 page icon URL 快照。
+    /// 与 <see cref="NotionTitle"/> 同理：只快照标题的话，"总表设了图标"会导致
+    /// 每轮回刷都判定需要更新，从而反复 PATCH。
+    /// </summary>
+    public string? NotionIconUrl { get; set; }
+
     // Navigation / joined fields
     public string GameName { get; set; } = string.Empty;
     public string Platform { get; set; } = string.Empty;

@@ -18,7 +18,7 @@
 | 源码位置 | `E:\vi2`（**注意：与 `test/` 无关，工作目录里的 `GameTimeTracker-v*-win-x64` 只是发布产物**） |
 | 活跃数据库 | `%LocalAppData%\GameTimeTracker\gametime.db`（**不是**源码目录下的 `gametime.db`） |
 | 用户可读日志 | `<exe目录>\data\logs\app.log`（>2MB 轮转为 `app.old.log`） |
-| 测试 | `dotnet test`，xunit + FluentAssertions，**69 个用例基线**（alpha17 实测 69/69 通过；alpha18 新增 5 个，共 74，**待验证**） |
+| 测试 | `dotnet test`，xunit + FluentAssertions，**69 个用例基线**（alpha17 实测 69/69 通过；alpha18 新增 6 个，共 75，**待验证**） |
 | 构建 | `dotnet build GameTimeTracker.slnx`；发布走 `dist/` 下的 `-win-x64.zip` |
 | 版本号 | 仓库根 `Directory.Build.props` 统一定义，当前 **0.9.5-alpha18**（见 2.7） |
 | QA 协作 | alphaNN 是给 QA 的迭代序号，**每交一版调试包就 +1**（见 2.7） |
@@ -47,9 +47,9 @@
   2. 总表改名 / 补 icon 后**回刷**已同步记录的标题与图标（`RefreshDailyTitlesFromMasterAsync`）。
   3. 新用户首次保存 Notion 配置成功后自动跑一次同步。
   详见 **2.8**。
-- 已给回刷逻辑补了 5 个新测试（含"无事可做时不发 PATCH"和"升级库首轮补快照"两个关键场景），
-  共 74 个用例，同样受构建环境阻塞、待验证。
-- **交 QA 前必须先做**：重启后用正常终端跑 `dotnet build` + `dotnet test`，确认 0 错误 / 74 全过，
+- 已给回刷逻辑补了 6 个新测试（含"无事可做时不发 PATCH"和"升级库首轮补快照"两个关键场景），
+  共 75 个用例，同样受构建环境阻塞、待验证。
+- **交 QA 前必须先做**：重启后用正常终端跑 `dotnet build` + `dotnet test`，确认 0 错误 / 75 全过，
   再按 2.7 的清单打 `GameTimeTracker-v0.9.5-alpha18-win-x64.zip`。
   **未验证的包不要交 QA**——否则 QA 报的 bug 分不清是这次改动引入的还是本来就有。
 
@@ -237,14 +237,31 @@
 - 为什么必须做：Pull 只同步时长、不碰标题，所以历史记录会**永远停在旧名字上**。
 - 实现：`NotionSyncService.RefreshDailyTitlesFromMasterAsync()`，已挂进全部四条同步链。
 - **必须在 `SyncPendingDailyRecordsAsync` 之后调用**（刚推上去的记录才有快照）。
-- 性能设计：每条已同步记录在 `daily_summary.notion_title` 存一份**远端标题快照**，
-  回刷时逐条比对「快照 vs 期望标题」，只有真的不一致才发 PATCH。
-  没有这个快照的话，每轮同步都要把全部历史记录 PATCH 一遍——记录数随天数线性增长，不可接受。
-  - **首轮**：`notion_title` 为空的记录会被判为"需要回刷"一次，之后就有快照了。
-  - `NotionDailyRecordItem.RawTitle` 是给这个快照用的**原文标题**（保留时长后缀）。
+- 性能设计：每条已同步记录在 `daily_summary` 存**两份远端快照** ——
+  `notion_title`（标题，含时长后缀）+ `notion_icon_url`（page icon）。
+  回刷时逐条比对「快照 vs 期望值」，**只有真的不一致才发 PATCH**。
+  没有快照的话，每轮同步都要把全部历史记录 PATCH 一遍——记录数随天数线性增长，不可接受。
+  - **两份快照必须一起比对、一起写。**
+    只比标题是个**隐蔽的性能陷阱**：`iconUrl != null` 只表示"总表里设了图标"，
+    不代表"这个页面图标不对"，所以只要总表有条目设了图标，所有历史记录就会**每轮都被 PATCH**，
+    正好把这个设计本来要解决的问题又引入回来。
+    对应用例：`RefreshTitles_IsNoOp_WhenNothingChanged`（改这里时别删）。
+  - **推送成功后立刻落快照**（`RecordRemoteSnapshotAsync`）。
+    不落的话本地就是**明知故犯地错**：刚把图标写上去，快照还写着"没有图标"，
+    下一轮回刷会为这条记录多做一次完全多余的 PATCH。
+    落快照后不变式成立：快照始终 = "我们最近一次写入或观察到的远端值"。
+    对应用例：`SyncPending_RecordsSnapshot_SoBackRefreshDoesNotRepatch`。
+  - **首轮**：快照为空的记录会被判为"需要回刷"一次，之后就有快照了。
+  - `NotionDailyRecordItem.RawTitle` 是给标题快照用的**原文标题**（保留时长后缀）。
     别拿 `GameTitle`（已剥后缀的裸名）去比对——那会把每条记录都误判成不一致，反复 PATCH。
 - `EnsureMasterPageIconsAsync()` 现在挪到了 `BackfillRelationsAsync` 的**开头**。
   顺序不能反：回填时要从 `game_catalog.IconUrl` 取图标，而 Steam 图标正是这一步写进目录缓存的。
+- **`GetCatalogItemByPageIdAsync` / `UpdateDailyRecordFromNotionAsync` 都做连字符不敏感匹配。**
+  Notion 的 page id 有时带连字符（8-4-4-4-12）有时不带，而 `games.notion_page_id` 与
+  `game_catalog.page_id` 来源路径不同，不能假设两边形式一致。
+  只做精确匹配的话，不一致时**静默返回 null / 静默 0 行**，
+  表现为"每日记录用了进程名而不是总表名、图标也没了"或"回刷永远不收敛"，都极难查。
+  （`EnsureMasterPageIconsAsync` 里手工 `Replace("-","")` 就是踩过这个坑的痕迹。）
 
 **③ 新用户首次保存 Notion 配置成功后自动同步一次**
 

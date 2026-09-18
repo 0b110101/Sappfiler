@@ -268,8 +268,8 @@ public class NotionPullImportTests : IDisposable
 
         var daily = (await _repo.GetDailySummariesByDateAsync("2026-09-26")).Single();
         await _repo.UpdateDailySyncStatusAsync(daily.Id, "synced", "daily-rn");
-        // 远端快照还是旧名字
-        await _repo.UpdateDailyRecordFromNotionAsync("daily-rn", "旧名字 · 0.7 h");
+        // 远端快照还是旧名字 + 旧图标
+        await _repo.UpdateDailyRecordFromNotionAsync("daily-rn", "旧名字 · 0.7 h", "https://example.com/a.png");
 
         // 用户在总表里改名 + 换图标，下一轮目录刷新会带下新值
         _client.GameMasterItems.Clear();
@@ -288,6 +288,8 @@ public class NotionPullImportTests : IDisposable
     [Fact]
     public async Task RefreshTitles_IsNoOp_WhenNothingChanged()
     {
+        // 这条用例是本需求的性能护栏：只要"总表有条目设了图标"就每轮 PATCH 全部历史记录，
+        // 记录数会随天数线性增长 —— 必须证明真的无变化时一次请求都不发。
         _client.GameMasterItems.Add(new NotionGameCatalogItem
         {
             PageId = "master-same", Name = "不变的游戏", IconType = "external", IconUrl = "https://example.com/c.png"
@@ -301,8 +303,11 @@ public class NotionPullImportTests : IDisposable
 
         var daily = (await _repo.GetDailySummariesByDateAsync("2026-09-27")).Single();
         await _repo.UpdateDailySyncStatusAsync(daily.Id, "synced", "daily-same");
-        // 快照与期望标题一致（42 min → 0.7 h）
-        await _repo.UpdateDailyRecordFromNotionAsync("daily-same", "不变的游戏 · 0.7 h");
+        // 标题与图标快照都已是目标状态（42 min → 0.7 h）。
+        // 图标快照必须一起给：只给标题的话 iconChanged 恒为 true，这条用例就会失败 ——
+        // 那正是这个缺陷曾经存在过的证据。
+        await _repo.UpdateDailyRecordFromNotionAsync(
+            "daily-same", "不变的游戏 · 0.7 h", "https://example.com/c.png");
 
         var before = _client.UpdatedPages.Count;
         var refreshed = await _sync.RefreshDailyTitlesFromMasterAsync();
@@ -334,10 +339,38 @@ public class NotionPullImportTests : IDisposable
 
         refreshed.Should().Be(1, "没有快照的老记录应被判为需要回刷一次");
         var after = (await _repo.GetDailySummariesByDateAsync("2026-09-28")).Single();
-        after.NotionTitle.Should().Be("老库游戏 · 0.7 h", "回刷后要落快照，后续轮次才会变成空操作");
+        after.NotionTitle.Should().Be("老库游戏 · 0.7 h", "回刷后要落标题快照，后续轮次才会变成空操作");
+        after.NotionIconUrl.Should().Be("https://example.com/d.png", "图标快照必须一起落库，否则下轮又因图标不一致再 PATCH");
 
         // 第二轮应当无事可做
         _client.UpdatedPages.Clear();
         (await _sync.RefreshDailyTitlesFromMasterAsync()).Should().Be(0, "快照补齐后不应反复 PATCH");
+    }
+
+    [Fact]
+    public async Task SyncPending_RecordsSnapshot_SoBackRefreshDoesNotRepatch()
+    {
+        // 推送成功后必须立刻把"远端现状"记进快照。不记的话本地就是明知故犯地错：
+        // 刚把图标写上去，快照还写着"没有图标"，下一轮回刷会为这条记录多做一次多余 PATCH。
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-snap", Name = "快照游戏", IconType = "external", IconUrl = "https://example.com/e.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "3004", "Snap", "n.exe", @"C:\n.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-snap");
+        await _repo.AddSessionDurationToDailyAsync("2026-09-29", game.Id, 42 * 60);
+
+        await _sync.SyncPendingDailyRecordsAsync();
+
+        var pushed = (await _repo.GetDailySummariesByDateAsync("2026-09-29")).Single();
+        pushed.NotionTitle.Should().Be("快照游戏 · 0.7 h", "推送后应立刻落下标题快照");
+        pushed.NotionIconUrl.Should().Be("https://example.com/e.png", "推送后应立刻落下图标快照");
+
+        // 紧接着的回刷应该无事可做
+        _client.UpdatedPages.Clear();
+        (await _sync.RefreshDailyTitlesFromMasterAsync()).Should().Be(0, "推送已落快照，回刷不该再重复 PATCH");
     }
 }

@@ -99,9 +99,11 @@ public class SqliteRepository : IDatabaseRepository
                 notion_page_id TEXT,
                 last_sync_at DATETIME,
                 error_message TEXT,
-                -- 这条记录在 Notion 上的标题（含时长后缀）。仅用于回刷时比对：
-                -- 总表改名后，用它和"期望标题"比较即可知道要不要 PATCH，避免每轮都白打一次 Notion。
+                -- 这条记录在 Notion 上的标题（含时长后缀）与 page icon 的快照。
+                -- 仅用于回刷时比对：拿它和"期望值"比较即可知道要不要 PATCH，
+                -- 避免每轮同步都把所有历史记录重打一遍 Notion。
                 notion_title TEXT,
+                notion_icon_url TEXT,
                 UNIQUE(date, game_id)
             );
             CREATE INDEX IF NOT EXISTS idx_daily_sync ON daily_summary(sync_status);
@@ -175,6 +177,14 @@ public class SqliteRepository : IDatabaseRepository
             using var alterCmd5 = conn.CreateCommand();
             alterCmd5.CommandText = "ALTER TABLE daily_summary ADD COLUMN notion_title TEXT;";
             alterCmd5.ExecuteNonQuery();
+        }
+        catch { }
+
+        try
+        {
+            using var alterCmd6 = conn.CreateCommand();
+            alterCmd6.CommandText = "ALTER TABLE daily_summary ADD COLUMN notion_icon_url TEXT;";
+            alterCmd6.ExecuteNonQuery();
         }
         catch { }
     }
@@ -964,14 +974,18 @@ public class SqliteRepository : IDatabaseRepository
     }
 
     /// <summary>
-    /// 把某条 Notion 每日记录页面的标题回写到本地，用于回刷时比对
+    /// 把某条 Notion 每日记录页面的标题与图标快照回写到本地，用于回刷时比对
     /// （见 <c>NotionSyncService.RefreshDailyTitlesFromMasterAsync</c>）。
     ///
-    /// 只认 notion_page_id 精确匹配，且只改 title 一个字段 —— 不碰 sync_status，
+    /// 只改 notion_title / notion_icon_url 两个快照字段 —— 不碰 sync_status，
     /// 否则会把"本地时长领先、正等上传"的 pending 状态洗掉。
     /// 返回受影响行数（0 表示本地没有这条记录）。
     /// </summary>
-    public async Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title)
+    /// <remarks>
+    /// 两个快照必须**一起**写：只更新标题的话，图标快照会永远停在旧值，
+    /// 下一轮就会因为"图标不一致"再 PATCH 一次，退化成每轮都打 Notion。
+    /// </remarks>
+    public async Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title, string? iconUrl)
     {
         if (string.IsNullOrWhiteSpace(notionPageId)) return 0;
 
@@ -979,9 +993,20 @@ public class SqliteRepository : IDatabaseRepository
         try
         {
             using var conn = CreateConnection();
+
+            // 连字符不敏感：不能假设传入值与 notion_page_id 的存储形式一致（见
+            // GetCatalogItemByPageIdAsync 的同类说明）。写错了不会报错、只会静默 0 行，
+            // 表现成"回刷后快照没落库 → 下一轮又判定需要回刷 → 每轮都白打一次 Notion"。
+            var normalized = notionPageId.Replace("-", "");
             return await conn.ExecuteAsync(
-                "UPDATE daily_summary SET notion_title = @title WHERE notion_page_id = @notionPageId;",
-                new { notionPageId = notionPageId.Replace("-", ""), title });
+                """
+                UPDATE daily_summary
+                SET notion_title = @title,
+                    notion_icon_url = @iconUrl
+                WHERE notion_page_id = @notionPageId
+                   OR REPLACE(notion_page_id, '-', '') = @normalized;
+                """,
+                new { notionPageId, normalized, title, iconUrl });
         }
         finally
         {
@@ -1042,6 +1067,7 @@ public class SqliteRepository : IDatabaseRepository
             LastSyncAt = r.last_sync_at != null ? DateTime.Parse((string)r.last_sync_at) : null,
             ErrorMessage = (string?)r.error_message,
             NotionTitle = TryGetString(r, "notion_title"),
+            NotionIconUrl = TryGetString(r, "notion_icon_url"),
             GameName = (string)r.game_name,
             Platform = (string)r.platform,
             PlatformId = (string)r.platform_id
@@ -1077,7 +1103,22 @@ public class SqliteRepository : IDatabaseRepository
     public async Task<NotionGameCatalogItem?> GetCatalogItemByPageIdAsync(string pageId)
     {
         using var conn = CreateConnection();
-        var r = await conn.QueryFirstOrDefaultAsync<dynamic>("SELECT * FROM game_catalog WHERE page_id = @pageId;", new { pageId });
+
+        // 连字符不敏感匹配：Notion 的 page id 有时带连字符（8-4-4-4-12）有时不带，
+        // 而 games.notion_page_id 与 game_catalog.page_id 的来源路径不同，
+        // 不能假设两边形式一致。只做精确匹配的话，不一致时会静默返回 null，
+        // 表现为"每日记录用了进程名而不是总表名、图标也没了"——很难查。
+        // （EnsureMasterPageIconsAsync 里手工 Replace("-","") 就是踩过这个坑的痕迹。）
+        var normalized = pageId.Replace("-", "");
+        var r = await conn.QueryFirstOrDefaultAsync<dynamic>(
+            """
+            SELECT * FROM game_catalog
+            WHERE page_id = @pageId
+               OR REPLACE(page_id, '-', '') = @normalized
+            LIMIT 1;
+            """,
+            new { pageId, normalized });
+
         if (r == null) return null;
         var aliases = JsonSerializer.Deserialize<List<string>>((string)r.aliases_json) ?? new();
         var identifiers = JsonSerializer.Deserialize<List<string>>((string)r.identifiers_json) ?? new();
