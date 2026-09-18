@@ -107,6 +107,39 @@
   把副本库的 `settings.notion_token` 清空（断开 Notion）+ 给目标游戏挂一个有 cover_url 的 page_id 即可离线复现。
 
 
+## Notion 表结构硬要求（改代码前必看）
+**每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——
+```csharp
+["游戏名称"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）
+["日期"]     = date
+["时长"]     = number     // ★ 单位是分钟，不是小时
+["绑定状态"] = select     // 已绑定 / 未绑定
+["游戏"]     = relation   // 仅在有 gamePageId 时写入
+```
+- **属性名必须与代码里的字面量完全一致**，不匹配 Notion 返回 400（property does not exist）。
+- **`绑定状态` 的选项不用手工预建**：Notion API 会自动把选项加进 schema
+  （官方文档原文：*"If the select data source property doesn't have an option by that name yet,
+  then the name is added to the data source schema"*）。
+  前提是集成对父库有写权限——连接集成那步已经给了。
+  （初版 README 曾写"必须预建选项"，是错的，已修正。）
+
+**游戏总表**：程序只读，属性均可选，但：
+- `游戏名称` (Title) 实际必需（没有它匹配无从谈起）
+- `游戏标识`（多选/文本，`steam:appid`）**只属于总表**，用于跨语言匹配；
+  **程序不会把它写进每日表** —— 每日表靠 `游戏` relation 回指总表，不冗余。
+  不填也能用，兜底是从封面 URL 提取 Steam AppID（`GameMatcher.ExtractSteamAppId`）。
+- `封面` / `别名` 可选。
+
+**Rollup 累积时长（用户明确要求的能力，README 第 5 节）**：
+- 前提：`游戏` relation 设为**双向**（Notion 里打开「在…中显示」开关），
+  总表才会出现反向关联属性。
+- 总表加 Rollup：Relation=反向关联、Property=`时长`、Calculate=**Sum**。
+- **Rollup 是只读计算值，不能加到另一个属性上。**
+  用户原有手工时长要叠加的话，得再加 **Formula**：
+  `prop("原有列") + prop("GT累计")`，注意单位——Rollup 是分钟，
+  原列若是小时要 `/60`。
+- Rollup **只统计已绑定的记录**（没 relation 的算不进去），所以绑定是 Rollup 的前提。
+
 ## 版本号与版本控制（2026-09-18 确立）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
