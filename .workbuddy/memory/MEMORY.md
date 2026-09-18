@@ -95,7 +95,54 @@
 - 封面缓存目录：`%LocalAppData%\GameTimeTracker\cache\covers\`；封面色块区域若显示 `#202433` 说明 Image 没渲染出内容（容器底色）。
 
 
+## ⚠️ WinUI ScrollViewer：BarVisibility 和 ScrollMode 是两个独立开关（2026-09-19 踩坑）
+
+`HorizontalScrollBarVisibility="Disabled"` **只**表示不显示滚动条；
+`HorizontalScrollMode` 默认仍是 `Enabled` → `CanHorizontallyScroll = true`
+→ **测量子元素时给的是无限宽**。于是"本该被裁剪/滚动"的内容会把父容器整个撑开。
+
+真实事故：`HomePage.xaml` 最外层 ScrollViewer 只设了 BarVisibility，
+热力图 52 周 × 16px = 832px 把 RootContentGrid 从 ~415px 撑到 ~1250px；
+叠加上"宽度 < 880 就把右列挪到下面"的响应式判定（`SizeChanged` 又挂在会被内容
+反向影响的 RootContentGrid 上），右列被判定成"窗口很宽"而挪回右侧 —— 实际窗口还窄着，
+**右列被推到屏幕外**。表现为"热力图数据一渲染出来，右边的区块就掉下去了"。
+
+两条规矩：
+1. **要禁止某个方向滚动，BarVisibility 和 ScrollMode 都要显式设**。
+2. **响应式断点的触发源绝不能用会被内容撑开的元素**，要挂在最外层容器（尺寸只由窗口决定）上。
+
+排查提示：用户说"数据一多就不对"时，先怀疑**渲染时点**（数据从无到有那一刻尺寸跳变），
+而不是"数据量大"本身。
+
+## ⚠️ 回刷/更新每日记录会连带写时长（2026-09-19 数据损坏事故）
+
+每日记录的**标题串里含时长**（「游戏名 · X h」），所以 `UpdateDailyRecordAsync`
+**无法只改标题** —— 必然同时写「单次时长」属性。任何"我以为只改标题"的调用点，
+只要传进去的 `durationMinutes` 是 0，就会把 Notion 上原本的时长**清零**。
+
+事故：QA 的「喵门镖局 7/17」被清成 0，且标题变成程序格式「喵门镖局 · 0 h」
+—— 标题的格式就是判定"谁写的"的指纹（程序写的是 `名字 · X h` 带空格和 ·，
+用户手写的是 `名字2.2h` 紧贴）。
+
+已加护栏：`RefreshDailyTitlesFromMasterAsync` 跳过 `DurationMinutes <= 0` 的记录。
+**今后任何调用 Create/UpdateDailyRecordAsync 的地方都要先确认时长非 0。**
+
+## 删除对账的误删风险（2026-09-19 加固）
+
+`ReconcileNotionDeletionsAsync` 的 A 部分只凭"本地 notion_page_id 不在远端集合里"
+就归档 + 删除本地记录 —— 前提是远端集合**完整**。
+而 `QueryDailyRecordsAsync` 会跳过解析不出来的行（日期为空、或标题与关联游戏都为空），
+那些 page_id 自然不在集合里 → 本地对应记录被误判"Notion 已删除" → 删除时**连带抹掉时长**。
+已加保护：远端条数 < 本地已同步条数的一半（且本地样本 ≥ 20）时整段跳过，宁可漏删不误删。
+
 ## 已知遗留问题（尚未处理）
+- **拉取每日记录会为 Notion 总表里的游戏在本地 `games` 表建行**。本机 db 可见
+  09-17 19:10:38 同一秒批量创建 5 行、`executable` 为空、`platform_id` 是 appid 或随机 guid
+  —— 这是拉取路径（`SyncDailyRecordFromNotionAsync` 的兜底 insert）的特征，
+  **不是** Steam 扫描写入的（扫描结果只留在 `GameLibraryManager._installedGames` 内存里，不落库）。
+  后果：总表里的游戏全被导成本地游戏行，在「游戏映射」里显示为一堆「未绑定」。
+  用户明确不想要这个（原话："我只是要每日游戏时长图里的同步到程序"）。
+  **待产品决策**：是否给这类"仅来自 Notion"的记录单独标记并在映射库折叠/过滤。
 - `SessionHeartbeatIntervalSeconds`、`AutoCreateGames` 仍未接线；启动/周期循环里 `PullDailyRecordsFromNotionAsync` 被重复调用（`SyncPendingDailyRecordsAsync` 内部已含一次）。
 - 根目录 `Platforms/` 9 个 .cs 是与 `src/.../Infrastructure/Platforms/` 逐字节重复的死副本。
 - `DailyAggregator` 中两套热力图阈值口径不一致（固定 360min vs 窗口内相对最大值）。
