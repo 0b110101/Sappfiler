@@ -44,11 +44,13 @@ public class NotionWireFormatTests
     }
 
     [Theory]
-    [InlineData(42, 0.7)]     // 42 分钟 = 0.7 小时
-    [InlineData(60, 1)]       // 1 小时
-    [InlineData(63, 1.1)]     // 63 分钟 = 1.05 → 1.1
-    [InlineData(600, 10)]     // 10 小时
-    [InlineData(5, 0.1)]      // 5 分钟 = 0.083 → 0.1
+    [InlineData(42, 0.7)]       // 42 分钟 = 0.70 小时（除得尽）
+    [InlineData(60, 1)]         // 1 小时
+    [InlineData(63, 1.05)]      // 63 分钟 = 1.05 小时（1 位小数会变 1.1，丢精度）
+    [InlineData(600, 10)]       // 10 小时
+    [InlineData(5, 0.08)]       // 5 分钟 = 0.0833… → 0.08（1 位小数会变 0.1）
+    [InlineData(15, 0.25)]      // 15 分钟 = 0.25 小时 —— 1 位小数会变 0.2 并读回 12 分
+    [InlineData(1, 0.02)]       // 1 分钟 = 0.0166… → 0.02
     public async Task CreateDailyRecord_ShouldSendDurationInHours(int durationMinutes, double expectedHours)
     {
         var (client, handler) = MakeClient();
@@ -152,5 +154,50 @@ public class NotionWireFormatTests
         var records = await client.QueryDailyRecordsAsync("db-1");
 
         records[0].DurationMinutes.Should().Be(120, ">24 的值是旧的分钟格式，不应再乘 60");
+    }
+
+    [Fact]
+    public async Task DurationRoundTrip_ShouldBeExact_ForEveryPlausibleMinuteValue()
+    {
+        // 这是"2 位小数"这个选择的核心依据，所以穷举验证：
+        // 1..1440 分钟逐个写进表、再读回来，必须**一个不差**。
+        //
+        // 1 位小数做不到这件事 —— 粒度 6 分钟，1440 个值里 1200 个往返不回来
+        // （15 分 → 0.2h → 12 分），并会连带引发"本地永远领先 → 每轮重推"。
+        var mismatches = new List<string>();
+
+        for (int minutes = 1; minutes <= 1440; minutes++)
+        {
+            var (writeClient, writeHandler) = MakeClient();
+            await writeClient.CreateDailyRecordAsync("db-1", "2026-09-19", "往返测试", minutes, null);
+            using var sent = JsonDocument.Parse(writeHandler.RequestBodies[0]);
+            var hours = sent.RootElement.GetProperty("properties")
+                .GetProperty("单次时长").GetProperty("number").GetDouble();
+
+            // 把刚写出去的小时值当成远端数据读回来
+            var readResponse = $$"""
+            {
+              "results": [
+                {
+                  "id": "p",
+                  "properties": {
+                    "游戏动态": { "type": "title", "title": [ { "text": { "content": "x" } } ] },
+                    "日期": { "type": "date", "date": { "start": "2026-09-19" } },
+                    "单次时长": { "type": "number", "number": {{hours}} }
+                  }
+                }
+              ],
+              "has_more": false
+            }
+            """;
+            var (readClient, _) = MakeClient(readResponse);
+            var back = (await readClient.QueryDailyRecordsAsync("db-1"))[0].DurationMinutes;
+
+            if (back != minutes) mismatches.Add($"{minutes} 分 → {hours} h → {back} 分");
+        }
+
+        mismatches.Should().BeEmpty(
+            $"2 位小数应能精确还原 1..1440 全部分钟值，实际有 {mismatches.Count} 个不一致："
+            + string.Join("、", mismatches.Take(5)));
     }
 }

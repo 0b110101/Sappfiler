@@ -31,11 +31,18 @@ internal static class DailyRecordTitle
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
-    /// 分钟 → 小时（保留 1 位小数）。「单次时长」数值属性与标题后缀共用这一个换算，
-    /// 保证两者永远一致（曾出现过标题是小时、数值是分钟的不一致）。
+    /// 分钟 → 小时（保留 2 位小数）。「单次时长」数值属性与标题后缀共用这一个换算，
+    /// 保证两者永远一致。
     /// </summary>
+    /// <remarks>
+    /// **为什么是 2 位而不是 1 位**（2026-09-19 定）：
+    /// 1 位小数的粒度是 6 分钟，1440 个可能的分钟值里有 1200 个往返不回来
+    /// （15 分 → 0.2 h → 12 分，差 3 分钟），并会连带引发"本地永远领先 → 每轮重推"。
+    /// 2 位小数的粒度是 0.6 分钟，**1..1440 全部分钟值都能精确往返**（最大误差 0），
+    /// 所以 15 分 → 0.25 h → 15 分，不丢精度。
+    /// </remarks>
     internal static double MinutesToHours(int durationMinutes)
-        => Math.Round(durationMinutes / 60.0, 1);
+        => Math.Round(durationMinutes / 60.0, 2);
 
     /// <summary>
     /// 拼装每日记录标题：时长以小时显示（1 位小数），如「Master Key · 0.7 h」。
