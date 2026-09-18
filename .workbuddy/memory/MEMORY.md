@@ -252,19 +252,30 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 - **标题读取是按类型找的**（`ExtractTitle` 找第一个 title 属性），与属性名无关。
 - **`绑定状态` 的选项不用手工预建**：Notion API 会自动把选项加进 schema。
 
-### ⚠️ 单位换算的三条硬约束（2026-09-19 改单位时踩到，再改单位前必读）
+### ⚠️ 单位换算的硬约束（2026-09-19 改单位时踩到，再改单位前必读）
 1. **只在 Notion 边界换算**：`NotionDailyRecordItem.DurationMinutes` 与本地
    `daily_summary` **一律是分钟**。写入用 `DailyRecordTitle.MinutesToHours()`，
    读取用 `RawDurationToMinutes()`。
-2. **读 Number 必须用 `GetDouble`，不能用 `GetInt32`**。
-   原 `ExtractNumber` 用 `GetInt32()`，遇到 `0.7` 会**直接抛异常**，
-   整条记录拉不回来。已改为 `ExtractDouble` 返回 `double?`。
-3. **凡"本地 vs 远端"的时长比较都要带容差**。
-   0.1 小时 = 6 分钟粒度，换算回分钟最多差 ±3 分钟。
-   `SyncDailyRecordFromNotionAsync` 的 `localAhead` 若用精确比较，
-   本地 15 分钟 vs 远端 0.2h(=12分) 会**永远判本地领先 → 每轮重推**。
-   已改为 `> (remote + 3) * 60`。
-   （与 `unmapped` 那次同属一类：某条件永远命中。）
+2. **`单次时长` 用 2 位小数，不能用 1 位**（穷举验证过）：
+   | 小数位 | 粒度 | 最大误差 | 1..1440 分中无法精确还原的个数 |
+   |---|---|---|---|
+   | 1 位 | 6 分 | 3 分 | **1200**（15 分 → 0.2h → 12 分）|
+   | **2 位** | 0.6 分 | **0** | **0** ✅ |
+   守护用例：`DurationRoundTrip_ShouldBeExact_ForEveryPlausibleMinuteValue`（穷举 1440 个值）。
+   **别改回 1 位** —— 它会同时导致精度丢失和"每轮重推"。
+3. **读 Number 必须用 `GetDouble`，不能用 `GetInt32`**。
+   原 `ExtractNumber` 用 `GetInt32()`，遇到 `0.25` 会**直接抛异常**，整条记录拉不回来。
+   已改为 `ExtractDouble` 返回 `double?`。
+4. **`localAhead` 必须按分钟比较，不能用秒，也不要加容差**：
+   ```csharp
+   bool localAhead = existingMinutes > item.DurationMinutes;   // ✓
+   ```
+   - `duration_minutes = duration_seconds / 60`（整数除法，见 `AddSessionDurationToDailyAsync`），
+     秒总比分钟多出 <60 的余数。用秒比较会把 910s/15分 vs 远端 15分 误判成"本地领先"，
+     而推上去的还是同样的 15 分 → 数值不变 → **每轮重推**。
+   - 加 ±3 分钟容差是上一版的补丁，会**漏推**（本地 15 分 vs 远端 12 分时判为不领先，
+     15 分永远推不上去）。2 位小数让往返精确后，容差就该删掉 —— 按分钟比已经根本解决。
+   - 而 push 出去的就是 `duration_minutes`，"是否领先"本就该用分钟衡量。
 
 **历史行兼容**：旧行存的是分钟。判别规则：单日单游戏时长不可能 > 24 小时，
 故 `> 24` 的值按分钟处理（`RawDurationToMinutes`）。局限已文档化：
