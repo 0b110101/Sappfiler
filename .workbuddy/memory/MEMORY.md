@@ -222,30 +222,32 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 ## Notion 表结构硬要求（改代码前必看）
 **每日时长表**：程序实际只写这 5 个属性（外加页面 icon）——
 ```csharp
-["游戏名称"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）
+["游戏动态"] = title      // 格式「游戏名 · 0.7 h」（小时 1 位小数）★2026-09-18 由「游戏名称」改名
 ["日期"]     = date
-["时长"]     = number     // ★ 单位是分钟，不是小时
+["单次时长"] = number     // ★ 单位是分钟，不是小时。★2026-09-18 由「时长」改名
 ["绑定状态"] = select     // 已绑定 / 未绑定
-["游戏"]     = relation   // 仅在有 gamePageId 时写入
+["关联游戏"] = relation   // 仅在有 gamePageId 时写入。★2026-09-18 由「游戏」改名
 ```
 - **属性名必须与代码里的字面量完全一致**，不匹配 Notion 返回 400（property does not exist）。
+- ⚠️ **总表的 title 属性仍叫「游戏名称」，不要跟着改。** 两处名字不同，很容易改错。
+- **拉取（Pull）时新名优先、旧名兜底**（`ExtractNumber` / `ExtractRelationId` 都带旧名），
+  这样还没改名的表也能拉回历史记录。但**写入只用新名**。
+- **标题读取是按类型找的**（`ExtractTitle` 找第一个 title 属性），与属性名无关，
+  所以改标题名不会影响读取。
 - **`绑定状态` 的选项不用手工预建**：Notion API 会自动把选项加进 schema
   （官方文档原文：*"If the select data source property doesn't have an option by that name yet,
-  then the name is added to the data source schema"*）。
-  前提是集成对父库有写权限——连接集成那步已经给了。
-  （初版 README 曾写"必须预建选项"，是错的，已修正。）
+  then the name is added to the data source schema"*）。前提是集成对父库有写权限。
 
 **游戏总表**：程序只读，属性均可选，但：
 - `游戏名称` (Title) 实际必需（没有它匹配无从谈起）
-- `游戏标识`（多选/文本，`steam:appid`）**只属于总表**，用于跨语言匹配；
-  **程序不会把它写进每日表** —— 每日表靠 `游戏` relation 回指总表，不冗余。
-  不填也能用，兜底是从封面 URL 提取 Steam AppID（`GameMatcher.ExtractSteamAppId`）。
+- `游戏标识`（多选/文本，`steam:appid`）**可选、不是推荐项** ——
+  库里几百个游戏逐个补不现实，匹配**以游戏名（含别名）为主**。详见下文匹配设计原则。
 - `封面` / `别名` 可选。
 
 **Rollup 累积时长（用户明确要求的能力，README 第 5 节）**：
-- 前提：`游戏` relation 设为**双向**（Notion 里打开「在…中显示」开关），
+- 前提：`关联游戏` relation 设为**双向**（Notion 里打开「在…中显示」开关），
   总表才会出现反向关联属性。
-- 总表加 Rollup：Relation=反向关联、Property=`时长`、Calculate=**Sum**。
+- 总表加 Rollup：Relation=反向关联、Property=`单次时长`、Calculate=**Sum**。
 - **Rollup 是只读计算值，不能加到另一个属性上。**
   用户原有手工时长要叠加的话，得再加 **Formula**：
   `prop("原有列") + prop("GT累计")`，注意单位——Rollup 是分钟，
