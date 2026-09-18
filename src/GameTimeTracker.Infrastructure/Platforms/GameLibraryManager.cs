@@ -53,18 +53,21 @@ public sealed class GameLibraryManager
             {
                 var found = detector.GetInstalledGames();
                 games.AddRange(found);
-                Console.WriteLine($"[{detector.PlatformName}] 找到 {found.Count} 个游戏");
+                // 必须用 AppLog 而不是 Console.WriteLine：
+                // 这是 WinExe（无控制台）程序，Console 输出**直接进虚空**，
+                // 之前排查"玩 Steam 游戏检测不到"时日志里一片空白，就是因为这里全丢了。
+                AppLog.Info($"[游戏库] {detector.PlatformName}: 找到 {found.Count} 个游戏");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[{detector.PlatformName}] 检索失败: {ex.Message}");
+                AppLog.Warn($"[游戏库] {detector.PlatformName} 检索失败: {ex.Message}");
             }
         }
 
         _installedGames = games;
         _processCache.Clear();   // 刷新后清空缓存
 
-        Console.WriteLine($"[GameLibrary] 共检索到 {_installedGames.Count} 个已安装游戏");
+        AppLog.Info($"[游戏库] 共检索到 {_installedGames.Count} 个已安装游戏");
     }
 
     /// <summary>

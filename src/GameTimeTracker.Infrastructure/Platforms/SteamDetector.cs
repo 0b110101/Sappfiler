@@ -41,8 +41,21 @@ public sealed class SteamDetector : IPlatformDetector
                     if (!acf.TryGetValue("name", out var name)) continue;
                     if (!acf.TryGetValue("installdir", out var installDir)) continue;
 
-                    // StateFlags: 4 = 完全安装
-                    if (acf.TryGetValue("StateFlags", out var flags) && flags != "4") continue;
+                    // StateFlags 是**位标志**，不是枚举值 —— 不能写死 == "4"。
+                    //   1 = 已卸载       2 = 需要更新    4 = 已完整安装
+                    //   8/16/32/64/128 = 更新相关状态    256 = 文件缺失
+                    //   1024 = 较新的状态位（Steam 客户端加过）
+                    // 常见组合：4（正常）、6（4|2，装好了但待更新）、
+                    //   1030（1024|4|2，本机实测「Where Winds Meet」就是这个值）。
+                    // 旧代码 `flags != "4"` 会把 6 / 1030 这类**已装好的游戏整个丢掉**，
+                    // 表现为"玩 Steam 游戏检测不到"—— 2026-09-18 QA 实测就是这个原因。
+                    if (acf.TryGetValue("StateFlags", out var flagsText)
+                        && int.TryParse(flagsText, out var flags))
+                    {
+                        const int Uninstalled = 1;
+                        const int FullyInstalled = 4;
+                        if ((flags & FullyInstalled) == 0 || (flags & Uninstalled) != 0) continue;
+                    }
 
                     var fullInstallDir = Path.Combine(steamappsDir, "common", installDir);
                     if (!Directory.Exists(fullInstallDir)) continue;

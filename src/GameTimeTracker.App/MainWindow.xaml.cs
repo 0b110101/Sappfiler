@@ -6,6 +6,7 @@ using GameTimeTracker.App.Views;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
+using GameTimeTracker.Infrastructure;
 using GameTimeTracker.Infrastructure.Covers;
 using GameTimeTracker.Infrastructure.Database;
 using GameTimeTracker.Infrastructure.Notion;
@@ -549,6 +550,9 @@ public sealed partial class MainWindow : Window
                         var activeSessions = _sessionManager.GetActiveSessions();
                         if (!activeSessions.Any(s => s.Pid == proc.Pid))
                         {
+                            // 只在**开始计时**时记一条。这个循环 5 秒跑一次，
+                            // 心跳不能记，否则日志会被刷爆。
+                            AppLog.Info($"[计时] 开始记录「{game.Name}」({identity.Platform}/{identity.PlatformId}) pid={proc.Pid}");
                             await _sessionManager.StartSessionAsync(game, proc);
                         }
                         else
@@ -564,6 +568,7 @@ public sealed partial class MainWindow : Window
                 {
                     if (!activePids.Contains(s.Pid))
                     {
+                        AppLog.Info($"[计时] 结束记录 pid={s.Pid}");
                         await _sessionManager.EndSessionAsync(s.Pid);
                     }
                 }
