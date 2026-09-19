@@ -236,10 +236,22 @@ public class SystemTrayService : IDisposable
 
     public void ShowMainWindow()
     {
-        ShowWindow(_mainWindowHandle, SW_RESTORE);
-        _appWindow.Show();
-        SetForegroundWindow(_mainWindowHandle);
-        OnWindowShown?.Invoke();
+        // 面包屑日志：这条路径崩溃过（CoreMessagingXP 里的 0xc000027b，原生层，
+        // 托管的 UnhandledException / AppDomain 处理器都接不到）。
+        // 留两行"进入/完成"，下次真出问题就能确定死在哪个调用上 —— 不要删。
+        GameTimeTracker.Infrastructure.AppLog.Info("[托盘] 显示主窗口…");
+        try
+        {
+            ShowWindow(_mainWindowHandle, SW_RESTORE);
+            _appWindow.Show();
+            SetForegroundWindow(_mainWindowHandle);
+            OnWindowShown?.Invoke();
+            GameTimeTracker.Infrastructure.AppLog.Info("[托盘] 主窗口已显示");
+        }
+        catch (Exception ex)
+        {
+            GameTimeTracker.Infrastructure.AppLog.Error("[托盘] 显示主窗口失败", ex);
+        }
     }
 
     public void ShowNotification(string title, string message)

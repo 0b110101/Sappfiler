@@ -1,4 +1,4 @@
-<Project>
+﻿<Project>
 
   <!--
     全仓库统一的版本号定义。
@@ -18,9 +18,9 @@
   -->
   <PropertyGroup>
     <VersionPrefix>0.9.5</VersionPrefix>
-    <VersionSuffix>alpha20</VersionSuffix>
+    <VersionSuffix>alpha21</VersionSuffix>
 
-    <FileVersion>0.9.5.20</FileVersion>
+    <FileVersion>0.9.5.21</FileVersion>
     <AssemblyVersion>0.9.5.0</AssemblyVersion>
 
     <Product>GameTimeTracker</Product>

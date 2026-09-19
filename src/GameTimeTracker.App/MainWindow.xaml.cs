@@ -222,12 +222,33 @@ public sealed partial class MainWindow : Window
 
             // 关闭窗口 = 收进托盘。既然只跑后台，这里顺带把页面视觉树释放掉，
             // 让常驻内存真正降下来（热力图单是格子就有 52×7 个，还有大量图片）。
+            //
+            // ⚠️ 顺序不能改（2026-09-19 实测崩溃）：**必须先 Hide，再把释放动作
+            //    排进 Dispatcher 队列**，绝不能在 Closing 处理器里同步拆视觉树。
+            //
+            // Closing 回调发生在**窗口消息处理过程中**。此时把 ContentFrame.Content
+            // 置空，等于从 XAML 框架脚下把树抽掉，框架紧接着仍会访问那批已释放的
+            // COM 对象；而 UI 线程是 STA，ReleaseVisualTree 里的
+            // GC.WaitForPendingFinalizers() 会让**终结器线程**去 Release 这些
+            // 线程亲和对象 —— 跨线程释放直接返回 E_FAIL。
+            //
+            // 症状：崩溃在 CoreMessagingXP.dll，异常码 0xc000027b
+            // （STATUS_STOWED_EXCEPTION），WER 签名 combase.dll / 80004005。
+            // 这是**原生层**崩溃，App 的 UnhandledException 与
+            // AppDomain.UnhandledException 都接不到 —— 所以日志里一行都没有，
+            // 表现出来就是"从托盘打开直接闪退，log 是空的"。
+            //
+            // 用默认(Normal)优先级入队：它保证排在用户下次点「打开主面板」触发的
+            // 导航任务**之前**，否则导航刚重建好的页面会被这次释放拆掉。
             _appWindow.Closing += (sender, args) =>
             {
                 args.Cancel = true;
-                ReleaseVisualTree();
+                // 面包屑：崩溃是原生层的，这两行是判断"死在哪个阶段"的唯一线索。
+                AppLog.Info("[窗口] 收到关闭请求，收进托盘");
                 _appWindow.Hide();
+                DispatcherQueue.TryEnqueue(ReleaseVisualTree);
                 _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
+                AppLog.Info("[窗口] 已隐藏，视觉树释放已入队");
             };
 
             // 切回窗口时顺手检查一次 Notion 侧的删除（节流 60 秒），
@@ -320,6 +341,8 @@ public sealed partial class MainWindow : Window
         {
             // 非关键路径，失败可忽略
         }
+
+        AppLog.Info("[窗口] 视觉树已释放完毕（隐藏期间常驻内存已回落）");
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
