@@ -181,9 +181,44 @@
 **已知边界**：末尾带中文备注的（「黑旗10.1h 通关」「神海4 1.3h dlc通关」）剥不掉 ——
 备注形态无法与游戏名安全区分（剥错会把不同游戏混为一谈），只能靠 relation 兜底。
 
-## ⚠️ 托盘闪退的真正原因：**发布时开着 ReadyToRun**（2026-09-19 事故 + 两次误判）
+## ⚠️ 托盘闪退：**隐藏窗口时把页面摘出可视树**（2026-09-19 事故 + 三次误判）
 
-**症状**：关掉界面 → 从托盘打开 → **闪退，且日志里一行都没有**。
+> ### 🔴 本节后半段（ReadyToRun 那套）已作废 —— 先看这里
+>
+> 这个 bug 归因错了三次，都别再用：
+>
+> | 版本 | 当时的归因 | 实测 |
+> |---|---|---|
+> | alpha21 | `Closing` 里同步拆 XAML 树 | ❌ 无效 |
+> | alpha22 | 发布时开着 `ReadyToRun` | ❌ 无效（alpha22 本就是非 R2R，实测仍崩） |
+> | **alpha.23** | **隐藏窗口时拆掉页面（本节结论）** | 待雾山确认（本机复现不出崩溃） |
+>
+> **真正的机制**：原逻辑（自基线 `d01cae5` 就存在）在关窗口时
+> `ContentFrame.Content = null` + 丢掉各页引用 + 清图片缓存。
+> 但它**只摘了一半** ——
+>
+> - 页面被摘出可视树后，各 ViewModel **仍强引用着页面**
+>   （`x:Bind` 生成的绑定把 `PropertyChanged` 处理器挂在 ViewModel 上），
+>   所以 `_homePage = null` 并不能真正释放它，只是让它**脱离界面**；
+> - 后台同步/刷新随时驱动那些绑定去更新元素。雾山的日志里：拆完树的 60ms 后
+>   仍在打 `[同步] 已从 Notion 同步 9 条记录`；
+> - **更新一个 peer 已销毁的元素 → WinRT 投影层解析 ABI 指针踩空 → 原生崩溃**
+>   （`CoreMessagingXP.dll` / `0xc000027b` / `combase` E_FAIL / 日志全空）。
+>
+> **崩溃时机是"窗口隐藏期间"**：日志里 `[同步] 全部记录已是最新` 之后再无任何行，
+> 直到下次 `应用启动` —— 说明点托盘那一下根本没能进到 `ShowMainWindow`。
+> 「白屏」与「闪退」是同一个崩溃的两个阶段：窗口已显示，进程紧接着死掉。
+>
+> **现在的做法**：`Closing` 里**只 Hide**，不再拆页面
+> （`ReleaseVisualTree()` 连同两个无人用的 P/Invoke 已整个删除）。
+> 代价是隐藏期间当前页面留在内存 —— 刻意的取舍，稳定性优先。
+> 另外「要不要重建」的判断改为 `ContentFrame.Content is null`，
+> 不再依赖 `_currentNav`（原释放那段 `try` 会吞异常，失败时会留下旧值 → 重建被跳过 → 真白屏）。
+>
+> **崩了怎么取证**：日志里搜 `[托盘] 恢复界面开始（有内容=…`；
+> 若连这行都没有，说明死在隐藏期间。下次请把整份 `app.log` 发出来。
+
+**症状**：关掉界面 → 从托盘打开 → **闪退（白屏），且日志里一行都没有**。
 
 **证据**（Windows 事件日志，这是原生崩溃的唯一入口）：
 
@@ -193,7 +228,8 @@
 WER 签名：combase.dll / 80004005 (E_FAIL)
 ```
 
-**真正的原因**：`PublishReadyToRun=true`（csproj 里原本写成
+**~~真正的原因~~ 本节当时（错误）的结论 —— 仅作记录**：
+`PublishReadyToRun=true`（csproj 里原本写成
 `Configuration != Debug → True`，**Release 发布一直开着**）。
 
 **决定性对照实验**（同一份代码，只改这一个发布参数）：
@@ -229,30 +265,31 @@ R2R 把一部分投影代码预编译、固化调用点；而本程序会**把�
 `PROGRAMDATA` / `APPDATA` 等变量，NuGet 会以
 "Value cannot be null. (Parameter 'path1')" 失败 —— 脚本 NOTES 里已写明。）
 
-### 顺带保留的一条经验（**不是**本次崩溃的原因）
+### 顺带保留的一条经验（当时以为方向对，后来**也推翻了**）
 
-原先我把崩溃归因于"在 `Closing` 事件里同步拆 XAML 树 + 强制 GC"，
-**这个诊断是错的**（改成异步释放后，R2R 版照样崩）。但那条改动本身无害、
-且方向正确：**拆 UI 树 / 释放大量 COM 对象 / 强制 GC 不要放在 Closing、
-SizeChanged、LayoutUpdated 这类窗口事件里，一律排进 Dispatcher 队列。**
-留着当防御性实践，别再当成"已定位的根因"。
+曾经把崩溃归因于"在 `Closing` 里同步拆 XAML 树 + 强制 GC"，并建议
+"释放动作一律排进 Dispatcher 队列"。**这套说法现在作废**：
+- 异步释放没治好崩溃；
+- 而且它本身就是白屏的来源（释放与重建判断之间存在窗口期）。
+**现在的规矩只有一条：窗口隐藏时不要拆 UI 树、不要强制 GC。**
+不要把这条过时建议再翻出来用。
 
 **为什么日志全空**：这是**原生层**崩溃，`Application.UnhandledException` 与
 `AppDomain.UnhandledException` 都拦不到。遇到"闪退且无日志"先查事件日志
 （`Get-WinEvent -FilterHashtable @{LogName='Application'}`，看 Application Error Id=1000）。
 
-**根因**：`MainWindow` 的 `_appWindow.Closing` 里**同步**调用了 `ReleaseVisualTree()` ——
-先 `ContentFrame.Content = null` 拆掉整棵树，再 `GC.Collect()` ×2 +
-`WaitForPendingFinalizers()`，最后 `SetProcessWorkingSetSize` 修剪工作集。
-Closing 回调处于**窗口消息处理过程中**：此刻把树从 XAML 框架脚下抽掉，
-框架继续访问那批已释放的 COM 对象；UI 线程是 STA，
-`WaitForPendingFinalizers` 让**终结器线程**去 Release 线程亲和对象 → 跨线程释放返回 E_FAIL。
+**~~根因~~ 第二次误判的记录**：曾归因于 `Closing` 里**同步**调用 `ReleaseVisualTree()`
+（拆树 + `GC.Collect()`×2 + `WaitForPendingFinalizers()` + `SetProcessWorkingSetSize`），
+并改成 `DispatcherQueue.TryEnqueue(ReleaseVisualTree)`。**两次都不对**：
+- 同步拆树之说 → 改成异步后照样崩；
+- 异步释放还**额外引入**了白屏（释放与"要不要重建"的判断之间存在窗口期）。
 
-**修法**：先 `Hide()`，再把释放动作 `DispatcherQueue.TryEnqueue(ReleaseVisualTree)`。
-用默认 Normal 优先级 —— 保证它仍排在用户下次「打开」触发的页面重建**之前**
-（两者同在 UI 线程队列上，天然串行）。
-**推广**：任何"拆 UI 树 / 释放大量 COM 对象 / 强制 GC"都不要放在
-Closing、SizeChanged、LayoutUpdated 这类窗口事件里，一律排进 Dispatcher 队列。
+**现在（alpha.23 起）**：`Closing` 里只 `Hide()`，**不释放任何东西**。
+`ReleaseVisualTree()` 及其两个 P/Invoke 已删除。
+**不要再把"隐藏时释放界面"当成优化加回来** —— 它只摘掉可视树、
+摘不掉 ViewModel 对页面的强引用，反而让后台刷新打在已断开的元素上。
+**推广**：想省内存也别在窗口隐藏时拆 UI 树；要省就省能真正释放的东西
+（例如图片/位图缓存），且必须在**没有并发 UI 更新**的前提下做。
 
 **已加面包屑日志**（[窗口] / [托盘] 各两三条）。原生崩溃没有堆栈可看时，
 "最后停在哪一行"就是唯一的定位依据 —— 别再删掉它们。
@@ -508,36 +545,45 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 - 观察：`dist/` 里堆了 15 个历史 zip、共约 **2.4GB**（含 v1.0.x~v1.2.1 的旧产物）。
   是否清理交给用户决定，我没动。
 
-## 版本号与版本控制（2026-09-18 确立）
+## 版本号与版本控制（SemVer 规则，2026-09-19 由 alphaNN 改为规范格式）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
-  `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`。
-- **当前版本 `0.9.5-alpha19`**，版本号只在仓库根 `Directory.Build.props` 定义一处，四个工程自动继承：
-  `VersionPrefix=0.9.5` / `VersionSuffix=alpha19` / `FileVersion=0.9.5.19` / `AssemblyVersion=0.9.5.0`。
-  （`Package.appxmanifest` 的 `Identity/@Version` 也要同步改，publish.ps1 会校验一致性。）
-  **不要在单个 `.csproj` 里再写 `<Version>`。**
-- 之前的 `v1.2.1` 只是打包 zip 的文件名，代码里从未体现过；用户明确项目**尚未正式发布**，故重命名。
-- **`alphaNN` 是给 QA 的迭代序号，每交一版调试包就 +1。**
+  `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`、`_probe/`。
+- **当前版本 `0.9.5-alpha.23`**。
+  `VersionPrefix=0.9.5` / `VersionSuffix=alpha.23` / `FileVersion=0.9.5.23` / `AssemblyVersion=0.9.5.0`。
+- **格式**：`MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]`
+  - `MAJOR` 不兼容改动（`0.9.5`→`1.0.0`）；`MINOR` 向下兼容地加功能（→`0.10.0`）；
+    `PATCH` 向下兼容地修缺陷（→`0.9.6`）。**递增某段时右侧各段归零。**
+  - 预发布 `-alpha.N`：`N` 是**构建序号**，同一目标版本每出一个包就 +1；换 `X/Y/Z` 则归 1。
+  - 比较按**数字**不按字符串（`alpha.2 < alpha.10`）；预发布**低于**同号正式版。
+  - **`0.Y.Z` = 初始开发阶段**，接口/数据格式仍可能变；正式发布时改 `1.0.0` 并去掉预发布段。
+  - `AssemblyInformationalVersion` 会自动带构建信息段（`0.9.5-alpha.23+<commit>`）。
+- **升版必须同时改三处**（漏一处就会出现"程序里显示新号、exe 属性是旧的"矛盾）：
+  1. `Directory.Build.props` → `VersionSuffix`（如 `alpha.23`）+ `FileVersion`（末段对齐，如 `0.9.5.23`）
+  2. `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version`（须与 `FileVersion` 完全一致）
+  3. 设置页注释里的示例字符串
+  **不要在单个 `.csproj` 里再写 `<Version>`**；版本号只在仓库根 `Directory.Build.props` 定义一处。
+- ⚠️ **改这两个文件注意行尾**：`Package.appxmanifest` 是 **CRLF**，用 Python
+  `io.open(...,newline='')` 重写会变成 LF，导致整个文件都算改动。优先用 Edit 工具。
+- **`alpha.N` 是给 QA 的迭代序号，每交一版调试包就 +1。**
   **用户要同时把包交给 QA 一起 debug**（2026-09-18 用户明确指出过一次我没升版本的疏漏）——
   不升版本 QA 就无法分辨手握的是改前还是改后，也说不清问题出在哪一版。
-  **升版必须同时改这三处**（漏一处就会出现"程序里显示 alphaNN、exe 属性是旧的"矛盾）：
-  1. `Directory.Build.props` → `VersionSuffix` + `FileVersion`（第三段与 alpha 序号对齐）
-  2. `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version`
-  3. 设置页注释里的示例字符串
-- 设置页底部显示 `GameTimeTracker v0.9.5-alpha18`，取自 `AssemblyInformationalVersion`
-  （该属性自带 `+<git短hash>` 后缀，显示时按 `+` 截断；**这个 hash 对 QA 定位问题很有用**）。
+- 设置页底部显示取自 `AssemblyInformationalVersion`，**按 `+` 截断**（那个 hash 对 QA 定位问题很有用）。
 - **打包用 `E:\vi2\publish.ps1`，不要手工改版本号再手工打包**：
   它从 `Directory.Build.props` 读版本（唯一来源）→ **校验 FileVersion 与 appxmanifest 一致**
   （不一致直接中止，机制上防漏改）→ 跑测试 → `dotnet publish` →
   写 `VERSION.txt`（版本+commit+配置+打包时间+工作树是否脏）→ 压 zip。
   工作树有未提交改动时黄字警告（包里含未入库代码 QA 无法定位问题）。
-- 发布包命名：`GameTimeTracker-v0.9.5-alphaNN-win-x64.zip`。
+  **必须在正常的 Windows 终端里跑**（WorkBuddy 的 shell 缺 `PROGRAMDATA`/`APPDATA`，NuGet 会失败）。
+- 发布包命名：`GameTimeTracker-v<版本>-win-x64.zip`（如 `...-v0.9.5-alpha.23-win-x64.zip`）。
   **配套维护 `CHANGELOG-QA.md`**（面向 QA：改了什么 / 重点验什么 / 已知问题）。
   HANDOVER.md 给接手开发者，CHANGELOG-QA.md 给测试人员，**两者受众不同都要维护**。
-- **版本沿革**：`alpha17`（版本体系落地 + git 基线，已验证 0 警告 0 错误 / 69 测试全过）
-  → `alpha18`（3 项 Notion 同步需求 + 同步链顺序修正）
-  → `alpha19`（**待验证**，8 项：Steam StateFlags 位标志 / GOG+Ubisoft 注册表视图 /
-  未绑定记录重推 / 检测日志补齐 / 日志噪音精简 / 别名年份后缀匹配 /
-  属性改名 游戏动态·单次时长·关联游戏 / 移除模糊匹配 / 单次时长单位改小时）。
+- **版本沿革**：
+  `alpha17`（版本体系落地 + git 基线）→ `alpha18`（3 项 Notion 同步需求）
+  → `alpha19`（Steam StateFlags / GOG+Ubisoft 注册表视图 / 未绑定重推 / 检测日志 /
+  别名年份后缀 / **属性改名：游戏动态·单次时长·关联游戏** / 移除模糊匹配 / 时长单位改小时）
+  → `alpha20`（热力图撑爆布局 / 手工标题后缀 / 回刷清零时长 / 删除对账误删）
+  → `alpha21`（托盘闪退第一次尝试 ❌无效）→ `alpha22`（R2R 归因 ❌无效）
+  → **`alpha.23`**（隐藏时不再拆页面 + 版本规则改 SemVer；⚠️ 崩溃修复待用户实测确认）。
 
 ## 每日记录的「游戏名称」与 page icon（2026-09-18 用户明确要求）
 - **标题格式 `{游戏名} · {X} h`，其中「游戏名」的来源分两种**：
