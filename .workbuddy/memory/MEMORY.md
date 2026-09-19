@@ -820,6 +820,28 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 **初始窗口尺寸改动的连带影响**：`MainWindow` 里 `Resize` 与 `Move` 用的是同一个
 `winW/winH`，改一处要一起改，否则窗口会偏出屏幕。
 
+## ⚠️ 任何"只显示到某天"的疑症，先算日期差（2026-09-19 事故）
+QA 报"每日时长表 287 条，但只显示到 6/11" —— 看似数据没拉下来，
+实际是**首页取数窗口比热力图小**：窗口写死 100 天，热力图 52 周（364 天）。
+**今天 − 断点日期 = 100**，与代码里的常量正好相等，一算就锁定了。
+
+**排查手法**：用户报"某天之前没了 / 只显示 N 条"时，
+先算"今天 − 该日期"等于几、代码里有没有这个常量。命中率很高，别急着去看拉取逻辑。
+
+**这类"口径对不上"要根除，不能只改数字**：
+- 单一来源：`DailyAggregator.HeatmapWeekCount` / `HeatmapDays` / `DataWindowStart()`。
+  生成热力图与首页取数共用它 —— `HomeViewModel` 里**不要再写死天数**。
+- 守护测试：`DataWindowStart_ShouldCover_EntireHeatmapWindow`
+  （双向断言：窗口覆盖得到热力图最早一天，且余量不超过 14 天）。
+- 同类隐患：`HistoryPage` 的 `GetRecentDailyRecordsAsync(100)` 也是**显示条数上限**，
+  已提到 1000；真正要无上限得做分页/虚拟化。
+
+**判断"是没拉下来还是没显示"的快捷依据**：
+拉取路径（`QueryDailyRecordsAsync` → `SyncDailyRecordFromNotionAsync`）**没有日期过滤**，
+所以"数据在本地却看不到"多半是读取/显示窗口的问题。
+唯一会在拉取阶段丢记录的是"总表里已不存在的游戏"那条防复活规则
+（日志会写「跳过 N 条总表已不存在的游戏」）—— 先看日志里有没有这行。
+
 ## 排查 XAML 工程编译错误的一条捷径
 WinUI 工程里如果看到一堆 `XamlCompiler error WMC0001: Unknown type '…'`
 （指向 App.xaml 里的 Converter 之类），**真正的原因几乎总是在前面的 C# 编译错误** ——
