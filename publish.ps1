@@ -120,6 +120,7 @@ dotnet publish (Join-Path $repoRoot 'src/GameTimeTracker.App') `
     -p:PublishTrimmed=false `
     -p:SelfContained=true `
     -p:WindowsAppSDKSelfContained=true `
+    -p:PublishReadyToRun=false `
     --nologo `
     -o $outDir
 
@@ -213,6 +214,41 @@ if ($missing.Count -gt 0) {
 
 $fileCount = (Get-ChildItem $outDir -File -Recurse | Measure-Object).Count
 Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐全）" -ForegroundColor Green
+
+# ---- 4c. ReadyToRun 校验：这种包会"关窗口再打开就崩" ----
+# 2026-09-19 实测：同一份代码，R2R 开启时「关掉界面 → 从托盘打开」1~3 轮内必崩
+# （CoreMessagingXP.dll / 0xc000027b / combase E_FAIL，日志里什么都没有），
+# 关掉后连续 4~6 轮全正常。机理与 PublishTrimmed 那次同源 —— WinRT 投影层
+# 解析 ABI vftbl 指针时踩空，而本程序会整个释放界面树再按需重建。
+#
+# 判据：预编译后程序集体积约为不开启时的 2 倍。
+#   App.dll：R2R ~736KB ／ 非 R2R ~400KB   → 阈值取 600KB
+#   Core.dll：R2R ~168KB ／ 非 R2R ~71KB
+# 用体积而不是翻 PE 头，是因为它足够稳、且失败时能直接看出原因。
+$r2rChecks = @(
+    @{ Name = 'GameTimeTracker.App.dll';  MaxKB = 600 },
+    @{ Name = 'GameTimeTracker.Core.dll'; MaxKB = 120 }
+)
+$r2rHit = @()
+foreach ($c in $r2rChecks) {
+    $p = Join-Path $outDir $c.Name
+    if (Test-Path $p) {
+        $kb = [math]::Round((Get-Item $p).Length / 1KB)
+        if ($kb -gt $c.MaxKB) { $r2rHit += "$($c.Name) = ${kb}KB（上限 $($c.MaxKB)KB）" }
+    }
+}
+
+if ($r2rHit.Count -gt 0) {
+    Write-Host ""
+    Write-Host "产物校验失败：像是开着 ReadyToRun 发布的" -ForegroundColor Red
+    foreach ($h in $r2rHit) { Write-Host "  - $h" -ForegroundColor Red }
+    Fail @"
+ReadyToRun 会让「关掉界面再从托盘打开」稳定崩溃（原生层，日志空白），
+不要交给 QA。请确认：
+  · GameTimeTracker.App.csproj 里 PublishReadyToRun 是恒定 False
+  · publish.ps1 的 dotnet publish 带了 -p:PublishReadyToRun=false
+"@
+}
 
 # ---- 5. 写 VERSION.txt ----
 $versionFile = Join-Path $outDir 'VERSION.txt'

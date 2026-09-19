@@ -36,6 +36,13 @@ public sealed partial class MainWindow : Window
 
     private readonly HomeViewModel _homeViewModel;
     private SystemTrayService? _trayService;
+
+    /// <summary>
+    /// 「已最小化到系统托盘」这条提示**每次运行只弹一次**。
+    /// 每关一次窗口就弹一遍会很烦（2026-09-19 雾山反馈），
+    /// 但一次都不弹也不好 —— 新用户不知道程序还在后台跑。
+    /// </summary>
+    private bool _minimizeNoticeShown;
     private SubclassProc? _subclassProc;
     private CancellationTokenSource? _monitorCts;
 
@@ -247,7 +254,14 @@ public sealed partial class MainWindow : Window
                 AppLog.Info("[窗口] 收到关闭请求，收进托盘");
                 _appWindow.Hide();
                 DispatcherQueue.TryEnqueue(ReleaseVisualTree);
-                _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
+
+                // 提示只弹一次：关窗口是用户主动行为，不需要每次都被告知一遍。
+                if (!_minimizeNoticeShown)
+                {
+                    _minimizeNoticeShown = true;
+                    _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
+                }
+
                 AppLog.Info("[窗口] 已隐藏，视觉树释放已入队");
             };
 
@@ -369,10 +383,13 @@ public sealed partial class MainWindow : Window
         {
             DispatcherQueue.TryEnqueue(() =>
             {
+                // 面包屑：这条路径曾静默崩溃（原生层），逐步记录才能定位。
+                AppLog.Info($"[托盘] 恢复界面开始（_currentNav=\"{_currentNav}\" _navToRestore=\"{_navToRestore}\"）");
                 if (string.IsNullOrEmpty(_currentNav))
                 {
                     NavigateTo(string.IsNullOrEmpty(_navToRestore) ? "Home" : _navToRestore);
                 }
+                AppLog.Info("[托盘] 恢复界面结束");
             });
         };
 
@@ -700,16 +717,25 @@ public sealed partial class MainWindow : Window
 
     private void NavigateTo(string tag)
     {
+        // 逐步面包屑：这条路径在"从托盘恢复"时静默崩溃过（原生层，无堆栈可看），
+        // 只能靠"日志停在哪一行"定位死在哪个调用上。2026-09-19 加，定位完也不要删。
+        AppLog.Info($"[导航] 开始 → {tag}");
+
         // 1. Instant visual response on UI (0ms)
         SetActiveNav(tag);
+        AppLog.Info($"[导航] 高亮已更新 → {tag}");
 
         // 2. Instant page display from cache
         switch (tag)
         {
             case "Home":
+                AppLog.Info("[导航] 构建 HomePage…");
                 _homePage ??= new HomePage { ViewModel = _homeViewModel };
+                AppLog.Info("[导航] HomePage 就绪 → 设置 ContentFrame.Content");
                 ContentFrame.Content = _homePage;
+                AppLog.Info("[导航] ContentFrame 已设置 → 触发数据刷新");
                 _ = _homeViewModel.RefreshAllDataAsync();
+                AppLog.Info("[导航] 完成 → Home");
                 break;
             case "History":
                 if (_historyPage == null)

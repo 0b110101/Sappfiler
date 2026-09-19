@@ -256,11 +256,21 @@ public class SystemTrayService : IDisposable
 
     public void ShowNotification(string title, string message)
     {
+        // ⚠️ NIF_INFO 用完必须清掉。
+        // _nid 是**复用**的结构体，`uFlags |= NIF_INFO` 一旦设上就再也不会被清除，
+        // 于是之后每一次 Shell_NotifyIcon(NIM_MODIFY) —— 包括刷新托盘图标、更新
+        // 悬浮提示文字 —— 都会顺带弹一次气泡。用户看到的就是"怎么老弹提示"。
+        // （2026-09-19 雾山反馈"关闭界面时的提示有点烦"时查到的。）
         _nid.uFlags |= NIF_INFO;
         _nid.szInfoTitle = title;
         _nid.szInfo = message;
         _nid.dwInfoFlags = 1; // Info icon
+
         Shell_NotifyIcon(NIM_MODIFY, ref _nid);
+
+        _nid.uFlags &= ~NIF_INFO;
+        _nid.szInfoTitle = string.Empty;
+        _nid.szInfo = string.Empty;
     }
 
     private async void ShowContextMenu()

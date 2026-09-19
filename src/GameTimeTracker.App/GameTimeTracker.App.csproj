@@ -132,8 +132,29 @@
     只要有人用 Release 发布就会产出必崩的包。已改为恒定 false。
   -->
   <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
+    <!--
+      ⚠️ ReadyToRun 必须**恒定关闭**（2026-09-19 实测确认，别再改回条件式）。
+
+      开着 R2R 发布时，「关掉界面 → 从托盘打开」会稳定崩溃：
+        出错模块 CoreMessagingXP.dll
+        异常码   0xc000027b (STATUS_STOWED_EXCEPTION)
+        WER 签名 combase.dll / 80004005 (E_FAIL)
+      而且日志里一行都没有 —— 这是原生层崩溃，
+      Application.UnhandledException 和 AppDomain.UnhandledException 都拦不到。
+
+      同一份代码只改这一个开关的对照实验（其余参数完全相同）：
+        R2R 开启 → 1~3 轮之内必崩
+        R2R 关闭 → 连续 4~6 轮全部正常
+
+      机理与上面 PublishTrimmed 那次同源：WinRT 投影层要在**首次访问类型**时
+      去解析 ABI vftbl 指针（WinRT.TypeExtensions.GetAbiToProjectionVftblPtr）。
+      R2R 把一部分投影代码预编译、固化了调用点，而本程序会把界面树整个释放、
+      之后按需重建（收进托盘省内存的那套逻辑）—— 重建时类型初始化顺序一变，
+      就会踩到已失效的指针。
+
+      代价：冷启动多一次 JIT，略慢一点点，换稳定，值得。
+    -->
+    <PublishReadyToRun>False</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
 
     <!--
