@@ -442,6 +442,119 @@ public class ZombieSessionTests
     }
 }
 
+/// <summary>
+/// 复现并锁住 2026-09-19 雾山反馈的那个数据错乱：
+/// 每日时长表里的记录 relation 都绑好了，但拉取到程序里那款游戏却是「未绑定」、
+/// 而且**没有记录**（记录躺在另一个未绑定的行上）。
+///
+/// 成因是两个 bug 叠加：
+///   ① 属性改名期间程序还是旧版本，读不到「关联游戏」→ 每条记录都新建一个**未绑定**行；
+///   ② 升级后能读到 relation、也解析出了正确的游戏行，但 UPDATE daily_summary
+///      只改时长和 page_id、**没动 game_id** → 记录一直留在旧行上。
+/// </summary>
+public class DailyRecordOwnershipTests
+{
+    [Fact]
+    public async Task SyncDailyRecord_ShouldMigrateRecord_OffUnboundGhostRow()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test_ghost_{Guid.NewGuid():N}.db");
+        try
+        {
+            var repo = new SqliteRepository(dbPath);
+            const string dailyPage = "11111111-1111-1111-1111-111111111111";
+            const string masterPage = "22222222-2222-2222-2222-222222222222";
+
+            // ① 模拟「旧包读不到 relation」的那一轮。
+            //    GameMasterPageId 为 null ⇒ 走兜底分支，凭空建一个未绑定的行，
+            //    名字用的是记录标题原文（旧版 StripSuffix 认不出「10.1h 通关」这种形态）。
+            await repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+            {
+                PageId = dailyPage,
+                GameTitle = "黑旗10.1h 通关",
+                RawTitle = "黑旗10.1h 通关",
+                Date = "2026-07-12",
+                DurationMinutes = 606,
+                GameMasterPageId = null
+            });
+
+            var ghost = (await repo.GetAllGamesAsync()).Single();
+            ghost.NotionPageId.Should().BeNullOrEmpty("这一轮读不到 relation，所以建出来的是未绑定行");
+
+            // ② 模拟「升级后能读到 relation」的那一轮：同一条记录，这次带着总表页 id。
+            //    标题是官方名，和幽灵行的名字对不上 ⇒ 认领失败 ⇒ 新建正确行。
+            await repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+            {
+                PageId = dailyPage,
+                GameTitle = "刺客信条 黑旗",
+                RawTitle = "刺客信条 黑旗 · 10.1 h",
+                Date = "2026-07-12",
+                DurationMinutes = 606,
+                GameMasterPageId = masterPage
+            });
+
+            var games = await repo.GetAllGamesAsync();
+
+            games.Should().HaveCount(1,
+                "被搬空的幽灵行必须清掉，否则「待处理」的数字永远降不下来");
+            games[0].NotionPageId.Should().NotBeNullOrEmpty("留下来的应是绑定了关系的那一行");
+
+            // ★ 这一条是原来漏掉的：记录必须跟着迁到正确解析出的游戏上
+            var recent = await repo.GetRecentDailyRecordsAsync(10);
+            recent.Should().HaveCount(1);
+            recent[0].GameId.Should().Be(games[0].Id,
+                "记录原本挂在未绑定的幽灵行上，必须迁移到绑定了关系的游戏上");
+            recent[0].DurationMinutes.Should().Be(606, "迁移不能丢时长");
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { if (File.Exists(dbPath)) File.Delete(dbPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task SyncDailyRecord_ShouldKeepAlreadyBoundGame_EvenIfNameMatchesGhost()
+    {
+        // 反向保护：本地那行**已经绑定了**就不许动。
+        // 用户可能手动把某款游戏指到了某个总表条目上，不能被名字匹配抢走，
+        // 否则表现是"我明明绑好了，同步一轮又变回另一个游戏"。
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test_bound_{Guid.NewGuid():N}.db");
+        try
+        {
+            var repo = new SqliteRepository(dbPath);
+            const string dailyPage = "33333333-3333-3333-3333-333333333333";
+            const string masterPage = "44444444-4444-4444-4444-444444444444";
+
+            var bound = await repo.GetOrCreateGameAsync(
+                new GameIdentity("steam", "12345", "黑旗", "ac4.exe", @"C:\Games\ac4.exe"));
+            await repo.UpdateGameNotionIdAsync(bound.Id, masterPage);
+
+            await repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+            {
+                PageId = dailyPage,
+                GameTitle = "黑旗",
+                RawTitle = "黑旗 · 2 h",
+                Date = "2026-07-12",
+                DurationMinutes = 120,
+                GameMasterPageId = masterPage
+            });
+
+            var games = await repo.GetAllGamesAsync();
+            games.Should().HaveCount(1);
+            games[0].Id.Should().Be(bound.Id, "已绑定的行不能被顶掉、也不能被清理");
+            games[0].NotionPageId.Should().Be(masterPage);
+
+            var recent = await repo.GetRecentDailyRecordsAsync(10);
+            recent[0].GameId.Should().Be(bound.Id);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { if (File.Exists(dbPath)) File.Delete(dbPath); } catch { }
+        }
+    }
+}
+
 public class GameRecordNotificationTests
 {
     [Fact]
