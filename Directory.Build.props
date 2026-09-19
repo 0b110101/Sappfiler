@@ -5,39 +5,43 @@
     MSBuild 会自动向上查找本文件并应用到 src/ 与 tests/ 下的所有工程，
     所以改动版本号只需改这一处。
 
-    ── 版本规则（SemVer 2.0.0，2026-09-19 由 v0.9.5-alphaNN 改为本规范）────────────
+    ── 版本规则（SemVer 2.0.0）──────────────────────────────────────────────
     格式：  MAJOR.MINOR.PATCH[-预发布标识[.序号]][+构建信息]
 
-    数字段（发布时递增，递增某段时右侧各段归零）：
+    数字段（递增某段时右侧各段归零）：
       MAJOR  不兼容的改动（对外行为/接口破坏性变更）。0 → 1 表示脱离初始开发阶段。
       MINOR  向下兼容地新增功能。
       PATCH  向下兼容地修缺陷。
 
-    预发布段：不稳定版本，优先级**低于**同号正式版（1.0.0-alpha < 1.0.0）。
+    初始开发阶段（0.Y.Z，当前阶段）的约定 —— **每个交付包都递增 PATCH**：
+      0.2.20、0.2.21、0.2.22 ……
+      这样每个交给 QA 的包版本号都不同，能直接对上"问题出在哪一版"。
+      （严格 SemVer 里 PATCH 是按"发布"递增的，0.Y.Z 阶段这么用是刻意的简化；
+        等脱离 0.x、开始正式发布后，就按标准语义来。）
+
+    预发布段（可选）：不稳定版本，优先级**低于**同号正式版（0.2.20-alpha < 0.2.20）。
+      要发预发布版时填 VersionSuffix（如 alpha.1 / beta.2），平时留空。
       .NET 侧拆成两半，因为 FileVersion 只接受纯数字四段：
-        VersionSuffix = alpha.N   ->  可读版本 "0.9.6-alpha.3"
-        FileVersion   = X.Y.Z.N   ->  exe 文件属性里的数字版本
-      N 是**构建序号**，同一目标版本每出一个包就 +1；换了 X/Y/Z 则 N 归 1。
+        VersionSuffix = alpha.N   ->  可读版本 "0.2.20-alpha.1"
+        FileVersion             ->  exe 文件属性里的数字版本（只能数字）
       比较优先级：alpha.2 < alpha.10（按数字比，不是字符串），alpha < alpha.1。
 
-    当前处于初始开发阶段（0.Y.Z）：接口与数据格式仍可能变动，
-    0.Y.Z 内的 MINOR/PATCH 递增不承诺稳定性；正式发布时改为 1.0.0。
-
-    ⚠️ 给 QA 出新包时**必须同时改这三行**（预发布序号 + FileVersion 末段 + Package.appxmanifest
-    里的 Version），只改 VersionSuffix 会让 exe 的文件属性仍显示旧版本，
-    QA 无法从属性对话框分辨包的新旧。
+    ⚠️ 给 QA 出新包时**必须同时改这几处**（版本号 + FileVersion + Package.appxmanifest
+    里的 Version），只改一处会让 exe 的文件属性仍显示旧版本，QA 无法从属性对话框分辨包的新旧。
 
     MSBuild 属性对应关系：
-      VersionPrefix + VersionSuffix -> AssemblyInformationalVersion（程序读到的可读版本，如 0.9.5-alpha.23）
-      FileVersion                   -> exe 文件属性「文件版本」（Windows 要求每段 0-65535，故不含字母）
+      VersionPrefix + VersionSuffix -> AssemblyInformationalVersion（程序读到的可读版本，如 0.2.20）
+      FileVersion                   -> exe 文件属性「文件版本」（Windows 要求每段 0-65535）
       AssemblyVersion               -> 程序集绑定版本，只在 MAJOR 变动时改
   -->
   <PropertyGroup>
-    <VersionPrefix>0.9.5</VersionPrefix>
-    <VersionSuffix>alpha.23</VersionSuffix>
+    <VersionPrefix>0.2.20</VersionPrefix>
+    <!-- 预发布标识：平时留空。要发预发布版时填 alpha.1 / beta.1 之类 -->
+    <VersionSuffix></VersionSuffix>
 
-    <FileVersion>0.9.5.23</FileVersion>
-    <AssemblyVersion>0.9.5.0</AssemblyVersion>
+    <!-- FileVersion 只能是四段纯数字：MAJOR.MINOR.PATCH.0 -->
+    <FileVersion>0.2.20.0</FileVersion>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
 
     <Product>GameTimeTracker</Product>
     <Company>GameTimeTracker</Company>

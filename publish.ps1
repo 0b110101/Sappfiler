@@ -213,13 +213,46 @@ if ($missing.Count -gt 0) {
 }
 
 $fileCount = (Get-ChildItem $outDir -File -Recurse | Measure-Object).Count
+
+# ---- 4b-2. 资源 PRI 校验：拦下"应用 PRI 没合并框架资源"的包 ----
+# 2026-09-19 事故：把 WindowsAppSDK 元包拆成 6 个子包后，应用 PRI 不再合并框架的 PRI。
+# 包能生成、110 个测试全过，但**一启动就崩**：
+#   XamlParseException: Cannot locate resource from
+#   'ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml'
+# 更阴险的是它被增量构建掩盖了 —— 旧的合并版 PRI 一直留在 bin/ 里被沿用，
+# 直到某次全新编译才暴露，于是"上一版还好好的，这一版突然起不来"。
+#
+# 判据：合并后 GameTimeTracker.App.pri ≈ 2.2MB；未合并只有 ~43KB。
+# 阈值取 1MB，两侧都留足余量。
+$priPath = Join-Path $outDir 'GameTimeTracker.App.pri'
+if (Test-Path $priPath) {
+    $priKB = [math]::Round((Get-Item $priPath).Length / 1KB)
+    if ($priKB -lt 1024) {
+        Write-Host ""
+        Write-Host "产物校验失败：GameTimeTracker.App.pri 只有 ${priKB}KB，框架资源没被合并进去" -ForegroundColor Red
+        Fail @"
+正常应在 2MB 量级（里面合并了 WinUI 的 Themes/themeresources.xaml）。
+只有几十 KB 时程序会**一启动就崩**，报：
+  XamlParseException: Cannot locate resource from
+  'ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml'
+
+常见原因：GameTimeTracker.App.csproj 里没有引用 Microsoft.WindowsAppSDK
+元包（改成子包引用会让 PRI 不合并）。
+请把该依赖改回元包后重新打包。
+"@
+    }
+    Write-Host "  资源 PRI 已合并（${priKB}KB）" -ForegroundColor DarkGray
+}
+
 Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐全）" -ForegroundColor Green
 
-# ---- 4c. ReadyToRun 校验：这种包会"关窗口再打开就崩" ----
-# 2026-09-19 实测：同一份代码，R2R 开启时「关掉界面 → 从托盘打开」1~3 轮内必崩
-# （CoreMessagingXP.dll / 0xc000027b / combase E_FAIL，日志里什么都没有），
-# 关掉后连续 4~6 轮全正常。机理与 PublishTrimmed 那次同源 —— WinRT 投影层
-# 解析 ABI vftbl 指针时踩空，而本程序会整个释放界面树再按需重建。
+# ---- 4c. ReadyToRun 校验（防御性，非已证实的根因）----
+# 2026-09-19 曾有 1 轮把「关窗口再打开就崩」归因于 R2R，**那个结论后来被推翻了**
+# （用户实测非 R2R 的 alpha22 照样崩；真正来源是隐藏窗口时拆掉了页面，见
+#  App.csproj / MainWindow 里的说明）。这里保留校验，只为两点：
+#   1. R2R 会显著增大体积，本程序启动路径没有需要它的热点；
+#   2. 当初观察到 R2R 版确实更容易崩，在没查清前不放开。
+# 如果你确认要开 R2R，把下面 $r2rChecks 清空即可 —— 它不是硬性正确性要求。
 #
 # 判据：预编译后程序集体积约为不开启时的 2 倍。
 #   App.dll：R2R ~736KB ／ 非 R2R ~400KB   → 阈值取 600KB

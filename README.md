@@ -465,38 +465,38 @@ dotnet run --project src/GameTimeTracker.App
 
 ```
 MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]
-  0  .  9  .  5  -   alpha . 23
+  0  .  2  .  20
 ```
 
 **数字段**（递增某一段时，右侧各段归零）：
 
 | 段 | 何时递增 | 例 |
 |---|---|---|
-| `MAJOR` | 不兼容的改动（对外行为 / 接口破坏性变更） | `0.9.5` → `1.0.0` |
-| `MINOR` | 向下兼容地**新增功能** | `0.9.5` → `0.10.0` |
-| `PATCH` | 向下兼容地**修缺陷** | `0.9.5` → `0.9.6` |
+| `MAJOR` | 不兼容的改动（对外行为 / 接口破坏性变更） | `0.2.20` → `1.0.0` |
+| `MINOR` | 向下兼容地**新增功能** | `0.2.20` → `0.3.0` |
+| `PATCH` | 向下兼容地**修缺陷** | `0.2.20` → `0.2.21` |
 
-**预发布段**（`-alpha.N`）：标识尚未正式发布的版本，优先级**低于**同号正式版。
+**当前处于初始开发阶段（`0.Y.Z`），约定是：每个交付包都递增 `PATCH`** ——
+`0.2.20` → `0.2.21` → `0.2.22` …… 这样每个交给 QA 的包版本号都不同，
+出问题时能直接说清是"哪一版"。正式发布时改为 `1.0.0`。
 
-- 序号 `N` 是**构建序号**：同一目标版本每出一个包就 +1；换了 `X/Y/Z` 则从 `1` 重新计。
-- 比较时按**数字**而非字符串：`alpha.2 < alpha.10`；同级里 `alpha < alpha.1`。
-- 完整优先级：`0.9.6-alpha.2 < 0.9.6-alpha.10 < 0.9.6-beta.1 < 0.9.6`
-
-**当前处于初始开发阶段（`0.Y.Z`）**：接口与数据格式仍可能变动，
-`0.Y.Z` 内的 MINOR / PATCH 递增不承诺稳定性；正式发布时改为 `1.0.0` 并去掉预发布段。
+**预发布段**（`-alpha.1` / `-beta.2`，可选）：平时**留空**，用于标识"比正式版更早"的版本，
+优先级**低于**同号正式版（`0.2.20-alpha.1` < `0.2.20`）。
+需要时填 `Directory.Build.props` 的 `VersionSuffix`。
+比较时按**数字**而非字符串：`alpha.2 < alpha.10`。
 
 #### 改版本号改哪里
 
-**唯一来源是仓库根 `Directory.Build.props`**，四个工程自动继承。出新包时**必须同时改三处**，
+**唯一来源是仓库根 `Directory.Build.props`**，四个工程自动继承。出新包时**必须同时改这几处**，
 只改一处会让 exe 的文件属性仍显示旧版本、无法分辨包的新旧：
 
 | 位置 | 作用 |
 |---|---|
-| `Directory.Build.props` → `VersionSuffix` | 可读版本（程序界面里显示的，如 `0.9.5-alpha.23`） |
-| `Directory.Build.props` → `FileVersion` | exe 文件属性「文件版本」。Windows 要求每段是 0–65535，所以写成 `0.9.5.23`（不带字母） |
-| `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version` | 必须是 `FileVersion` 的前三段一致 |
+| `Directory.Build.props` → `VersionPrefix` | 可读版本，程序界面里显示的就是它（如 `0.2.20`） |
+| `Directory.Build.props` → `FileVersion` | exe 文件属性「文件版本」。只能是四段纯数字，所以写成 `0.2.20.0` |
+| `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version` | 必须与 `FileVersion` 完全一致 |
 
-`publish.cmd` 会自动读这三处并**校验一致性**，不一致会直接中止打包。
+`publish.cmd` 会自动读这几处并**校验一致性**，不一致会直接中止打包。
 
 ## License
 
