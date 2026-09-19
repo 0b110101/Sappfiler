@@ -181,7 +181,7 @@
 **已知边界**：末尾带中文备注的（「黑旗10.1h 通关」「神海4 1.3h dlc通关」）剥不掉 ——
 备注形态无法与游戏名安全区分（剥错会把不同游戏混为一谈），只能靠 relation 兜底。
 
-## ⚠️ 绝不能在窗口事件里同步拆 XAML 树（2026-09-19 托盘闪退事故）
+## ⚠️ 托盘闪退的真正原因：**发布时开着 ReadyToRun**（2026-09-19 事故 + 两次误判）
 
 **症状**：关掉界面 → 从托盘打开 → **闪退，且日志里一行都没有**。
 
@@ -192,6 +192,50 @@
 异常代码：0xc000027b   (STATUS_STOWED_EXCEPTION)
 WER 签名：combase.dll / 80004005 (E_FAIL)
 ```
+
+**真正的原因**：`PublishReadyToRun=true`（csproj 里原本写成
+`Configuration != Debug → True`，**Release 发布一直开着**）。
+
+**决定性对照实验**（同一份代码，只改这一个发布参数）：
+
+| 发布方式 | 结果 |
+|---|---|
+| R2R 开启（= `publish.cmd` 的路径） | **1~3 轮之内必崩** |
+| R2R 关闭 | 连续 4~8 轮全部正常 |
+
+机理与此前 `PublishTrimmed` 那次同源（csproj 里那段注释记载了同样的堆栈）：
+WinRT 投影层要在**首次访问类型**时解析 ABI 指针
+（`WinRT.TypeExtensions.GetAbiToProjectionVftblPtr`）。
+R2R 把一部分投影代码预编译、固化调用点；而本程序会**把界面树整个释放、
+之后按需重建**（收进托盘省内存那套逻辑）—— 重建时类型初始化顺序一变，
+就踩到已失效的指针。
+
+**已加的护栏**：
+- csproj：`PublishReadyToRun` 恒定 **False**（连同那一大段注释）
+- `publish.ps1`：显式 `-p:PublishReadyToRun=false`（不依赖 csproj）+ **产物校验**
+  —— App.dll > 600KB 或 Core.dll > 120KB 就中止打包
+  （实测 R2R 的 App.dll ≈ 736KB、Core.dll ≈ 168KB；正常 ≈ 400KB / 71KB）
+
+### ⛔⛔ 最该记住的一条：**验证必须用与交付完全相同的构建参数**
+
+这次连续两轮"修好了"都是假的：我为了发布快，测试包带了
+`-p:PublishReadyToRun=false`，**恰好关掉了 R2R**，而 `publish.cmd` 是开着的。
+**测的根本不是同一个东西**，所以怎么测都"不崩"，用户一装就崩。
+
+**规矩**：凡是"打包后才出现"的问题，复现与验证**一律复制打包脚本的参数**
+（或者干脆跑打包脚本本身），不要自己另配一套。差一个 `-p:` 就是两个世界。
+
+（`publish.ps1` 还必须在**正常的 Windows 终端**里跑：WorkBuddy 的 shell 缺
+`PROGRAMDATA` / `APPDATA` 等变量，NuGet 会以
+"Value cannot be null. (Parameter 'path1')" 失败 —— 脚本 NOTES 里已写明。）
+
+### 顺带保留的一条经验（**不是**本次崩溃的原因）
+
+原先我把崩溃归因于"在 `Closing` 事件里同步拆 XAML 树 + 强制 GC"，
+**这个诊断是错的**（改成异步释放后，R2R 版照样崩）。但那条改动本身无害、
+且方向正确：**拆 UI 树 / 释放大量 COM 对象 / 强制 GC 不要放在 Closing、
+SizeChanged、LayoutUpdated 这类窗口事件里，一律排进 Dispatcher 队列。**
+留着当防御性实践，别再当成"已定位的根因"。
 
 **为什么日志全空**：这是**原生层**崩溃，`Application.UnhandledException` 与
 `AppDomain.UnhandledException` 都拦不到。遇到"闪退且无日志"先查事件日志
