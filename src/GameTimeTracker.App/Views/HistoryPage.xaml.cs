@@ -43,7 +43,11 @@ public sealed partial class HistoryPage : Page
     private async Task LoadHistoryAsync()
     {
         if (_repo == null) return;
-        var records = await _repo.GetRecentDailyRecordsAsync(100);
+        // ⚠️ 这是一个**显示条数上限**，不是数据缺失 —— 拉取路径没有日期过滤，
+        //    本地库里有全部记录。原先写 100，QA 那边有 287 条，于是"历史"页只显示最近 100 条，
+        //    看起来就像"更早的记录没拉下来"（2026-09-19 反馈）。
+        //    提高到 1000，够覆盖几年的日常使用；真要再多就得做分页/虚拟化了。
+        var records = await _repo.GetRecentDailyRecordsAsync(1000);
         var viewModels = records.Select(r =>
         {
             var cover = _coverCache?.GetCoverPath(r.Platform, r.PlatformId);

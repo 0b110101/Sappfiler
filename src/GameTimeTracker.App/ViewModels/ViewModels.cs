@@ -214,8 +214,14 @@ public partial class HomeViewModel : ObservableObject
     public async Task RefreshAllDataAsync()
     {
         var today = DateTime.Today;
-        // Range covers at least 14 weeks back to include full 84 days of heatmap
-        var startRange = today.AddDays(-100).ToString("yyyy-MM-dd");
+
+        // ⚠️ 读取窗口由 DailyAggregator 统一给出，**不要在这里另写天数**。
+        //    2026-09-19 QA 反馈的"记录只显示到 6/11、更早的没拉到本地"就是这个数字造成的：
+        //    这里原来写死 `AddDays(-100)`（注释还写着"覆盖 84 天热力图"，那是热力图只有 12 周时的值），
+        //    而热力图早已是 52 周（364 天）→ 窗口比热力图小了 3/4，
+        //    于是热力图左边永远是空的，「游戏时长记录 N 天」也只统计到窗口内的天数。
+        //    记录**其实早就全量拉到本地了**（拉取路径没有日期过滤），纯粹是显示/统计被截断。
+        var startRange = DailyAggregator.DataWindowStart(today).ToString("yyyy-MM-dd");
         var endRange = today.AddDays(7).ToString("yyyy-MM-dd");
 
         // 1. Fetch data asynchronously

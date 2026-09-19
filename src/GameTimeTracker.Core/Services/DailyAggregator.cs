@@ -100,13 +100,37 @@ public static class DailyAggregator
     }
 
     /// <summary>
+    /// 首页热力图的周数（7 行 × 该周数 = 覆盖天数）。
+    ///
+    /// ⚠️ **读取数据的日期窗口必须 ≥ 它**，否则热力图左侧会一直是空的。
+    ///    2026-09-19 QA 反馈的"只显示到 6/11、更早的记录没拉到本地"就是这么来的：
+    ///    读取窗口当时写死 100 天（注释还写着"覆盖 84 天热力图"，那是热力图只有 12 周时的值），
+    ///    而热力图早已扩到 52 周 → 两边口径对不上，左边 3/4 永远是空的，
+    ///    「游戏时长记录 N 天」也只统计到窗口内的天数。
+    ///    所以窗口改由 <see cref="DataWindowStart"/> 统一给出，不要再另写数字。
+    /// </summary>
+    public const int HeatmapWeekCount = 52;
+
+    /// <summary>热力图覆盖的天数（7 × <see cref="HeatmapWeekCount"/>）。</summary>
+    public static int HeatmapDays => HeatmapWeekCount * 7;
+
+    /// <summary>
+    /// 首页各项统计（含热力图）需要的**最早日期**。
+    ///
+    /// 起点 = 参考日往前 <see cref="HeatmapDays"/> 天，再留 7 天余量 ——
+    /// 热力图的第一周落在"本周日往前 51 周"，可能比整 364 天再早几天。
+    /// </summary>
+    public static DateTime DataWindowStart(DateTime referenceDate)
+        => referenceDate.Date.AddDays(-(HeatmapDays + 7));
+
+    /// <summary>
     /// Generates the 7 rows x 52 columns (~364 days, 1 year) Activity Contribution Heatmap.
     /// Range: from Monday of (weekCount - 1) weeks ago to Sunday of the current week.
     /// </summary>
     public static ActivityHeatmapResult GenerateActivityHeatmap(
         DateTime referenceDate,
         IReadOnlyList<DailySummary> allSummaries,
-        int weekCount = 52)
+        int weekCount = HeatmapWeekCount)
     {
         var refDate = referenceDate.Date;
         // Sunday of current week (DayOfWeek.Sunday is 0)
@@ -367,7 +391,7 @@ public static class DailyAggregator
         )).ToList();
 
         // 6. Generate 52-week (1-year) Activity Heatmap (7x52 = 364 days)
-        var activityHeatmap = GenerateActivityHeatmap(referenceDate, allSummaries, 52);
+        var activityHeatmap = GenerateActivityHeatmap(referenceDate, allSummaries, HeatmapWeekCount);
 
         return new DashboardStats(
             TodayMinutes: todayMinutes,

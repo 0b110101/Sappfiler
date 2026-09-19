@@ -283,6 +283,28 @@ public class DailyAggregatorTests
         heatmap.MonthMarkers.Should().NotBeEmpty();
         heatmap.MonthMarkers.Count.Should().BeInRange(11, 14); // Covers approximately 12 months
     }
+
+    [Fact]
+    public void DataWindowStart_ShouldCover_EntireHeatmapWindow()
+    {
+        // 首页统计的读取窗口必须 ≥ 热力图窗口 —— 否则热力图左侧永远是空的，
+        // 「游戏时长记录 N 天」也只统计到窗口内的天数。
+        //
+        // 2026-09-19 QA 反馈"游戏时长表有 287 条，但只显示到 6/11"就是这个不变量被破坏：
+        // 读取窗口写死 100 天（当时热力图只有 12 周留下的注释），而热力图早已是 52 周 = 364 天。
+        // 今天 9/19 往前 100 天正好是 6/11 —— 与反馈的日期完全吻合。
+        var today = new DateTime(2026, 9, 19);
+
+        var heatmap = DailyAggregator.GenerateActivityHeatmap(today, [], DailyAggregator.HeatmapWeekCount);
+        heatmap.Cells.Should().NotBeEmpty();
+
+        var earliest = heatmap.Cells.Min(c => c.Date);
+        DailyAggregator.DataWindowStart(today).Should().BeOnOrBefore(earliest,
+            "读取窗口的起点不能晚于热力图最早的那一天");
+
+        // 反向保护：窗口也别比需要的大太多（多留一周余量就够了）
+        (earliest - DailyAggregator.DataWindowStart(today)).Should().BeLessThan(TimeSpan.FromDays(14));
+    }
 }
 
 public class DatabaseAndSessionTests
