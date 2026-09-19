@@ -928,7 +928,7 @@ public class SqliteRepository : IDatabaseRepository
             // 2. Check if daily_summary exists
             var existing = await conn.QueryFirstOrDefaultAsync<dynamic>(
                 """
-                SELECT id, duration_seconds, duration_minutes, notion_page_id, sync_status 
+                SELECT id, game_id, duration_seconds, duration_minutes, notion_page_id, sync_status 
                 FROM daily_summary 
                 WHERE notion_page_id = @pageId OR (date = @date AND game_id = @gameId)
                 LIMIT 1;
@@ -957,6 +957,32 @@ public class SqliteRepository : IDatabaseRepository
                 // 而 push 出去的就是 duration_minutes，所以"本地是否领先"本就该用分钟衡量。
                 bool localAhead = existingMinutes > item.DurationMinutes;
 
+                // ── 记录归属修正（2026-09-19 QA 反馈的核心 bug）─────────────────────
+                // 这条每日记录可能挂在**错误的游戏行**上。真实场景：
+                // 雾山把总表/每日表的属性改名后，程序还是旧版本 —— 旧版本读不到
+                // 「关联游戏」，于是把每条记录都当成"没有关联"，为它新建了一个
+                // **未绑定**的游戏行。后来升级、能读到 relation 了，这里又为同一条记录
+                // 解析出正确的游戏行，但下面的 UPDATE 只改时长和 page_id、**没动 game_id**
+                // —— 记录就一直留在那个未绑定的行上，而正确绑定的行是空的。
+                // 用户看到的就是「映射库里一堆未绑定，绑好的游戏却没有记录」。
+                //
+                // 修法：旧行**没绑定** + 这次解析出的游戏**绑定了关系** ⇒ 把记录挪过去。
+                // 反向绝不动：旧行已绑定说明它有自己的归属，可能是用户手动改过的。
+                int currentGameId = (int)existing.game_id;
+                int targetGameId = currentGameId;
+                bool migrated = false;
+                if (currentGameId != game.Id && !string.IsNullOrEmpty(item.GameMasterPageId))
+                {
+                    var oldGame = await conn.QueryFirstOrDefaultAsync<GameRecord>(
+                        "SELECT * FROM games WHERE id = @id;", new { id = currentGameId });
+
+                    if (oldGame is not null && string.IsNullOrEmpty(oldGame.NotionPageId))
+                    {
+                        targetGameId = game.Id;
+                        migrated = true;
+                    }
+                }
+
                 await conn.ExecuteAsync(
                     """
                     UPDATE daily_summary
@@ -965,6 +991,7 @@ public class SqliteRepository : IDatabaseRepository
                         notion_page_id = @pageId,
                         notion_title = COALESCE(@title, notion_title),
                         sync_status = @newStatus,
+                        game_id = @gameId,
                         last_sync_at = CURRENT_TIMESTAMP
                     WHERE id = @id;
                     """,
@@ -973,6 +1000,7 @@ public class SqliteRepository : IDatabaseRepository
                         finalSeconds,
                         finalMinutes,
                         pageId = item.PageId,
+                        gameId = targetGameId,
                         // Pull 拿到的标题就是远端现状 —— 记下来，回刷时用它比对即可跳过无变化的记录。
                         // 但要防呆：有些路径只给 pageId 不给标题（GameTitle 是被剥过时长后缀的裸名），
                         // 那种情况必须传 null 保住旧快照，否则会把「不思议迷宫 · 0.7 h」写成裸名，
@@ -981,6 +1009,13 @@ public class SqliteRepository : IDatabaseRepository
                         newStatus = localAhead ? "pending" : "synced",
                         id = (int)existing.id
                     });
+
+                // 迁移完成 → 顺手清掉被搬空的幽灵行，否则它会在「待处理」里永远挂着。
+                // 条件收得很紧（见方法注释），避免误删用户真在用的游戏。
+                if (migrated)
+                {
+                    await TryDropGhostGameAsync(conn, currentGameId);
+                }
 
                 return (int)existing.id;
             }
@@ -1137,17 +1172,72 @@ public class SqliteRepository : IDatabaseRepository
         var unbound = await conn.QueryAsync<GameRecord>(
             "SELECT * FROM games WHERE coalesce(notion_page_id, '') = '';");
 
+        // 两边都要剥一次时长后缀再比。
+        // 幽灵行的名字是**旧版本程序**写进去的（那时 StripSuffix 还认不出
+        // 「致命躯壳2.2h」这种紧贴写法），所以库里存的就是带后缀的原串；
+        // 而这次解析出来的名字已经被剥离过。只比一边永远对不上。
         foreach (var g in unbound)
         {
-            if (string.IsNullOrWhiteSpace(g.Name)) continue;
-
-            // 名字与可执行文件都试：有些本地行的 name 是进程名，exe 才是真名（或反之）
-            if (GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(g.Name) == target) return g;
-            if (!string.IsNullOrWhiteSpace(g.Executable) &&
-                GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(g.Executable) == target) return g;
+            if (Matches(g.Name) || Matches(g.Executable)) return g;
         }
 
         return null;
+
+        bool Matches(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+            var stripped = GameTimeTracker.Infrastructure.Notion.DailyRecordTitle.StripSuffix(raw);
+            return GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(stripped) == target;
+        }
+    }
+
+    /// <summary>
+    /// 清掉一个「幽灵游戏行」：从 Notion 导入时因为读不到 relation 而凭空建出来的行。
+    /// 只有它确实**空掉**之后才删，四个条件缺一不可：
+    ///   · 未绑定总表（有关系的行有归属，不能动）
+    ///   · 没有可执行文件（有 exe 的说明是「添加游戏」加进来的本机游戏，不能动）
+    ///   · 没有每日记录
+    ///   · 没有会话记录
+    /// 删除前先写 deleted_archive —— 那是以后排查"记录怎么没了"的唯一线索。
+    ///
+    /// ⚠️ 必须在**已持有 _writeLock** 的调用方内部使用，所以这里直接收 SqliteConnection，
+    /// 不复用 public 的 ArchiveDeletedAsync（它会再取一次信号量 → 死锁）。
+    /// </summary>
+    private static async Task TryDropGhostGameAsync(SqliteConnection conn, int gameId)
+    {
+        var game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
+            "SELECT * FROM games WHERE id = @id;", new { id = gameId });
+        if (game is null) return;
+
+        if (!string.IsNullOrEmpty(game.NotionPageId)) return;
+        if (!string.IsNullOrEmpty(game.Executable) || !string.IsNullOrEmpty(game.ExecutablePath)) return;
+
+        if (await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM daily_summary WHERE game_id = @id;", new { id = gameId }) > 0) return;
+        if (await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM sessions WHERE game_id = @id;", new { id = gameId }) > 0) return;
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO deleted_archive (kind, source, reference, payload_json)
+            VALUES ('game', 'ghost', @reference, @payload);
+            """,
+            new
+            {
+                reference = game.Name,
+                payload = JsonSerializer.Serialize(new
+                {
+                    game.Id,
+                    game.Platform,
+                    game.PlatformId,
+                    game.Name,
+                    reason = "未绑定 + 无记录 + 无可执行文件，判定为导入期产生的幽灵行（2026-09-19 自动清理）"
+                })
+            });
+
+        await conn.ExecuteAsync("DELETE FROM games WHERE id = @id;", new { id = gameId });
+
+        AppLog.Info($"[同步] 清理幽灵游戏行「{game.Name}」(id={gameId})：未绑定、无记录、无可执行文件");
     }
 
     // ----------------- Notion Game Master Cache -----------------
