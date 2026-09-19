@@ -526,55 +526,76 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
   原手工列若为分钟，Formula 要写 `prop("原有列") + prop("GT累计") * 60`。
 - Rollup **只统计已绑定的记录**（没 relation 的算不进去），所以绑定是 Rollup 的前提。
 
-## 发布包构成与瘦身（2026-09-19）
+## 发布包构成（2026-09-19）
 - **随包附文档**：`publish.ps1` 第 3b 步把 `README.md` 与 `CHANGELOG-QA.md`
   复制进发布目录（后者改名为「更新说明.md」）。改文档后重跑 publish 即生效。
-- **不引 WindowsAppSDK 元包**（2026-09-19 起）：元包会连带拉进
-  `.AI`（含传递依赖 `microsoft.windows.ai.machinelearning` → onnxruntime 20.7MB + DirectML 17.8MB）、
-  `.ML`、`.Search`、`.Widgets`，合计约 **55MB**（包的 19%），本程序全用不到。
-  改为只引 6 个子包：`Base 2.0.4` / `Foundation 2.3.12` /
-  `InteractiveExperiences 2.1.9` / `WinUI 2.3.9` / `DWrite 2.1.0` / `Runtime 2.5.1`
-  （版本取自元包 nuspec，保持一致）。
-  元包是**纯聚合包**（targets 为空、props 只声明 VS ProjectCapability），拆开安全。
-- **产物校验的 requiredFiles 是安全网**：改依赖集后已补入
-  `Microsoft.WindowsAppRuntime.dll`。少引子包会缺核心 dll，这道校验会拦下。
-- **winmd（53 个 / 2.7MB）保持原样**：主要是上面那些组件的产物、随之消失；
-  剩下的来自 WinUI/Foundation，运行时是否读取无法静态确认，不做无把握的删除。
+- **⛔ 必须引 `Microsoft.WindowsAppSDK` 元包，不要拆成子包**
+  （2026-09-19 事故，已回退）：
+  拆成 6 个子包后**应用 PRI 不再合并框架的 PRI**，包能生成、110 个测试全过，
+  但**一启动就崩**：
+  ```
+  XamlParseException: Cannot locate resource from
+  'ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml'
+  ```
+  进程 1 秒内以 `0xC000027B` 退出。判据 —— 同一次发布的 `GameTimeTracker.App.pri`：
+  元包 **2,227,376 字节**（合并了 WinUI 主题资源）／子包 **43,464 字节**（只有本程序自己的）。
+  子包清单与元包 nuspec 依赖**完全一致**，所以不是"少引包"，是元包本身参与
+  PRI 合并这条链路被绕过了。
+  代价是元包会连带拉进 `.AI`（→ onnxruntime 20.7MB + DirectML 17.8MB）、
+  `.ML`、`.Search`、`.Widgets`，合计约 **55MB** —— 不值得换一个起不来的程序。
+  **要再瘦身必须先验证 `GameTimeTracker.App.pri` 仍在 2MB 量级，并且真的能启动。**
+- **`publish.ps1` 的产物校验有三道**（都属于"能生成但跑不起来"的拦截）：
+  1. requiredFiles 存在性（含 `Microsoft.WindowsAppRuntime.dll` 等）
+  2. **资源 PRI 体积 ≥ 1MB**（新增，就是上面这次事故的护栏）
+  3. R2R 体积哨兵（App.dll > 600KB / Core.dll > 120KB 中止；**防御性，非已证实根因**）
 - **`.mui` 语言目录**：已用 `SatelliteResourceLanguages=zh-CN;en-US` +
   publish.ps1 清理步骤（本地化安全约束见该脚本注释：只删「名字像语言码」且「只含 .mui」的目录）。
 - 观察：`dist/` 里堆了 15 个历史 zip、共约 **2.4GB**（含 v1.0.x~v1.2.1 的旧产物）。
   是否清理交给用户决定，我没动。
 
+## ⚠️ 产物级问题会被增量构建掩盖（2026-09-19 血的教训）
+同一个坏 PRI 在 bin/ 里潜伏了好几版：旧的合并版文件被后续构建**沿用**，
+所以 alpha18~alpha22 的包都是好的；直到跑了一次全新编译（`dotnet build`
+加 `no-incremental`）按"未合并"重新生成，alpha.23 才突然起不来。
+→ **验证发布产物时一律先删掉该工程的 `obj/` 与 `bin/`**，
+再 publish；否则你验证的是一个可能早已不存在的旧状态。
+→ 另一个有效手段：**拿一个已知能跑的旧包做同文件体积对照**
+（这次就是靠 `GameTimeTracker.App.pri` 2.2MB vs 43KB 一眼定位的）。
+
 ## 版本号与版本控制（SemVer 规则，2026-09-19 由 alphaNN 改为规范格式）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`、`_probe/`。
-- **当前版本 `0.9.5-alpha.23`**。
-  `VersionPrefix=0.9.5` / `VersionSuffix=alpha.23` / `FileVersion=0.9.5.23` / `AssemblyVersion=0.9.5.0`。
+- **当前版本 `0.2.20`**（2026-09-19 用户指定从 0.2.20 起）。
+  `VersionPrefix=0.2.20` / `VersionSuffix=`（**留空**）/ `FileVersion=0.2.20.0` /
+  `AssemblyVersion=0.2.0.0`。
 - **格式**：`MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]`
-  - `MAJOR` 不兼容改动（`0.9.5`→`1.0.0`）；`MINOR` 向下兼容地加功能（→`0.10.0`）；
-    `PATCH` 向下兼容地修缺陷（→`0.9.6`）。**递增某段时右侧各段归零。**
-  - 预发布 `-alpha.N`：`N` 是**构建序号**，同一目标版本每出一个包就 +1；换 `X/Y/Z` 则归 1。
-  - 比较按**数字**不按字符串（`alpha.2 < alpha.10`）；预发布**低于**同号正式版。
-  - **`0.Y.Z` = 初始开发阶段**，接口/数据格式仍可能变；正式发布时改 `1.0.0` 并去掉预发布段。
-  - `AssemblyInformationalVersion` 会自动带构建信息段（`0.9.5-alpha.23+<commit>`）。
+  - `MAJOR` 不兼容改动（`0.2.20`→`1.0.0`）；`MINOR` 向下兼容地加功能（→`0.3.0`）；
+    `PATCH` 向下兼容地修缺陷（→`0.2.21`）。**递增某段时右侧各段归零。**
+  - 🎯 **0.Y.Z 阶段的约定：每个交付包都递增 `PATCH`**（0.2.20 → 0.2.21 → …），
+    这样每个给 QA 的包版本号都不同，能直接对上"问题出在哪一版"。
+    （严格 SemVer 里 PATCH 按"发布"递增，这里是 0.x 阶段的刻意简化。）
+  - 预发布段 `-alpha.1` / `-beta.1`：**平时留空**，要发预发布版才填 `VersionSuffix`。
+    比较按**数字**不按字符串（`alpha.2 < alpha.10`）；预发布**低于**同号正式版。
+  - `AssemblyInformationalVersion` 会自动带构建信息段（`0.2.20+<commit>`）。
 - **升版必须同时改三处**（漏一处就会出现"程序里显示新号、exe 属性是旧的"矛盾）：
-  1. `Directory.Build.props` → `VersionSuffix`（如 `alpha.23`）+ `FileVersion`（末段对齐，如 `0.9.5.23`）
+  1. `Directory.Build.props` → `VersionPrefix`（可读版本，如 `0.2.20`）+ `FileVersion`
+     （**四段纯数字**，如 `0.2.20.0`；Windows 不接受字母）
   2. `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version`（须与 `FileVersion` 完全一致）
   3. 设置页注释里的示例字符串
   **不要在单个 `.csproj` 里再写 `<Version>`**；版本号只在仓库根 `Directory.Build.props` 定义一处。
 - ⚠️ **改这两个文件注意行尾**：`Package.appxmanifest` 是 **CRLF**，用 Python
   `io.open(...,newline='')` 重写会变成 LF，导致整个文件都算改动。优先用 Edit 工具。
-- **`alpha.N` 是给 QA 的迭代序号，每交一版调试包就 +1。**
+- **每交一版调试包就升一次版本**（0.x 阶段递增 PATCH）。
   **用户要同时把包交给 QA 一起 debug**（2026-09-18 用户明确指出过一次我没升版本的疏漏）——
   不升版本 QA 就无法分辨手握的是改前还是改后，也说不清问题出在哪一版。
 - 设置页底部显示取自 `AssemblyInformationalVersion`，**按 `+` 截断**（那个 hash 对 QA 定位问题很有用）。
 - **打包用 `E:\vi2\publish.ps1`，不要手工改版本号再手工打包**：
   它从 `Directory.Build.props` 读版本（唯一来源）→ **校验 FileVersion 与 appxmanifest 一致**
-  （不一致直接中止，机制上防漏改）→ 跑测试 → `dotnet publish` →
+  （不一致直接中止，机制上防漏改）→ 跑测试 → `dotnet publish` → 三道产物校验 →
   写 `VERSION.txt`（版本+commit+配置+打包时间+工作树是否脏）→ 压 zip。
   工作树有未提交改动时黄字警告（包里含未入库代码 QA 无法定位问题）。
   **必须在正常的 Windows 终端里跑**（WorkBuddy 的 shell 缺 `PROGRAMDATA`/`APPDATA`，NuGet 会失败）。
-- 发布包命名：`GameTimeTracker-v<版本>-win-x64.zip`（如 `...-v0.9.5-alpha.23-win-x64.zip`）。
+- 发布包命名：`GameTimeTracker-v<版本>-win-x64.zip`（如 `...-v0.2.20-win-x64.zip`）。
   **配套维护 `CHANGELOG-QA.md`**（面向 QA：改了什么 / 重点验什么 / 已知问题）。
   HANDOVER.md 给接手开发者，CHANGELOG-QA.md 给测试人员，**两者受众不同都要维护**。
 - **版本沿革**：
@@ -583,7 +604,9 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
   别名年份后缀 / **属性改名：游戏动态·单次时长·关联游戏** / 移除模糊匹配 / 时长单位改小时）
   → `alpha20`（热力图撑爆布局 / 手工标题后缀 / 回刷清零时长 / 删除对账误删）
   → `alpha21`（托盘闪退第一次尝试 ❌无效）→ `alpha22`（R2R 归因 ❌无效）
-  → **`alpha.23`**（隐藏时不再拆页面 + 版本规则改 SemVer；⚠️ 崩溃修复待用户实测确认）。
+  → `0.9.5-alpha.23`（隐藏时不再拆页面；🗑️ 包因 PRI 未合并而无法启动，已作废）
+  → **`0.2.20`**（回退 WindowsAppSDK 元包 + PRI 护栏；版本命名改 SemVer 从 0.2.20 起；
+  ⚠️ "关界面→托盘打开"的崩溃修复仍待用户实测确认）。
 
 ## 每日记录的「游戏名称」与 page icon（2026-09-18 用户明确要求）
 - **标题格式 `{游戏名} · {X} h`，其中「游戏名」的来源分两种**：
