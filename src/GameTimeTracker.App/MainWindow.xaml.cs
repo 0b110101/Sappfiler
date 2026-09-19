@@ -227,33 +227,33 @@ public sealed partial class MainWindow : Window
                 _appWindow.Move(new PointInt32(Math.Max(0, x), Math.Max(0, y)));
             }
 
-            // 关闭窗口 = 收进托盘。既然只跑后台，这里顺带把页面视觉树释放掉，
-            // 让常驻内存真正降下来（热力图单是格子就有 52×7 个，还有大量图片）。
+            // 关闭窗口 = 收进托盘：只 Hide，**不释放页面视觉树**。
             //
-            // ⚠️ 顺序不能改（2026-09-19 实测崩溃）：**必须先 Hide，再把释放动作
-            //    排进 Dispatcher 队列**，绝不能在 Closing 处理器里同步拆视觉树。
+            // ⚠️ 这里曾调用 ReleaseVisualTree()（把 ContentFrame.Content 置空并丢掉
+            //    页面引用），目的是隐藏期间降常驻内存。2026-09-19 判定必须放弃：
+            //    它会让「关界面 → 托盘打开」随机闪退，且**日志里一行都没有**。
             //
-            // Closing 回调发生在**窗口消息处理过程中**。此时把 ContentFrame.Content
-            // 置空，等于从 XAML 框架脚下把树抽掉，框架紧接着仍会访问那批已释放的
-            // COM 对象；而 UI 线程是 STA，ReleaseVisualTree 里的
-            // GC.WaitForPendingFinalizers() 会让**终结器线程**去 Release 这些
-            // 线程亲和对象 —— 跨线程释放直接返回 E_FAIL。
+            //    机制（这是关键，不要再"优化"回去）：
+            //    · 页面被从可视树上摘掉后，各 ViewModel 仍然强引用着页面 ——
+            //      x:Bind 生成的绑定会把 PropertyChanged 处理器挂在 ViewModel 上，
+            //      所以 _homePage = null 并不能真正释放它，只是让它"脱离可视树"。
+            //    · 而后台同步/刷新随时会驱动那些绑定去更新元素
+            //      （日志实测：拆完树的 60ms 后仍在打 `[同步] 已从 Notion 同步 9 条记录`）。
+            //    · 更新一个 peer 已销毁的元素，WinRT 投影层解析 ABI 指针时踩空。
             //
-            // 症状：崩溃在 CoreMessagingXP.dll，异常码 0xc000027b
-            // （STATUS_STOWED_EXCEPTION），WER 签名 combase.dll / 80004005。
-            // 这是**原生层**崩溃，App 的 UnhandledException 与
-            // AppDomain.UnhandledException 都接不到 —— 所以日志里一行都没有，
-            // 表现出来就是"从托盘打开直接闪退，log 是空的"。
+            //    症状：崩溃在 CoreMessagingXP.dll，异常码 0xc000027b
+            //    （STATUS_STOWED_EXCEPTION），WER 签名 combase.dll / 80004005。
+            //    属于**原生层**崩溃，App 的 UnhandledException 与
+            //    AppDomain.UnhandledException 都接不到 —— 所以日志空白。
             //
-            // 用默认(Normal)优先级入队：它保证排在用户下次点「打开主面板」触发的
-            // 导航任务**之前**，否则导航刚重建好的页面会被这次释放拆掉。
+            //    代价：隐藏期间当前页面留在内存里（主要是热力图那张卡片）。
+            //    这是刻意的取舍 —— 稳定性优先，且页面本就随导航常驻。
             _appWindow.Closing += (sender, args) =>
             {
                 args.Cancel = true;
-                // 面包屑：崩溃是原生层的，这两行是判断"死在哪个阶段"的唯一线索。
+                // 面包屑：崩溃是原生层的，这几行是判断"死在哪个阶段"的唯一线索。
                 AppLog.Info("[窗口] 收到关闭请求，收进托盘");
                 _appWindow.Hide();
-                DispatcherQueue.TryEnqueue(ReleaseVisualTree);
 
                 // 提示只弹一次：关窗口是用户主动行为，不需要每次都被告知一遍。
                 if (!_minimizeNoticeShown)
@@ -262,7 +262,7 @@ public sealed partial class MainWindow : Window
                     _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
                 }
 
-                AppLog.Info("[窗口] 已隐藏，视觉树释放已入队");
+                AppLog.Info("[窗口] 已隐藏（保留页面，后台刷新可安全更新）");
             };
 
             // 切回窗口时顺手检查一次 Notion 侧的删除（节流 60 秒），
@@ -311,60 +311,6 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>
-    /// 释放页面视觉树。窗口隐藏后仅保留托盘与后台统计，重新打开时按需重建页面。
-    /// </summary>
-    private void ReleaseVisualTree()
-    {
-        try
-        {
-            _navToRestore = string.IsNullOrEmpty(_currentNav) ? "Home" : _currentNav;
-
-            ContentFrame.Content = null;
-            ContentFrame.BackStack.Clear();
-            ContentFrame.ForwardStack.Clear();
-
-            _homePage = null;
-            _historyPage = null;
-            _pendingPage = null;
-            _mappingsPage = null;
-            _settingsPage = null;
-            _currentNav = string.Empty;
-
-            // 位图缓存同样要清掉，否则会拖住内存不放
-            Converters.StringToImageSourceConverter.ClearLocalImageCache();
-        }
-        catch
-        {
-            // 释放失败不影响隐藏行为
-        }
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        // 进一步把物理工作集交给系统回收。
-        // 托盘常驻场景下这是划算的：隐藏期间几乎不访问这些页面，
-        // 让系统尽快把它们换出，任务管理器里看到的内存会明显下降。
-        // （注意：减少的是常驻工作集，不是虚拟提交量。）
-        try
-        {
-            SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
-        }
-        catch
-        {
-            // 非关键路径，失败可忽略
-        }
-
-        AppLog.Info("[窗口] 视觉树已释放完毕（隐藏期间常驻内存已回落）");
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
-
     private void InitializeSystemTray()
     {
         if (_appWindow == null) return;
@@ -384,10 +330,17 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(() =>
             {
                 // 面包屑：这条路径曾静默崩溃（原生层），逐步记录才能定位。
-                AppLog.Info($"[托盘] 恢复界面开始（_currentNav=\"{_currentNav}\" _navToRestore=\"{_navToRestore}\"）");
-                if (string.IsNullOrEmpty(_currentNav))
+                var hasContent = ContentFrame.Content is not null;
+                AppLog.Info($"[托盘] 恢复界面开始（有内容={hasContent} _currentNav=\"{_currentNav}\" _navToRestore=\"{_navToRestore}\"）");
+
+                // ⚠️ 判断依据是**内容是否真的没了**，不是 _currentNav。
+                // _currentNav 只表示"上次导航到哪"，内容被释放之后它可能仍留着旧值，
+                // 拿它当条件就会跳过重建、界面白白空着（2026-09-19 的白屏就是这么来的）。
+                if (!hasContent)
                 {
-                    NavigateTo(string.IsNullOrEmpty(_navToRestore) ? "Home" : _navToRestore);
+                    var tag = string.IsNullOrEmpty(_navToRestore) ? "Home" : _navToRestore;
+                    AppLog.Info($"[托盘] 内容已释放，重建页面：{tag}");
+                    NavigateTo(tag);
                 }
                 AppLog.Info("[托盘] 恢复界面结束");
             });

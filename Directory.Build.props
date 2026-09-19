@@ -5,22 +5,38 @@
     MSBuild 会自动向上查找本文件并应用到 src/ 与 tests/ 下的所有工程，
     所以改动版本号只需改这一处。
 
-    命名规则：v0.9.5-alphaNN 为「尚未正式发布」的预发布版本（alpha17、alpha18、…）。
-    正式发布（v1.0.0）前，把 VersionPrefix 改为 1.0.0 并去掉 VersionSuffix。
+    ── 版本规则（SemVer 2.0.0，2026-09-19 由 v0.9.5-alphaNN 改为本规范）────────────
+    格式：  MAJOR.MINOR.PATCH[-预发布标识[.序号]][+构建信息]
 
-    - VersionPrefix / VersionSuffix  -> AssemblyInformationalVersion（程序里读到的可读版本）
-    - FileVersion                    -> exe 文件属性「文件版本」（Windows 要求每段为 0-65535，故不含预发布后缀）
-    - AssemblyVersion                -> 程序集绑定版本，只在大版本变动时改
+    数字段（发布时递增，递增某段时右侧各段归零）：
+      MAJOR  不兼容的改动（对外行为/接口破坏性变更）。0 → 1 表示脱离初始开发阶段。
+      MINOR  向下兼容地新增功能。
+      PATCH  向下兼容地修缺陷。
 
-    ⚠️ 给 QA 出新包时**必须同时改这三行**（alpha 序号 + FileVersion 第三段 + 必要时 Product 之类），
-    只改 VersionSuffix 会让 exe 的文件属性仍显示旧版本，QA 无法从属性对话框分辨包的新旧。
-    对应地，Package.appxmanifest 里的 Version 也要跟着改。
+    预发布段：不稳定版本，优先级**低于**同号正式版（1.0.0-alpha < 1.0.0）。
+      .NET 侧拆成两半，因为 FileVersion 只接受纯数字四段：
+        VersionSuffix = alpha.N   ->  可读版本 "0.9.6-alpha.3"
+        FileVersion   = X.Y.Z.N   ->  exe 文件属性里的数字版本
+      N 是**构建序号**，同一目标版本每出一个包就 +1；换了 X/Y/Z 则 N 归 1。
+      比较优先级：alpha.2 < alpha.10（按数字比，不是字符串），alpha < alpha.1。
+
+    当前处于初始开发阶段（0.Y.Z）：接口与数据格式仍可能变动，
+    0.Y.Z 内的 MINOR/PATCH 递增不承诺稳定性；正式发布时改为 1.0.0。
+
+    ⚠️ 给 QA 出新包时**必须同时改这三行**（预发布序号 + FileVersion 末段 + Package.appxmanifest
+    里的 Version），只改 VersionSuffix 会让 exe 的文件属性仍显示旧版本，
+    QA 无法从属性对话框分辨包的新旧。
+
+    MSBuild 属性对应关系：
+      VersionPrefix + VersionSuffix -> AssemblyInformationalVersion（程序读到的可读版本，如 0.9.5-alpha.23）
+      FileVersion                   -> exe 文件属性「文件版本」（Windows 要求每段 0-65535，故不含字母）
+      AssemblyVersion               -> 程序集绑定版本，只在 MAJOR 变动时改
   -->
   <PropertyGroup>
     <VersionPrefix>0.9.5</VersionPrefix>
-    <VersionSuffix>alpha22</VersionSuffix>
+    <VersionSuffix>alpha.23</VersionSuffix>
 
-    <FileVersion>0.9.5.22</FileVersion>
+    <FileVersion>0.9.5.23</FileVersion>
     <AssemblyVersion>0.9.5.0</AssemblyVersion>
 
     <Product>GameTimeTracker</Product>

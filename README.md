@@ -459,6 +459,45 @@ dotnet run --project src/GameTimeTracker.App
 > 裁剪会把 WinUI 的 native 组件删掉，产出的包能生成、测试也全过，但**一启动就崩**。
 > `publish.cmd` 已内置产物校验，缺关键文件会直接中止打包。
 
+### 版本号规则（SemVer）
+
+采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)：
+
+```
+MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]
+  0  .  9  .  5  -   alpha . 23
+```
+
+**数字段**（递增某一段时，右侧各段归零）：
+
+| 段 | 何时递增 | 例 |
+|---|---|---|
+| `MAJOR` | 不兼容的改动（对外行为 / 接口破坏性变更） | `0.9.5` → `1.0.0` |
+| `MINOR` | 向下兼容地**新增功能** | `0.9.5` → `0.10.0` |
+| `PATCH` | 向下兼容地**修缺陷** | `0.9.5` → `0.9.6` |
+
+**预发布段**（`-alpha.N`）：标识尚未正式发布的版本，优先级**低于**同号正式版。
+
+- 序号 `N` 是**构建序号**：同一目标版本每出一个包就 +1；换了 `X/Y/Z` 则从 `1` 重新计。
+- 比较时按**数字**而非字符串：`alpha.2 < alpha.10`；同级里 `alpha < alpha.1`。
+- 完整优先级：`0.9.6-alpha.2 < 0.9.6-alpha.10 < 0.9.6-beta.1 < 0.9.6`
+
+**当前处于初始开发阶段（`0.Y.Z`）**：接口与数据格式仍可能变动，
+`0.Y.Z` 内的 MINOR / PATCH 递增不承诺稳定性；正式发布时改为 `1.0.0` 并去掉预发布段。
+
+#### 改版本号改哪里
+
+**唯一来源是仓库根 `Directory.Build.props`**，四个工程自动继承。出新包时**必须同时改三处**，
+只改一处会让 exe 的文件属性仍显示旧版本、无法分辨包的新旧：
+
+| 位置 | 作用 |
+|---|---|
+| `Directory.Build.props` → `VersionSuffix` | 可读版本（程序界面里显示的，如 `0.9.5-alpha.23`） |
+| `Directory.Build.props` → `FileVersion` | exe 文件属性「文件版本」。Windows 要求每段是 0–65535，所以写成 `0.9.5.23`（不带字母） |
+| `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version` | 必须是 `FileVersion` 的前三段一致 |
+
+`publish.cmd` 会自动读这三处并**校验一致性**，不一致会直接中止打包。
+
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
