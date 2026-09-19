@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using System.Text.Json;
 using Dapper;
 using GameTimeTracker.Core.Interfaces;
@@ -11,6 +11,14 @@ public class SqliteRepository : IDatabaseRepository
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+    /// <summary>
+    /// 只用来做名字归一化的匹配器实例。
+    /// ⚠️ <c>NormalizeTitle</c> 是**实例方法**（只有 <c>ExtractSteamAppId</c> 是静态的），
+    /// 而它不碰任何实例状态，所以整个仓储共用一个就行 ——
+    /// 不要每次调用都 new（构造函数会新建一个 HttpClient）。
+    /// </summary>
+    private static readonly GameTimeTracker.Core.Services.GameMatcher Matcher = new();
 
     static SqliteRepository()
     {
@@ -1166,7 +1174,7 @@ public class SqliteRepository : IDatabaseRepository
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
 
-        var target = GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(name);
+        var target = Matcher.NormalizeTitle(name);
         if (string.IsNullOrEmpty(target)) return null;
 
         var unbound = await conn.QueryAsync<GameRecord>(
@@ -1187,7 +1195,7 @@ public class SqliteRepository : IDatabaseRepository
         {
             if (string.IsNullOrWhiteSpace(raw)) return false;
             var stripped = GameTimeTracker.Infrastructure.Notion.DailyRecordTitle.StripSuffix(raw);
-            return GameTimeTracker.Core.Services.GameMatcher.NormalizeTitle(stripped) == target;
+            return Matcher.NormalizeTitle(stripped) == target;
         }
     }
 
