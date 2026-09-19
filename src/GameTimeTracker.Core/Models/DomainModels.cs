@@ -148,6 +148,15 @@ public class NotionDailyRecordItem
 
     public string Date { get; set; } = string.Empty;
     public int DurationMinutes { get; set; }
+
+    /// <summary>
+    /// 「单次时长」原始值的单位是不是**分钟**（从标题后缀判定，如「… · 42 min」）。
+    /// 仅用于识别并修复"旧分钟值被当成小时"造成的历史膨胀 —— 那种行会被放大 60 倍，
+    /// 必须在拉取时以远端为准压回去，否则本地会把放大后的值推回 Notion。
+    /// 单位是小时（标题写着 h）或认不出单位时为 false。
+    /// </summary>
+    public bool DurationUnitIsMinutes { get; set; }
+
     public string? GameMasterPageId { get; set; }
     public string? Status { get; set; }
 }

@@ -211,7 +211,32 @@ public sealed partial class MainWindow : Window
         if (_appWindow != null)
         {
             _appWindow.Title = "GameTime Tracker";
-            _appWindow.Resize(new SizeInt32(1200, 780));
+
+            // ── 初始窗口尺寸随显示器自适应（2026-09-19 QA 的 2K 反馈）──────────────
+            // 原先是写死的 1200x780 —— 那是按 1080p 定的。
+            // 2K / 4K 下窗口显得很小，内容全挤在屏幕中间一小块。
+            // 改成取工作区的 62% × 78%，并夹在 [1200×780, 1720×1040]：
+            //   · 1080p (1920) → 62% = 1190 → 夹回 1200×780，**与原来一致**（无回归）
+            //   · 2K    (2560) → 1587×1123   → 夹到 1587×1040
+            //   · 4K    (3840) → 夹到上限 1720×1040
+            // 上限的意义：再大也没用 —— 首页内容会在约 1840 逻辑像素处停止变宽
+            // （见 HomePage.OnRootGridSizeChanged 的对称留白），更大的窗口只会多出空白。
+            var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
+
+            var winW = 1200;
+            var winH = 780;
+            if (display != null)
+            {
+                var workArea = display.WorkArea;
+                winW = (int)Math.Clamp(workArea.Width * 0.62, 1200, 1720);
+                winH = (int)Math.Clamp(workArea.Height * 0.78, 780, 1040);
+
+                // 别超过工作区 —— 否则窗口边角会跑到屏幕外（含任务栏）
+                winW = Math.Min(winW, workArea.Width - 40);
+                winH = Math.Min(winH, workArea.Height - 40);
+            }
+
+            _appWindow.Resize(new SizeInt32(winW, winH));
 
             var iconPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "AppIcon.ico");
             if (System.IO.File.Exists(iconPath))
@@ -219,11 +244,10 @@ public sealed partial class MainWindow : Window
                 _appWindow.SetIcon(iconPath);
             }
 
-            var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
             if (display != null)
             {
-                var x = (display.WorkArea.Width - 1200) / 2;
-                var y = (display.WorkArea.Height - 780) / 2;
+                var x = (display.WorkArea.Width - winW) / 2;
+                var y = (display.WorkArea.Height - winH) / 2;
                 _appWindow.Move(new PointInt32(Math.Max(0, x), Math.Max(0, y)));
             }
 

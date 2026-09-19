@@ -135,23 +135,41 @@ public class NotionWireFormatTests
         records[0].GameTitle.Should().Be("测试游戏");
     }
 
-    [Fact]
-    public async Task QueryDailyRecords_ShouldTreatLegacyMinutesValueAsMinutes()
+    [Theory]
+    // 标题写着 min / 分 → 值是分钟（历史行。程序早期写的就是这种格式）
+    [InlineData("老游戏 · 120 min", 120, 120)]
+    [InlineData("老游戏 (42分)", 42, 42)]
+    // ★ 雾山 2026-09-19 报的严重错误：旧行 5 分钟被读成了 5 小时（放大 60 倍）
+    [InlineData("老游戏 · 5 min", 5, 5)]
+    // 标题写着 h → 值是小时
+    [InlineData("老游戏 · 2 h", 2, 120)]
+    [InlineData("老游戏 · 0.08 h", 0.08, 5)]
+    // 用户手写的：他按小时写
+    [InlineData("黑旗10.1h", 10.1, 606)]
+    [InlineData("致命躯壳 45min", 45, 45)]
+    // 标题里没有单位 → 只能按数量级猜（单日不可能超过 24 小时，>24 视为分钟）
+    [InlineData("Half-Life 2", 300, 300)]
+    [InlineData("Half-Life 2", 2, 120)]
+    public async Task QueryDailyRecords_ShouldConvertDurationByTitleUnit(
+        string title, double number, int expectedMinutes)
     {
-        // 历史行里存的是分钟（如 120）。判别规则：单日时长不可能超过 24 小时，
-        // 所以 > 24 的值必然是旧格式，按分钟直接用。
-        const string response = """
+        // 单位**必须优先看标题**，不能只看数值大小 ——
+        // 只看大小会把旧行里的 5（分钟）读成 5 小时，整整放大 60 倍。
+        //
+        // 标题里一直带着单位：程序写的「… · 0.08 h」、早期的「… · 42 min」「… (42分)」、
+        // 用户手写的「黑旗10.1h」／「致命躯壳 45min」，所以可以确定性地判。
+        var response = $$"""
         {
           "results": [
             {
-              "id": "daily-legacy",
+              "id": "p1",
               "properties": {
                 "游戏动态": {
                   "type": "title",
-                  "title": [ { "plain_text": "老游戏 · 2.0 h", "text": { "content": "老游戏 · 2.0 h" } } ]
+                  "title": [ { "plain_text": "{{title}}", "text": { "content": "{{title}}" } } ]
                 },
-                "日期": { "type": "date", "date": { "start": "2026-09-18" } },
-                "单次时长": { "type": "number", "number": 120 }
+                "日期": { "type": "date", "date": { "start": "2026-09-19" } },
+                "单次时长": { "type": "number", "number": {{number.ToString(System.Globalization.CultureInfo.InvariantCulture)}} }
               }
             }
           ],
@@ -162,7 +180,60 @@ public class NotionWireFormatTests
 
         var records = await client.QueryDailyRecordsAsync("db-1");
 
-        records[0].DurationMinutes.Should().Be(120, ">24 的值是旧的分钟格式，不应再乘 60");
+        records.Should().ContainSingle();
+        records[0].DurationMinutes.Should().Be(expectedMinutes);
+    }
+
+    [Fact]
+    public async Task QueryDailyRecords_ShouldFlagMinuteUnit_SoInflatedRowsCanBeRepaired()
+    {
+        // 拉取时要把"单位是分钟"这件事报给仓储 ——
+        // 仓储靠它识别并修复历史上被放大 60 倍的本地行（见 SyncDailyRecordFromNotionAsync）。
+        const string response = """
+        {
+          "results": [
+            {
+              "id": "p1",
+              "properties": {
+                "游戏动态": {
+                  "type": "title",
+                  "title": [ { "plain_text": "老游戏 · 5 min", "text": { "content": "老游戏 · 5 min" } } ]
+                },
+                "日期": { "type": "date", "date": { "start": "2026-09-19" } },
+                "单次时长": { "type": "number", "number": 5 }
+              }
+            }
+          ],
+          "has_more": false
+        }
+        """;
+        var (client, _) = MakeClient(response);
+
+        var records = await client.QueryDailyRecordsAsync("db-1");
+
+        records[0].DurationUnitIsMinutes.Should().BeTrue();
+
+        // 标题写 h 的必须为 false，否则会把正常行误判成"需要修复"
+        const string responseHours = """
+        {
+          "results": [
+            {
+              "id": "p2",
+              "properties": {
+                "游戏动态": {
+                  "type": "title",
+                  "title": [ { "plain_text": "老游戏 · 2 h", "text": { "content": "老游戏 · 2 h" } } ]
+                },
+                "日期": { "type": "date", "date": { "start": "2026-09-19" } },
+                "单次时长": { "type": "number", "number": 2 }
+              }
+            }
+          ],
+          "has_more": false
+        }
+        """;
+        var (client2, _) = MakeClient(responseHours);
+        (await client2.QueryDailyRecordsAsync("db-1"))[0].DurationUnitIsMinutes.Should().BeFalse();
     }
 
     [Fact]
@@ -180,8 +251,12 @@ public class NotionWireFormatTests
             var (writeClient, writeHandler) = MakeClient();
             await writeClient.CreateDailyRecordAsync("db-1", "2026-09-19", "往返测试", minutes, null);
             using var sent = JsonDocument.Parse(writeHandler.RequestBodies[0]);
-            var hours = sent.RootElement.GetProperty("properties")
-                .GetProperty("单次时长").GetProperty("number").GetDouble();
+            var sentProps = sent.RootElement.GetProperty("properties");
+            var hours = sentProps.GetProperty("单次时长").GetProperty("number").GetDouble();
+            // 连标题一起取出来：生产路径判单位靠的就是标题末尾的「h」，
+            // 用真实标题读回来才算真的走完整链路（否则只是在测那条回退分支）
+            var writtenTitle = sentProps.GetProperty("游戏动态")
+                .GetProperty("title")[0].GetProperty("text").GetProperty("content").GetString();
 
             // 把刚写出去的小时值当成远端数据读回来
             var readResponse = $$"""
@@ -192,10 +267,10 @@ public class NotionWireFormatTests
                   "properties": {
                     "游戏动态": {
                       "type": "title",
-                      "title": [ { "plain_text": "往返测试", "text": { "content": "往返测试" } } ]
+                      "title": [ { "plain_text": "{{writtenTitle}}", "text": { "content": "{{writtenTitle}}" } } ]
                     },
                     "日期": { "type": "date", "date": { "start": "2026-09-19" } },
-                    "单次时长": { "type": "number", "number": {{hours}} }
+                    "单次时长": { "type": "number", "number": {{hours.ToString(System.Globalization.CultureInfo.InvariantCulture)}} }
                   }
                 }
               ],

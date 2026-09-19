@@ -947,23 +947,59 @@ public class SqliteRepository : IDatabaseRepository
             {
                 int existingMinutes = (int)existing.duration_minutes;
                 int existingSeconds = (int)existing.duration_seconds;
-                int finalMinutes = Math.Max(existingMinutes, item.DurationMinutes);
-                int finalSeconds = Math.Max(existingSeconds, item.DurationMinutes * 60);
 
-                // 本地时长领先（Notion 还停在旧值）时必须保留 pending，
-                // 否则每轮 Pull 都会把心跳刚标记的 pending 洗成 synced，
-                // 推送永远查不到待上传记录 —— Notion 时长就停在首次创建时的值。
+                // ── 修复"旧分钟值被当成小时"造成的历史膨胀（2026-09-19 雾山报的严重错误）──
+                // 单位从分钟改成小时那次，只按"≤24 当小时"判单位，于是旧行里的
+                // 5（分钟）被读成 5 小时 → 本地存了 300 分钟，**整整放大 60 倍**。
+                // 现在改成按标题里的单位判、能读到正确值，但那批被放大的本地数字必须清掉：
+                // 否则下面的 localAhead 会判成"本地领先"→ 把 300 分钟（=5 小时）推回 Notion，
+                // 反而把线上表写坏。
                 //
-                // ⚠️ 必须**按分钟比**，不能用秒：
-                //    duration_minutes 是 duration_seconds / 60 的整数除法结果
-                //    （见 AddSessionDurationToDailyAsync），所以秒总比分钟多出 <60 的余数。
-                //    用 existingSeconds > item.DurationMinutes * 60 的话，
-                //    910 秒(15分) vs 远端 15 分会判成"本地领先" →
-                //    但推上去的还是同样的 15 分钟 → 数值不变 → 下一轮再次判领先 → **永远重推**。
-                //    按分钟比则 15 == 15，正确判为已同步。
-                //
-                // 而 push 出去的就是 duration_minutes，所以"本地是否领先"本就该用分钟衡量。
-                bool localAhead = existingMinutes > item.DurationMinutes;
+                // 判据收得很紧，四个条件同时满足才修：
+                //   ① 远端标题明确写着单位是分钟（DurationUnitIsMinutes）
+                //   ② 有 notion_page_id —— 只有来自 Notion 的行才可能被这样误读过
+                //   ③ 远端值 > 0 —— 否则会把本地清零
+                //   ④ 本地 ≥ 远端 × 60 —— 正是当初那次误判的倍数
+                bool inflatedByMinuteUnitBug =
+                    item.DurationUnitIsMinutes &&
+                    item.DurationMinutes > 0 &&
+                    !string.IsNullOrEmpty((string?)existing.notion_page_id) &&
+                    existingMinutes >= item.DurationMinutes * 60;
+
+                int finalMinutes;
+                int finalSeconds;
+                bool localAhead;
+
+                if (inflatedByMinuteUnitBug)
+                {
+                    // 以远端为准 —— 远端是原始数据，本地那份是误读出来的
+                    finalMinutes = item.DurationMinutes;
+                    finalSeconds = item.DurationMinutes * 60;
+                    localAhead = false;
+                    AppLog.Warn(
+                        $"[同步] 修正历史时长膨胀：「{item.GameTitle}」{item.Date} " +
+                        $"本地 {existingMinutes} 分钟 → {finalMinutes} 分钟（旧版把分钟当成了小时）");
+                }
+                else
+                {
+                    finalMinutes = Math.Max(existingMinutes, item.DurationMinutes);
+                    finalSeconds = Math.Max(existingSeconds, item.DurationMinutes * 60);
+
+                    // 本地时长领先（Notion 还停在旧值）时必须保留 pending，
+                    // 否则每轮 Pull 都会把心跳刚标记的 pending 洗成 synced，
+                    // 推送永远查不到待上传记录 —— Notion 时长就停在首次创建时的值。
+                    //
+                    // ⚠️ 必须**按分钟比**，不能用秒：
+                    //    duration_minutes 是 duration_seconds / 60 的整数除法结果
+                    //    （见 AddSessionDurationToDailyAsync），所以秒总比分钟多出 <60 的余数。
+                    //    用 existingSeconds > item.DurationMinutes * 60 的话，
+                    //    910 秒(15分) vs 远端 15 分会判成"本地领先" →
+                    //    但推上去的还是同样的 15 分钟 → 数值不变 → 下一轮再次判领先 → **永远重推**。
+                    //    按分钟比则 15 == 15，正确判为已同步。
+                    //
+                    // 而 push 出去的就是 duration_minutes，所以"本地是否领先"本就该用分钟衡量。
+                    localAhead = existingMinutes > item.DurationMinutes;
+                }
 
                 // ── 记录归属修正（2026-09-19 QA 反馈的核心 bug）─────────────────────
                 // 这条每日记录可能挂在**错误的游戏行**上。真实场景：

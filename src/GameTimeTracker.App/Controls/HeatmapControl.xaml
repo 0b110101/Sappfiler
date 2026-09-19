@@ -16,7 +16,8 @@
             </Grid.ColumnDefinitions>
 
             <!-- Weekday Labels (Only 一, 三, 五 on rows 1, 3, 5) -->
-            <Grid Grid.Column="0" Margin="0,22,6,0">
+            <!-- 行高在代码里按格子步进同步调整（见 RenderHeatmap），否则与右侧矩阵错位 -->
+            <Grid x:Name="WeekdayLabelGrid" Grid.Column="0" Margin="0,22,6,0">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="16" />
                     <RowDefinition Height="16" />

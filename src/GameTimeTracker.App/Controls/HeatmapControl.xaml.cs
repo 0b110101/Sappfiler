@@ -27,10 +27,60 @@ public sealed partial class HeatmapControl : UserControl
     {
         InitializeComponent();
         HeatmapScroll.Loaded += (s, e) => ScrollToEnd();
-        HeatmapScroll.SizeChanged += (s, e) => ScrollToEnd();
+        HeatmapScroll.SizeChanged += OnHeatmapViewportChanged;
 
         // 主题切换后重建热力图：格子是在代码里创建的，不会自动跟随 ThemeResource 变化
         ActualThemeChanged += (s, e) => RenderHeatmap(HeatmapData);
+    }
+
+    /// <summary>格子步进（含间距）下限。取自 1080p 的原始尺寸 —— 宽度不够时维持它并横向滚动。</summary>
+    private const double MinStep = 16.0;
+
+    /// <summary>格子步进上限。屏幕很宽时不让格子粗到失真。</summary>
+    private const double MaxStep = 26.0;
+
+    private double _currentStep = MinStep;
+
+    /// <summary>
+    /// 按**可用宽度**算格子步进：放得下就让所有周铺满整行，放不下就维持 MinStep 并横向滚动。
+    ///
+    /// 取 ViewportWidth 而不是 ExtentWidth 是关键 —— 前者只由控件自身尺寸决定，
+    /// 与"我们渲染了多宽的内容"无关，所以重渲染不会反过来改变它，不存在布局循环。
+    /// </summary>
+    private double ComputeStep(ActivityHeatmapResult? data)
+    {
+        if (data == null || data.Cells.Count == 0) return MinStep;
+
+        int weeks = Math.Max(52, data.Cells.Max(c => c.WeekIndex) + 1);
+
+        double avail = HeatmapScroll.ViewportWidth;
+        if (avail <= 0) avail = HeatmapScroll.ActualWidth;
+        if (avail <= 0) return MinStep;   // 还没布局完，先给下限，等 SizeChanged 再纠正
+
+        return Math.Clamp(avail / weeks, MinStep, MaxStep);
+    }
+
+    /// <summary>
+    /// 可视宽度变化 → 重算格子尺寸。**这是「2K / 4K 自适应」的落点**：
+    /// 1080p 下宽度不够，维持 16px 并横向滚动（与原来完全一致）；
+    /// 屏幕更宽时格子随之变大、把卡片铺满，而不是缩成一条小色带（雾山反馈的现象）。
+    ///
+    /// 重渲染排进 Dispatcher 队列：SizeChanged 处于布局过程中，在这里同步改列宽
+    /// 会与布局互相触发 —— 本文件 ScrollToEnd 的注释里记着同类事故（栈溢出 0xC00000FD）。
+    /// </summary>
+    private void OnHeatmapViewportChanged(object sender, SizeChangedEventArgs e)
+    {
+        ScrollToEnd();
+
+        if (Math.Abs(ComputeStep(HeatmapData) - _currentStep) < 0.5) return;
+
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            // 队列里再确认一次：期间可能又变过一次尺寸
+            if (Math.Abs(ComputeStep(HeatmapData) - _currentStep) < 0.5) return;
+            RenderHeatmap(HeatmapData);
+            ScrollToEnd();
+        });
     }
 
     private bool _scrollQueued;
@@ -78,18 +128,29 @@ public sealed partial class HeatmapControl : UserControl
 
         if (data == null || data.Cells.Count == 0) return;
 
-        // 1. Setup 7 Rows (16px each)
+        // 1. 先定格子步进（取决于当前可用宽度，见 ComputeStep）
+        _currentStep = ComputeStep(data);
+        double cellSize = Math.Max(9.0, Math.Round(_currentStep - 4));    // 间距 4
+        double rowHeight = Math.Max(12.0, Math.Round(_currentStep - 1));
+
+        // 2. Setup 7 Rows
         for (int r = 0; r < 7; r++)
         {
-            MatrixGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(16) });
+            MatrixGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(rowHeight) });
         }
 
-        // 2. Setup Columns dynamically (16px each)
+        // 左侧「一 / 三 / 五」的行高必须跟矩阵一致，否则星期标签会错位
+        for (int r = 0; r < WeekdayLabelGrid.RowDefinitions.Count; r++)
+        {
+            WeekdayLabelGrid.RowDefinitions[r].Height = new GridLength(rowHeight);
+        }
+
+        // 3. Setup Columns dynamically
         int totalWeeks = Math.Max(52, data.Cells.Max(c => c.WeekIndex) + 1);
         for (int c = 0; c < totalWeeks; c++)
         {
-            MonthHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
-            MatrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+            MonthHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_currentStep) });
+            MatrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_currentStep) });
         }
 
         // 3. Render Month Headers (ColumnSpan 4 ensures 10月, 11月, 12月 never truncate)
@@ -118,8 +179,8 @@ public sealed partial class HeatmapControl : UserControl
 
             var border = new Border
             {
-                Width = 12,
-                Height = 12,
+                Width = cellSize,
+                Height = cellSize,
                 CornerRadius = new CornerRadius(3),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,

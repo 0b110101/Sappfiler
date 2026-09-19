@@ -285,10 +285,13 @@ public class NotionClient : INotionClient
                     // （时长 → 单次时长、游戏 → 关联游戏），但别人的表可能还没改，
                     // 读的时候两种都认，免得拉不回老数据。
                     //
-                    // ⚠️ 「单次时长」的值是**小时**（1 位小数），本地模型一律用**分钟**，
+                    // ⚠️ 「单次时长」的值是**小时**（2 位小数），本地模型一律用**分钟**，
                     //    所以这里必须换算，并且要兼容"旧行存的是分钟"。
+                    //    单位**优先从标题判定**（标题里一直带着 h/min），
+                    //    只按数值大小猜会把旧行的 5 分钟读成 5 小时（放大 60 倍）。
+                    var durationUnit = DetectDurationUnit(rawTitle);
                     var durationRaw = ExtractDouble(props, "单次时长", "时长", "时长(分)", "Duration", "DurationMinutes");
-                    var duration = RawDurationToMinutes(durationRaw);
+                    var duration = RawDurationToMinutes(durationRaw, rawTitle);
                     var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
 
@@ -301,6 +304,7 @@ public class NotionClient : INotionClient
                             RawTitle = rawTitle.Trim(),
                             Date = date,
                             DurationMinutes = duration,
+                            DurationUnitIsMinutes = durationUnit == DurationUnit.Minutes,
                             GameMasterPageId = gameMasterPageId,
                             Status = status
                         });
@@ -607,25 +611,68 @@ public class NotionClient : INotionClient
         return null;
     }
 
+    /// <summary>「单次时长」原始值的单位，从标题后缀判定。</summary>
+    internal enum DurationUnit { Unknown, Hours, Minutes }
+
+    /// <summary>
+    /// 从标题尾部认时长单位，形如「… 0.08 h」「… 42 min」「… (42分)」「…10.1h」。
+    /// 必须锚定在**结尾**、且单位词**紧跟在数字后面**，
+    /// 否则会把游戏名里的 h / min / 分 误当单位（例如「Half-Life」「三国志11」）。
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex TitleDurationUnitRegex =
+        new(@"(?<num>\d+(?:[\.,]\d+)?)\s*(?<unit>小时|分钟|时|分|hours|hour|hrs|hr|h|minutes|minute|mins|min|m)\s*[)）]?\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>标题里明确写了单位时，按其判定；认不出返回 Unknown。</summary>
+    internal static DurationUnit DetectDurationUnit(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return DurationUnit.Unknown;
+
+        var m = TitleDurationUnitRegex.Match(title);
+        if (!m.Success) return DurationUnit.Unknown;
+
+        return m.Groups["unit"].Value.ToLowerInvariant() switch
+        {
+            "小时" or "时" or "hours" or "hour" or "hrs" or "hr" or "h" => DurationUnit.Hours,
+            "分钟" or "分" or "minutes" or "minute" or "mins" or "min" or "m" => DurationUnit.Minutes,
+            _ => DurationUnit.Unknown
+        };
+    }
+
     /// <summary>
     /// 把「单次时长」属性里的原始值换算成**分钟**（本地模型一律用分钟）。
     /// </summary>
     /// <remarks>
-    /// 属性现在的单位是**小时**（1 位小数），但历史行里存的是**分钟**。
-    /// 判别方式：一款游戏单日时长不可能超过 24 小时，
-    /// 所以值 &gt; 24 的必然是旧的分钟格式，直接按分钟用。
+    /// 属性现在的单位是**小时**（2 位小数），但历史行里存的是**分钟**。
     ///
-    /// 取舍说明：旧格式里 ≤ 24 的值（例如某天只玩了 15 分钟）会被误判成 15 小时。
-    /// 这种情况少见，且影响有界；相比"把 42 分钟读成 42 小时"的破坏性小得多。
+    /// ⚠️ 判单位**必须优先看标题**，不能只看数值大小 ——
+    ///    2026-09-19 雾山报的严重错误就是这么来的：原先只按"≤24 当小时"判，
+    ///    旧行里的 5（分钟）被读成 5 小时 = 300 分钟，**整整放大 60 倍**。
+    ///
+    /// 好在标题里一直带着单位，可以确定性地判：
+    ///   · 本程序写的：「游戏名 · 0.08 h」
+    ///   · 更早的版本：「游戏名 · 42 min」／「游戏名 (42分)」
+    ///   · 用户手写的：「黑旗10.1h」（他按小时写）／「致命躯壳 45min」
+    ///
+    /// 只有标题里认不出单位时（用户只写了名字），才回落到数值大小猜测：
+    /// 单日单游戏不可能超过 24 小时，故 &gt; 24 视为分钟。
     /// </remarks>
-    private static int RawDurationToMinutes(double? raw)
+    private static int RawDurationToMinutes(double? raw, string? title)
     {
         if (raw is not { } value || value <= 0) return 0;
 
+        switch (DetectDurationUnit(title))
+        {
+            case DurationUnit.Minutes: return (int)Math.Round(value);
+            case DurationUnit.Hours: return (int)Math.Round(value * 60.0);
+        }
+
+        // 标题里没有可识别的单位：只能按数量级猜
         const double MaxPlausibleHours = 24.0;
         return value > MaxPlausibleHours
-            ? (int)Math.Round(value)            // 旧格式：本来就是分钟
-            : (int)Math.Round(value * 60.0);    // 新格式：小时 → 分钟
+            ? (int)Math.Round(value)            // 像是旧格式的分钟
+            : (int)Math.Round(value * 60.0);    // 像是小时
     }
 
     private static string? ExtractRelationId(JsonElement props, params string[] propertyNames)
