@@ -501,12 +501,36 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
      15 分永远推不上去）。2 位小数让往返精确后，容差就该删掉 —— 按分钟比已经根本解决。
    - 而 push 出去的就是 `duration_minutes`，"是否领先"本就该用分钟衡量。
 
-**历史行兼容**：旧行存的是分钟。判别规则：单日单游戏时长不可能 > 24 小时，
-故 `> 24` 的值按分钟处理（`RawDurationToMinutes`）。局限已文档化：
-旧行 ≤24 的值会被当成小时（影响有界）。
+5. 🚨 **判"这个值是分钟还是小时"必须看标题的单位，不能只看数值大小**
+   （2026-09-19 雾山报的严重错误，同一个坑踩了两次）：
+   原规则"≤24 当小时、>24 当分钟"把旧行的 **5（分钟）读成了 5 小时 = 300 分钟**，
+   整整放大 60 倍。标题里一直带着单位，可确定性判断：
+
+   | 标题 | 判定 |
+   |---|---|
+   | `… 0.08 h`（程序现在写的，`DailyRecordTitle.Build`） | 小时 |
+   | `… 5 min`（早期版本写的） | 分钟 |
+   | `… (42分)`（更早的格式） | 分钟 |
+   | `黑旗10.1h`（用户手写，他按小时写） | 小时 |
+   | `半条命 45min` | 分钟 |
+   | `Half-Life 2` / `三国志11`（认不出单位） | 才回落到数量级猜测 |
+
+   实现：`NotionClient.DetectDurationUnit` + `TitleDurationUnitRegex`
+   （**锚定标题结尾、单位词必须紧跟数字**，否则会命中游戏名里的 h/min/分），
+   以及 `RawDurationToMinutes(raw, title)`。
+   配套把结果报给仓储：`NotionDailyRecordItem.DurationUnitIsMinutes`。
+
+6. **已读错的数据必须自动修，否则会写坏线上表**：
+   被放大的本地值会让 `localAhead` 判"本地领先"→ 把 300 分钟（=5 小时）推回 Notion。
+   `SyncDailyRecordFromNotionAsync` 里以远端为准压回去，四个条件同时满足才动：
+   ① 远端标题明确写着分钟 ② 有 `notion_page_id` ③ 远端值 > 0 ④ 本地 ≥ 远端 × 60。
+   会写日志 `[同步] 修正历史时长膨胀：…`。修完 `localAhead=false` → 下一轮不再触发，稳定。
 
 **测试**：`NotionWireFormatTests` 断言**实际发出的 JSON**（注入假 HttpMessageHandler），
 不能只测中间值 —— 中间值一直是分钟，换算写错测不出来。
+单位的用例见 `QueryDailyRecords_ShouldConvertDurationByTitleUnit`（9 组，
+含"5 min → 5 分钟"这个原始 bug 与 Half-Life 2 / 三国志11 这类陷阱样本）。
+穷举往返测试**要用真实标题回读** —— 用不带单位的裸名只会覆盖到回退分支。
 
 ## 游戏总表
 程序只读，属性均可选，但：
@@ -565,21 +589,25 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
 ## 版本号与版本控制（SemVer 规则，2026-09-19 由 alphaNN 改为规范格式）
 - **项目已初始化为 git 仓库**（`E:\vi2`）。基线提交 `d01cae5`（140 文件）。
   `.gitignore` 已排除 `config.json`（**含 Notion token，绝不能提交**）、`dist/`、`logs/`、`*.db`、`bin/`、`obj/`、`_probe/`。
-- **当前版本 `0.2.20`**（2026-09-19 用户指定从 0.2.20 起）。
-  `VersionPrefix=0.2.20` / `VersionSuffix=`（**留空**）/ `FileVersion=0.2.20.0` /
+- **当前版本 `0.2.21-alpha.1`**（调试包）。
+  `VersionPrefix=0.2.21` / `VersionSuffix=alpha.1` / `FileVersion=0.2.21.1` /
   `AssemblyVersion=0.2.0.0`。
 - **格式**：`MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]`
-  - `MAJOR` 不兼容改动（`0.2.20`→`1.0.0`）；`MINOR` 向下兼容地加功能（→`0.3.0`）；
-    `PATCH` 向下兼容地修缺陷（→`0.2.21`）。**递增某段时右侧各段归零。**
-  - 🎯 **0.Y.Z 阶段的约定：每个交付包都递增 `PATCH`**（0.2.20 → 0.2.21 → …），
-    这样每个给 QA 的包版本号都不同，能直接对上"问题出在哪一版"。
-    （严格 SemVer 里 PATCH 按"发布"递增，这里是 0.x 阶段的刻意简化。）
-  - 预发布段 `-alpha.1` / `-beta.1`：**平时留空**，要发预发布版才填 `VersionSuffix`。
-    比较按**数字**不按字符串（`alpha.2 < alpha.10`）；预发布**低于**同号正式版。
-  - `AssemblyInformationalVersion` 会自动带构建信息段（`0.2.20+<commit>`）。
+  - `MAJOR` 不兼容改动（`0.2.21`→`1.0.0`）；`MINOR` 向下兼容地加功能（→`0.3.0`）；
+    `PATCH` 向下兼容地修缺陷（→`0.2.22`）。**递增某段时右侧各段归零。**
+  - 🎯 **0.Y.Z 阶段的约定（2026-09-19 雾山明确）**：
+    - **调试中的包**带预发布号：`0.2.21-alpha.1`、`-alpha.2` ……
+    - **测试确认通过后**才去掉 `-alpha.N`、把版本落成 `0.2.21`
+      —— "**修订号在测试通过前不落实**"。
+    - 也就是说 `0.2.20` 已经是确认版；下一次确认版是 `0.2.21`。
+  - `FileVersion` 的**末段放预发布序号**（无预发布时写 0）：
+    `0.2.21-alpha.1` → `FileVersion=0.2.21.1`。这样同一个目标版本的多个 alpha
+    在 exe 属性里也能区分开。
+  - 比较按**数字**不按字符串（`alpha.2 < alpha.10`）；预发布**低于**同号正式版。
+  - `AssemblyInformationalVersion` 会自动带构建信息段（`0.2.21-alpha.1+<commit>`）。
 - **升版必须同时改三处**（漏一处就会出现"程序里显示新号、exe 属性是旧的"矛盾）：
-  1. `Directory.Build.props` → `VersionPrefix`（可读版本，如 `0.2.20`）+ `FileVersion`
-     （**四段纯数字**，如 `0.2.20.0`；Windows 不接受字母）
+  1. `Directory.Build.props` → `VersionPrefix`（如 `0.2.21`）+ `VersionSuffix`（如 `alpha.1`）
+     + `FileVersion`（**四段纯数字**，如 `0.2.21.1`；Windows 不接受字母）
   2. `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version`（须与 `FileVersion` 完全一致）
   3. 设置页注释里的示例字符串
   **不要在单个 `.csproj` 里再写 `<Version>`**；版本号只在仓库根 `Directory.Build.props` 定义一处。
@@ -769,4 +797,34 @@ foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
   - ❌ 从 Bash 直接调 `cmd.exe` / `reg.exe` / `msbuild` 会被安全层拦截，必须写成 `./x.cmd` 执行
 - **注意**：这是**机器/工具环境问题**，与 GameTimeTracker 项目本身无关，
   不要试图在项目里"修"它（不要提交任何 `NuGet.Config` 变通文件）。
+
+## 分辨率自适应方案（2026-09-19 QA 的 2K 反馈，改布局前先读）
+**起因**：布局按 1080p 调死 —— 右列固定 340px。2K/4K 下窗口宽得多，右列因此显得被挤扁。
+
+| 位置 | 做法 | 1080p | 2K | 4K |
+|---|---|---|---|---|
+| 右列 | 内容宽度的 26%，夹在 340~460（`ColRight`，在 `OnRootGridSizeChanged` 里算） | 340（**无回归**） | ~395 | 460 |
+| 内容宽度 | 左右**对称 Padding** 留白，限制在约 1520~1840 并居中 | 24 | 520 | 1000 |
+| 初始窗口 | 工作区的 62%×78%，夹在 1200×780~1720×1040 | 1200×780（**无回归**） | 1587×1040 | 1720×1040 |
+| 热力图格子 | 步进 16~26px 按可用宽度自适应（`HeatmapControl.ComputeStep`） | 16（**无回归**） | 铺满 | 铺满 |
+
+⚠️ **内容限宽必须用 Padding，不能用 `MaxWidth` + `HorizontalAlignment=Center`**：
+后者会让 Grid 退化成"按内容自适应宽度"，而星号列的期望宽度来自内容 → 左列直接塌掉。
+（我一开始就是这么写的，编译前想清楚了才换成 Padding。）
+
+⚠️ **热力图的步进要用 `ViewportWidth` 而不是 `ExtentWidth`**：前者只由控件尺寸决定，
+与"渲染了多宽的内容"无关，所以重渲染不会反过来改变它 —— 不存在布局循环。
+重渲染还要排进 Dispatcher 队列（别在 `SizeChanged` 里同步改列宽，该文件记着栈溢出事故 0xC00000FD）。
+改了矩阵行高就必须同步 `WeekdayLabelGrid` 的行高，否则「一/三/五」错位。
+
+**初始窗口尺寸改动的连带影响**：`MainWindow` 里 `Resize` 与 `Move` 用的是同一个
+`winW/winH`，改一处要一起改，否则窗口会偏出屏幕。
+
+## 排查 XAML 工程编译错误的一条捷径
+WinUI 工程里如果看到一堆 `XamlCompiler error WMC0001: Unknown type '…'`
+（指向 App.xaml 里的 Converter 之类），**真正的原因几乎总是在前面的 C# 编译错误** ——
+程序集没生成出来，XAML 编译器解析不到本项目的类型，于是一路级联报错。
+**先 `grep "error CS"` 看第一条**，别被 WMC 的噪声带跑。
+这次的真错误是 `HomePage.xaml.cs` 里 `Thickness` 未解析（该文件的 using 里没有
+`Microsoft.UI.Xaml`），写成 `Microsoft.UI.Xaml.Thickness` 即可。
 
