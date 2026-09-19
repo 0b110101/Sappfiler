@@ -181,6 +181,56 @@
 **已知边界**：末尾带中文备注的（「黑旗10.1h 通关」「神海4 1.3h dlc通关」）剥不掉 ——
 备注形态无法与游戏名安全区分（剥错会把不同游戏混为一谈），只能靠 relation 兜底。
 
+## ⚠️ 绝不能在窗口事件里同步拆 XAML 树（2026-09-19 托盘闪退事故）
+
+**症状**：关掉界面 → 从托盘打开 → **闪退，且日志里一行都没有**。
+
+**证据**（Windows 事件日志，这是原生崩溃的唯一入口）：
+
+```
+出错模块：CoreMessagingXP.dll
+异常代码：0xc000027b   (STATUS_STOWED_EXCEPTION)
+WER 签名：combase.dll / 80004005 (E_FAIL)
+```
+
+**为什么日志全空**：这是**原生层**崩溃，`Application.UnhandledException` 与
+`AppDomain.UnhandledException` 都拦不到。遇到"闪退且无日志"先查事件日志
+（`Get-WinEvent -FilterHashtable @{LogName='Application'}`，看 Application Error Id=1000）。
+
+**根因**：`MainWindow` 的 `_appWindow.Closing` 里**同步**调用了 `ReleaseVisualTree()` ——
+先 `ContentFrame.Content = null` 拆掉整棵树，再 `GC.Collect()` ×2 +
+`WaitForPendingFinalizers()`，最后 `SetProcessWorkingSetSize` 修剪工作集。
+Closing 回调处于**窗口消息处理过程中**：此刻把树从 XAML 框架脚下抽掉，
+框架继续访问那批已释放的 COM 对象；UI 线程是 STA，
+`WaitForPendingFinalizers` 让**终结器线程**去 Release 线程亲和对象 → 跨线程释放返回 E_FAIL。
+
+**修法**：先 `Hide()`，再把释放动作 `DispatcherQueue.TryEnqueue(ReleaseVisualTree)`。
+用默认 Normal 优先级 —— 保证它仍排在用户下次「打开」触发的页面重建**之前**
+（两者同在 UI 线程队列上，天然串行）。
+**推广**：任何"拆 UI 树 / 释放大量 COM 对象 / 强制 GC"都不要放在
+Closing、SizeChanged、LayoutUpdated 这类窗口事件里，一律排进 Dispatcher 队列。
+
+**已加面包屑日志**（[窗口] / [托盘] 各两三条）。原生崩溃没有堆栈可看时，
+"最后停在哪一行"就是唯一的定位依据 —— 别再删掉它们。
+
+### 复现/验证手法（很好用，值得复用）
+
+用 Python + ctypes 直接给窗口发消息，不必手动点托盘：
+
+```python
+# 关窗口 → 收进托盘
+user32.PostMessageW(hwnd, 0x0010, 0, 0)              # WM_CLOSE
+# 托盘左键 → ShowMainWindow
+user32.PostMessageW(hwnd, 0x0465, 0, 0x0202)         # WM_TRAYICON(=WM_USER+101) + WM_LBUTTONUP
+```
+
+- 找主窗口：`EnumWindows` + `GetWindowThreadProcessId` 过滤 PID，
+  再按标题 `GameTime Tracker` 精确匹配（进程有 5 个顶层窗口，**不能取第一个**）。
+- **时序敏感的竞态要试不同延时**：等 3 秒不复现、等 1.2 秒就必崩
+  （释放与重建之间的窗口期）。
+- **实验必须隔离**：`GAMETIME_DB_PATH` 指向副本库，并清掉 `settings.notion_token` ——
+  否则同步会写用户的线上 Notion 表。
+
 ## 已知遗留问题（尚未处理）
 - **拉取每日记录会为 Notion 总表里的游戏在本地 `games` 表建行**。本机 db 可见
   09-17 19:10:38 同一秒批量创建 5 行、`executable` 为空、`platform_id` 是 appid 或随机 guid
