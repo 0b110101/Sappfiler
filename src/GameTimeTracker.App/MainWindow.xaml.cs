@@ -98,6 +98,16 @@ public sealed partial class MainWindow : Window
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
 
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string lpString);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint msg, uint action, IntPtr pChangeFilterStruct);
+
+    private const uint MSGFLT_ALLOW = 1;
+
+    private static readonly uint WM_ACTIVATE_INSTANCE = RegisterWindowMessage(App.SingleInstanceMsgName);
+
     public static MainWindow? CurrentWindow { get; private set; }
 
     /// <summary>
@@ -388,9 +398,14 @@ public sealed partial class MainWindow : Window
             });
         };
 
-        // Subclass window procedure to receive WM_TRAYICON notifications
+        // Subclass window procedure to receive WM_TRAYICON and single-instance notifications
         _subclassProc = new SubclassProc(WndProc);
         SetWindowSubclass(_hwnd, _subclassProc, (UIntPtr)101, UIntPtr.Zero);
+
+        if (WM_ACTIVATE_INSTANCE != 0)
+        {
+            ChangeWindowMessageFilterEx(_hwnd, WM_ACTIVATE_INSTANCE, MSGFLT_ALLOW, IntPtr.Zero);
+        }
     }
 
     /// <summary>
@@ -435,6 +450,24 @@ public sealed partial class MainWindow : Window
 
     private IntPtr WndProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, UIntPtr dwRefData)
     {
+        if (uMsg == WM_ACTIVATE_INSTANCE && WM_ACTIVATE_INSTANCE != 0)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                AppLog.Info("[单例] 收到重复启动激活通知，正在还原并置顶已有窗口");
+                if (_trayService != null)
+                {
+                    _trayService.ShowMainWindow();
+                }
+                else
+                {
+                    _appWindow?.Show();
+                    Activate();
+                }
+            });
+            return IntPtr.Zero;
+        }
+
         if (uMsg == SystemTrayService.WM_TRAYICON)
         {
             _trayService?.HandleTrayMessage((int)lParam);

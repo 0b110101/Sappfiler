@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Threading;
 using GameTimeTracker.Infrastructure;
 using Windows.ApplicationModel;
 using Windows.ApplicationModel.Activation;
@@ -22,6 +24,23 @@ namespace GameTimeTracker.App;
 /// </summary>
 public partial class App : Application
 {
+    public const string SingleInstanceMutexName = @"Global\GameTimeTracker_SingleInstance_Mutex_DDD89790";
+    public const string SingleInstanceMsgName = "GameTimeTracker_ActivateInstance_DDD89790";
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string lpString);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    private const int ASFW_ANY = -1;
+    private static readonly IntPtr HWND_BROADCAST = (IntPtr)0xFFFF;
+
+    private static Mutex? _singleInstanceMutex;
+
     private Window? _window;
 
     /// <summary>
@@ -30,6 +49,36 @@ public partial class App : Application
     /// </summary>
     public App()
     {
+        bool createdNew;
+        try
+        {
+            _singleInstanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
+        }
+        catch (AbandonedMutexException)
+        {
+            createdNew = true;
+        }
+
+        if (!createdNew)
+        {
+            try
+            {
+                var msgId = RegisterWindowMessage(SingleInstanceMsgName);
+                if (msgId != 0)
+                {
+                    AllowSetForegroundWindow(ASFW_ANY);
+                    PostMessage(HWND_BROADCAST, msgId, IntPtr.Zero, IntPtr.Zero);
+                }
+            }
+            catch
+            {
+                // 忽略 IPC 唤醒过程中的偶发异常，确保重复进程快速静默退出
+            }
+
+            Environment.Exit(0);
+            return;
+        }
+
         InitializeComponent();
 
         UnhandledException += (sender, e) =>
