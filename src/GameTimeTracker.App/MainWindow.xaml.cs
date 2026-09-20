@@ -54,6 +54,8 @@ public sealed partial class MainWindow : Window
     // Cached page instances for 0ms instantaneous navigation
     private HomePage? _homePage;
     private HistoryPage? _historyPage;
+    private StatsPage? _statsPage;
+    private StatsViewModel? _statsViewModel;
     private PendingPage? _pendingPage;
     private MappingsPage? _mappingsPage;
     private SettingsPage? _settingsPage;
@@ -89,6 +91,12 @@ public sealed partial class MainWindow : Window
 
     [DllImport("comctl32.dll", SetLastError = true)]
     private static extern bool RemoveWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
 
     public static MainWindow? CurrentWindow { get; private set; }
 
@@ -188,6 +196,7 @@ public sealed partial class MainWindow : Window
         {
             DispatcherQueue.TryEnqueue(() => NavigateTo(target));
         };
+        _statsViewModel = new StatsViewModel(_repo, _coverCache, _config);
 
         // 4. Initialize System Tray & Subclass WndProc
         InitializeSystemTray();
@@ -286,7 +295,8 @@ public sealed partial class MainWindow : Window
                     _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
                 }
 
-                AppLog.Info("[窗口] 已隐藏（保留页面，后台刷新可安全更新）");
+                TrimMemoryWorkingSet();
+                AppLog.Info("[窗口] 已隐藏并裁剪工作集（纯后台低占用运行）");
             };
 
             // 切回窗口时顺手检查一次 Notion 侧的删除（节流 60 秒），
@@ -327,6 +337,7 @@ public sealed partial class MainWindow : Window
                 if (_historyPage != null) await _historyPage.RefreshAsync();
                 if (_pendingPage != null) await _pendingPage.RefreshAsync();
                 if (_mappingsPage != null) await _mappingsPage.RefreshAsync();
+                if (_statsViewModel != null && _currentNav == "Stats") await _statsViewModel.RefreshDataAsync();
             }
         }
         catch
@@ -357,6 +368,8 @@ public sealed partial class MainWindow : Window
                 var hasContent = ContentFrame.Content is not null;
                 AppLog.Info($"[托盘] 恢复界面开始（有内容={hasContent} _currentNav=\"{_currentNav}\" _navToRestore=\"{_navToRestore}\"）");
 
+                _homeViewModel.ResumeTimers();
+
                 // ⚠️ 判断依据是**内容是否真的没了**，不是 _currentNav。
                 // _currentNav 只表示"上次导航到哪"，内容被释放之后它可能仍留着旧值，
                 // 拿它当条件就会跳过重建、界面白白空着（2026-09-19 的白屏就是这么来的）。
@@ -366,6 +379,11 @@ public sealed partial class MainWindow : Window
                     AppLog.Info($"[托盘] 内容已释放，重建页面：{tag}");
                     NavigateTo(tag);
                 }
+                else if (_currentNav == "Home")
+                {
+                    _ = _homeViewModel.RefreshAllDataAsync();
+                }
+
                 AppLog.Info("[托盘] 恢复界面结束");
             });
         };
@@ -373,6 +391,46 @@ public sealed partial class MainWindow : Window
         // Subclass window procedure to receive WM_TRAYICON notifications
         _subclassProc = new SubclassProc(WndProc);
         SetWindowSubclass(_hwnd, _subclassProc, (UIntPtr)101, UIntPtr.Zero);
+    }
+
+    /// <summary>
+    /// 当窗口关闭收进托盘时调用：清空临时解码图片缓存、通知 GC 全量回收并裁剪工作集，
+    /// 确保后台纯记录时长时常驻物理内存处于极低水平（前后端分离设计：托盘低占用）。
+    /// </summary>
+    public void TrimMemoryWorkingSet()
+    {
+        try
+        {
+            // 1. 暂停首页非必要的 1 秒 UI 倒计时轮询，避免窗口隐藏期间后台持续触发 UI 布局运算
+            _homeViewModel.PauseTimers();
+
+            // 2. 清除已解码的本地图片缓存（位图缓存是占用内存的大头）
+            Converters.StringToImageSourceConverter.ClearLocalImageCache();
+
+            // 3. 驱动托管垃圾回收
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+
+            // 4. 将物理工作集交还操作系统（EmptyWorkingSet）
+            SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
+
+            AppLog.Info("[内存] 托盘低占用模式生效：工作集已裁剪，位图缓存已清空");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[内存] 工作集裁剪异常: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 开机自启动静默启动：首帧激活确保 WinUI 3 宿主就绪后立即隐藏并裁剪工作集。
+    /// </summary>
+    public void StartMinimized()
+    {
+        Activate();
+        _appWindow?.Hide();
+        TrimMemoryWorkingSet();
     }
 
     private IntPtr WndProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, UIntPtr dwRefData)
@@ -414,6 +472,13 @@ public sealed partial class MainWindow : Window
             if (!string.IsNullOrEmpty(gameDb)) _config.GameDatabaseId = gameDb.Trim();
             if (!string.IsNullOrEmpty(dailyDb)) _config.DailyDatabaseId = dailyDb.Trim();
 
+            var cutoffStr = await _repo.GetSettingAsync("daily_cutoff_hour");
+            if (int.TryParse(cutoffStr, out var cutoffVal))
+            {
+                _config.DailyCutoffHour = AccountingDateHelper.NormalizeCutoffHour(cutoffVal);
+                _sessionManager.DailyCutoffHour = _config.DailyCutoffHour;
+            }
+
             if (_config.IsNotionConfigured)
             {
                 _ = Task.Run(async () =>
@@ -443,7 +508,11 @@ public sealed partial class MainWindow : Window
             {
                 if (g.Status != "ignored" && !string.IsNullOrWhiteSpace(g.ExecutablePath))
                 {
-                    _gameLibrary.AddManualGame(g.Name, g.ExecutablePath);
+                    _gameLibrary.RegisterKnownGame(
+                        string.IsNullOrWhiteSpace(g.Platform) ? "manual" : g.Platform,
+                        string.IsNullOrWhiteSpace(g.PlatformId) ? g.Id.ToString() : g.PlatformId,
+                        g.Name,
+                        g.ExecutablePath);
                 }
             }
         }
@@ -474,45 +543,40 @@ public sealed partial class MainWindow : Window
         await UpdatePendingBadgeAsync();
         if (_trayService != null) await _trayService.RefreshStateAsync();
 
-        // Start background 5s process monitor loop
+        // 监听游戏会话结束：游戏退出时自动同步到 Notion（后台空转周期同步已按需求取消）
+        _sessionManager.SessionEnded += (s, session) =>
+        {
+            if (_config.IsNotionConfigured)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(500); // 确保本地落库完成
+                        await _syncService.SyncPendingDailyRecordsAsync();
+                        await _syncService.RefreshDailyTitlesFromMasterAsync();
+                        await _homeViewModel.RefreshAllDataAsync();
+                        if (_trayService != null) await _trayService.RefreshStateAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"[同步] 游戏退出后自动同步失败: {ex.Message}");
+                    }
+                });
+            }
+        };
+
+        // Start background 5s process monitor loop (本地进程监控不受任何影响)
         _monitorCts = new CancellationTokenSource();
         _ = Task.Run(() => MonitorLoopAsync(_monitorCts.Token));
-
-        // Start background periodic Notion sync loop (every 15 min)
-        _ = Task.Run(() => PeriodicSyncLoopAsync(_monitorCts.Token));
     }
 
-    private async Task PeriodicSyncLoopAsync(CancellationToken ct)
+    public void UpdateDailyCutoffHour(int cutoffHour)
     {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromMinutes(Math.Max(1, _config.SyncIntervalMinutes)), ct);
-                if (_config.IsNotionConfigured)
-                {
-                    // 周期内也刷新总表目录，否则运行期间新加到 Notion 的游戏永远不会被关联
-                    await _syncService.RefreshGameCatalogCacheAsync();
-                    await _syncService.ReconcileNotionDeletionsAsync();
-                    await _syncService.AutoLinkGamesFromCatalogAsync();
-                    await _syncService.PullDailyRecordsFromNotionAsync();
-                    await _syncService.BackfillRelationsAsync();
-                    await _syncService.SyncPendingDailyRecordsAsync();
-                    // 总表改名的回刷：拉取只同步时长，不会碰标题，所以每轮都要补这一下。
-                    await _syncService.RefreshDailyTitlesFromMasterAsync();
-                    _ = _coverCache.EnsureLibraryCoversAsync(_repo);
-                    await _homeViewModel.RefreshAllDataAsync();
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch
-            {
-                // Silent tolerance in background periodic sync loop
-            }
-        }
+        _config.DailyCutoffHour = AccountingDateHelper.NormalizeCutoffHour(cutoffHour);
+        _sessionManager.DailyCutoffHour = _config.DailyCutoffHour;
+        _ = _homeViewModel.RefreshAllDataAsync();
+        if (_trayService != null) _ = _trayService.RefreshStateAsync();
     }
 
     private async Task MonitorLoopAsync(CancellationToken ct)
@@ -551,7 +615,7 @@ public sealed partial class MainWindow : Window
                                 proc.ProcessName + ".exe",
                                 proc.ExecutablePath
                             );
-                            try { _gameLibrary.AddManualGame(existing.Name, proc.ExecutablePath); } catch { }
+                            try { _gameLibrary.RegisterKnownGame(identity.Platform, identity.PlatformId, existing.Name, proc.ExecutablePath); } catch { }
                         }
                     }
 
@@ -663,31 +727,37 @@ public sealed partial class MainWindow : Window
 
         NavHomeBtn.Background = tag == "Home" ? activeBrush : transparent;
         NavHomeIndicator.Visibility = tag == "Home" ? Visibility.Visible : Visibility.Collapsed;
-        NavHomeIcon.Foreground = tag == "Home" ? accentBrush : textSecondary;
+        NavHomePath.Stroke = tag == "Home" ? accentBrush : textSecondary;
         NavHomeText.Foreground = tag == "Home" ? textPrimary : textSecondary;
         NavHomeText.FontWeight = tag == "Home" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
 
         NavHistoryBtn.Background = tag == "History" ? activeBrush : transparent;
         NavHistoryIndicator.Visibility = tag == "History" ? Visibility.Visible : Visibility.Collapsed;
-        NavHistoryIcon.Foreground = tag == "History" ? accentBrush : textSecondary;
+        NavHistoryPath.Stroke = tag == "History" ? accentBrush : textSecondary;
         NavHistoryText.Foreground = tag == "History" ? textPrimary : textSecondary;
         NavHistoryText.FontWeight = tag == "History" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
 
+        NavStatsBtn.Background = tag == "Stats" ? activeBrush : transparent;
+        NavStatsIndicator.Visibility = tag == "Stats" ? Visibility.Visible : Visibility.Collapsed;
+        NavStatsPath.Stroke = tag == "Stats" ? accentBrush : textSecondary;
+        NavStatsText.Foreground = tag == "Stats" ? textPrimary : textSecondary;
+        NavStatsText.FontWeight = tag == "Stats" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+
         NavPendingBtn.Background = tag == "Pending" ? activeBrush : transparent;
         NavPendingIndicator.Visibility = tag == "Pending" ? Visibility.Visible : Visibility.Collapsed;
-        NavPendingIcon.Foreground = tag == "Pending" ? accentBrush : textSecondary;
+        NavPendingPath.Stroke = tag == "Pending" ? accentBrush : textSecondary;
         NavPendingText.Foreground = tag == "Pending" ? textPrimary : textSecondary;
         NavPendingText.FontWeight = tag == "Pending" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
 
         NavMappingsBtn.Background = tag == "Mappings" ? activeBrush : transparent;
         NavMappingsIndicator.Visibility = tag == "Mappings" ? Visibility.Visible : Visibility.Collapsed;
-        NavMappingsIcon.Foreground = tag == "Mappings" ? accentBrush : textSecondary;
+        NavMappingsPath.Stroke = tag == "Mappings" ? accentBrush : textSecondary;
         NavMappingsText.Foreground = tag == "Mappings" ? textPrimary : textSecondary;
         NavMappingsText.FontWeight = tag == "Mappings" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
 
         NavSettingsBtn.Background = tag == "Settings" ? activeBrush : transparent;
         NavSettingsIndicator.Visibility = tag == "Settings" ? Visibility.Visible : Visibility.Collapsed;
-        NavSettingsIcon.Foreground = tag == "Settings" ? accentBrush : textSecondary;
+        NavSettingsPath.Stroke = tag == "Settings" ? accentBrush : textSecondary;
         NavSettingsText.Foreground = tag == "Settings" ? textPrimary : textSecondary;
         NavSettingsText.FontWeight = tag == "Settings" ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
     }
@@ -725,6 +795,13 @@ public sealed partial class MainWindow : Window
                     ContentFrame.Content = _historyPage;
                 }
                 _ = _historyPage?.RefreshAsync();
+                break;
+            case "Stats":
+                AppLog.Info("[导航] 构建 StatsPage…");
+                _statsPage ??= new StatsPage { ViewModel = _statsViewModel! };
+                ContentFrame.Content = _statsPage;
+                _ = _statsViewModel!.RefreshDataAsync();
+                AppLog.Info("[导航] 完成 → Stats");
                 break;
             case "Pending":
                 if (_pendingPage == null)
@@ -827,6 +904,7 @@ public sealed partial class MainWindow : Window
 
     private void OnNavHomeClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("Home");
     private void OnNavHistoryClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("History");
+    private void OnNavStatsClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("Stats");
     private void OnNavPendingClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("Pending");
     private void OnNavMappingsClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("Mappings");
     private void OnNavSettingsClicked(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e) => NavigateTo("Settings");

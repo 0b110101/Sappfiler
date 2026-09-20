@@ -71,12 +71,23 @@ public record GamePlayProgress(
 
 public static class DailyAggregator
 {
-    /// <summary>汇总时长统一以小时显示（1 位小数）：41m → 0.7h，135m → 2.3h。Hero 实时秒表仍用 HH:MM:SS。</summary>
-    public static string FormatDuration(int minutes)
+    /// <summary>
+    /// 卡片与列表展示用的时分格式化：例如 120m → 2h，125m → 2h 05m，132m → 2h 12m，45m → 0h 45m，0m → 0h。
+    /// 若刚好为整数小时，则省略分钟部分（如 2h 代替 2h 00m）。
+    /// </summary>
+    public static string FormatHoursMinutes(int minutes)
     {
         if (minutes <= 0) return "0h";
-        return $"{Math.Round(minutes / 60.0, 1)}h";
+        int h = minutes / 60;
+        int m = minutes % 60;
+        if (h > 0 && m == 0) return $"{h}h";
+        return $"{h}h {m:D2}m";
     }
+
+    /// <summary>界面汇总时长统一以 Xh YYm（如 2h 05m）优雅展示。</summary>
+    public static string FormatDuration(int minutes)
+        => FormatHoursMinutes(minutes);
+
 
     public static string FormatSeconds(int totalSeconds)
     {

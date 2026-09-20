@@ -6,28 +6,153 @@ namespace GameTimeTracker.App.Views;
 
 public sealed partial class HomePage : Page
 {
-    public HomeViewModel ViewModel { get; set; } = null!;
-    private bool _isDataLoaded;
+    private HomeViewModel _viewModel = null!;
+    public HomeViewModel ViewModel
+    {
+        get => _viewModel;
+        set
+        {
+            _viewModel = value;
+            HookHeroTransitionHandler();
+        }
+    }
+
     private bool _isNarrowLayout;
 
     public HomePage()
     {
         InitializeComponent();
         NavigationCacheMode = NavigationCacheMode.Required;
+        Loaded += (s, e) => HookHeroTransitionHandler();
     }
 
-    protected override async void OnNavigatedTo(NavigationEventArgs e)
+    protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
         if (e.Parameter is HomeViewModel vm)
         {
             ViewModel = vm;
-            if (!_isDataLoaded)
-            {
-                _isDataLoaded = true;
-                await ViewModel.RefreshAllDataAsync();
-            }
         }
+    }
+
+    private void HookHeroTransitionHandler()
+    {
+        if (_viewModel == null) return;
+
+        // 多个正在运行的游戏轮播切换时的平滑横向滑入淡出（丝滑轮播切换动效）
+        _viewModel.HeroTransitionHandler = async (updateAction) =>
+        {
+            try
+            {
+                var tcsOut = new TaskCompletionSource<bool>();
+                var sbOut = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+
+                // 1. 退场动画：旧卡片渐隐微缩 (Opacity 1.0 -> 0.0, Scale 1.0 -> 0.96)
+                var animFadeOut = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 1.0,
+                    To = 0.0,
+                    Duration = TimeSpan.FromMilliseconds(150),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animFadeOut, HeroCardContentGrid);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animFadeOut, "Opacity");
+                sbOut.Children.Add(animFadeOut);
+
+                var animScaleXOut = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 1.0,
+                    To = 0.96,
+                    Duration = TimeSpan.FromMilliseconds(150),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animScaleXOut, HeroCardScale);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animScaleXOut, "ScaleX");
+                sbOut.Children.Add(animScaleXOut);
+
+                var animScaleYOut = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 1.0,
+                    To = 0.96,
+                    Duration = TimeSpan.FromMilliseconds(150),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animScaleYOut, HeroCardScale);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animScaleYOut, "ScaleY");
+                sbOut.Children.Add(animScaleYOut);
+
+                sbOut.Completed += (s, ev) => tcsOut.TrySetResult(true);
+                sbOut.Begin();
+                await tcsOut.Task;
+
+                // 2. 切换数据
+                await updateAction();
+
+                // 3. 进场动画：新卡片从 0.98 微放至 1.0 并渐显 (Opacity 0.0 -> 1.0, Scale 0.98 -> 1.00)
+                var tcsIn = new TaskCompletionSource<bool>();
+                var sbIn = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+
+                var animFadeIn = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 0.0,
+                    To = 1.0,
+                    Duration = TimeSpan.FromMilliseconds(180),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animFadeIn, HeroCardContentGrid);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animFadeIn, "Opacity");
+                sbIn.Children.Add(animFadeIn);
+
+                var animScaleXIn = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 0.98,
+                    To = 1.0,
+                    Duration = TimeSpan.FromMilliseconds(180),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animScaleXIn, HeroCardScale);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animScaleXIn, "ScaleX");
+                sbIn.Children.Add(animScaleXIn);
+
+                var animScaleYIn = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+                {
+                    From = 0.98,
+                    To = 1.0,
+                    Duration = TimeSpan.FromMilliseconds(180),
+                    EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+                    EnableDependentAnimation = true
+                };
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animScaleYIn, HeroCardScale);
+                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animScaleYIn, "ScaleY");
+                sbIn.Children.Add(animScaleYIn);
+
+                sbIn.Completed += (s, ev) => tcsIn.TrySetResult(true);
+                sbIn.Begin();
+                await tcsIn.Task;
+            }
+            catch
+            {
+                await updateAction();
+                HeroCardContentGrid.Opacity = 1.0;
+                HeroCardScale.ScaleX = 1.0;
+                HeroCardScale.ScaleY = 1.0;
+            }
+        };
+    }
+
+    private void OnHeroCardPointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (ViewModel != null) ViewModel.IsHeroCarouselPaused = true;
+    }
+
+    private void OnHeroCardPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (ViewModel != null) ViewModel.IsHeroCarouselPaused = false;
     }
 
     /// <summary>

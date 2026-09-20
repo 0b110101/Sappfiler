@@ -48,6 +48,7 @@ internal sealed class FakeNotionClient : INotionClient
     /// <summary>每次 CreateDailyRecordAsync 收到的 page icon，用于断言"顺带设了总表图标"。</summary>
     public List<string?> CreatedDailyRecordIcons { get; } = new();
 
+    /// <summary>只有 writeDuration=true 时才登记 —— 用来断言"这条路径不许改 Notion 上的时长"。</summary>
     public List<(string PageId, int DurationMinutes)> UpdatedPages { get; } = new();
 
     /// <summary>每次 UpdateDailyRecordAsync 收到的**游戏名**（不是拼好的标题），用于断言"用的是总表名"。</summary>
@@ -58,11 +59,32 @@ internal sealed class FakeNotionClient : INotionClient
 
     public Task<bool> UpdateDailyRecordAsync(
         string pageId, int durationMinutes, string? gamePageId, string? gameName = null,
-        string? iconUrl = null)
+        string? iconUrl = null, bool writeDuration = false, string? titleOverride = null)
     {
-        UpdatedPages.Add((pageId, durationMinutes));
-        UpdatedTitles.Add(gameName);
+        if (writeDuration)
+        {
+            UpdatedPages.Add((pageId, durationMinutes));
+        }
+        UpdatedTitles.Add(titleOverride ?? gameName);
         UpdatedIcons.Add(iconUrl);
+        return Task.FromResult(true);
+    }
+
+    public List<(string PageId, string Title)> TitleOnlyUpdates { get; } = new();
+
+    public Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null)
+    {
+        TitleOnlyUpdates.Add((pageId, title));
+        UpdatedTitles.Add(title);
+        UpdatedIcons.Add(iconUrl);
+        return Task.FromResult(true);
+    }
+
+    public List<(string PageId, string Status)> BindingStatusUpdates { get; } = new();
+
+    public Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status)
+    {
+        BindingStatusUpdates.Add((pageId, status));
         return Task.FromResult(true);
     }
 
@@ -81,6 +103,19 @@ internal sealed class FakeNotionClient : INotionClient
     {
         if (FailArchive) throw new InvalidOperationException("模拟 Notion 归档失败");
         ArchivedPageIds.Add(pageId);
+        return Task.FromResult(true);
+    }
+
+    /// <summary>
+    /// 用于测试二次确权：即使不在全量 Query 列表中，只要在此集合中就表示 Notion 侧页面依然存在（未删除）。
+    /// </summary>
+    public HashSet<string> ActiveExistingPageIds { get; } = new();
+
+    public Task<bool> IsPageDeletedAsync(string pageId)
+    {
+        if (ActiveExistingPageIds.Contains(pageId)) return Task.FromResult(false);
+        if (DailyRecords.Any(d => d.PageId == pageId)) return Task.FromResult(false);
+        if (GameMasterItems.Any(m => m.PageId == pageId)) return Task.FromResult(false);
         return Task.FromResult(true);
     }
 }

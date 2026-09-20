@@ -196,7 +196,7 @@ public sealed partial class HeatmapControl : UserControl
             {
                 border.Background = GetThemeBrush(cell.Level, this);
 
-                if (cell.Level == 0)
+                if (cell.Level == 0 && !IsDarkContext(this))
                 {
                     border.BorderBrush = GetLevel0BorderBrush(this);
                     border.BorderThickness = new Thickness(1);
@@ -206,7 +206,7 @@ public sealed partial class HeatmapControl : UserControl
                     border.BorderThickness = new Thickness(0);
                 }
 
-                if (cell.IsToday)
+                if (cell.IsToday && !IsDarkContext(this))
                 {
                     border.BorderBrush = GetAccentBlueBrush(this);
                     border.BorderThickness = new Thickness(1.5);
@@ -338,11 +338,11 @@ public sealed partial class HeatmapControl : UserControl
 
     private static Brush GetDarkFallbackBrush(int level) => level switch
     {
-        1 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x1E, 0x20, 0x40)),
-        2 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x33, 0x33, 0xAA)),
-        3 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x66, 0x66, 0xCC)),
-        4 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x99, 0x99, 0xDD)),
+        1 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x3C, 0x3E, 0x5F)),
+        2 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x60, 0x61, 0x87)),
+        3 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x84, 0x85, 0xAF)),
+        4 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xA8, 0xA8, 0xD7)),
         5 => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xCC, 0xCC, 0xFF)),
-        _ => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x26, 0x2B, 0x3A))
+        _ => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x2A, 0x2D, 0x45))
     };
 }

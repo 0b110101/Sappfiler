@@ -2,6 +2,7 @@ using FluentAssertions;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Infrastructure.Database;
 using GameTimeTracker.Infrastructure.Notion;
+using Dapper;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -287,11 +288,15 @@ public class NotionPullImportTests : IDisposable
 
         refreshed.Should().Be(1, "总表改名后已同步的记录要被回刷");
 
-        // 传出去的必须是**游戏名**（"新名字"），不是拼好的完整标题。
-        // 传完整标题的话 client 内部会再拼一次，变成「新名字 · 0.7 h · 0.7 h」——
-        // 这个断言就是为了钉住这个曾经真实发生过的 bug。
-        _client.UpdatedTitles.Should().ContainSingle()
-            .Which.Should().Be("新名字", "回刷要传总表里的游戏名，标题由 client 统一拼装");
+        // 🚨 回刷**只许改呈现**（标题 / 图标），绝不许写「单次时长」。
+        //    Notion 上的历史数值是权威，拿本地缓存覆盖它就是毁灭性错误 ——
+        //    2026-09-19 一次运行改写了 QA 的 786 条记录（「2.2h」被改成了本地那份值）。
+        _client.UpdatedPages.Should().BeEmpty("回刷绝不能写「单次时长」属性");
+
+        // 走的是"只写标题"的通道
+        _client.TitleOnlyUpdates.Should().ContainSingle()
+            .Which.Item2.Should().Be("新名字 · 0.7 h",
+                "只把游戏名换成总表的名字，原标题里的时长文本原样保留（不能用本地值重拼）");
         _client.UpdatedIcons.Should().ContainSingle()
             .Which.Should().Be("https://example.com/b.png", "换过的图标要一起写下去");
     }
@@ -352,6 +357,10 @@ public class NotionPullImportTests : IDisposable
         var after = (await _repo.GetDailySummariesByDateAsync("2026-09-28")).Single();
         after.NotionTitle.Should().Be("老库游戏 · 0.7 h", "回刷后要落标题快照，后续轮次才会变成空操作");
         after.NotionIconUrl.Should().Be("https://example.com/d.png", "图标快照必须一起落库，否则下轮又因图标不一致再 PATCH");
+
+        // 🚨 即便"没有原标题可参考、只能按本地时长拼标题"这种情况，
+        //    也**不能**把时长写进 Notion 的数值属性。
+        _client.UpdatedPages.Should().BeEmpty("回刷绝不能写「单次时长」属性");
 
         // 第二轮应当无事可做
         _client.UpdatedPages.Clear();
@@ -450,4 +459,351 @@ public class NotionPullImportTests : IDisposable
         _client.UpdatedPages.Should().ContainSingle()
             .Which.DurationMinutes.Should().Be(45, "推上去的是新时长");
     }
+
+    // ================= 同一天多个条目（跨日游玩未改日期）与回填防篡改保障 =================
+
+    [Fact]
+    public async Task Pull_WhenMultipleEntriesOnSameDateForSameGame_DoesNotOverwritePageIdNorCrash()
+    {
+        // 🚨 2026-09-19 QA 事故真实复现场景：
+        // 跨日游玩忘记改前一天日期，导致 Notion 里同一天同一个游戏有两个条目（一条 2.2h，一条 2.4h）。
+        // 本地 daily_summary 受 UNIQUE(date, game_id) 限制，绝不能让后一条直接把前一条的 notion_page_id 冲掉，
+        // 否则两边 pageId 串号，回刷时会把 2.4h 覆盖写到 2.2h 的页面上。
+        var item1 = new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-1",
+            Date = "2026-09-17",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 2.2h",
+            DurationMinutes = 132,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim"
+        };
+        var item2 = new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-2",
+            Date = "2026-09-17",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 · 2.4 h",
+            DurationMinutes = 144,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim"
+        };
+
+        // 第一条入库
+        var id1 = await _repo.SyncDailyRecordFromNotionAsync(item1);
+        id1.Should().BeGreaterThan(0);
+
+        var record1 = (await _repo.GetDailySummariesByDateAsync("2026-09-17")).Single();
+        record1.NotionPageId.Should().Be("page-valheim-1");
+        record1.NotionTitle.Should().Be("英灵神殿 2.2h", "新入库时应记录原始标题快照");
+
+        // 第二条同天入库：不应抛 UNIQUE constraint 异常，也不应冲掉已绑定的 pageId
+        var id2 = await _repo.SyncDailyRecordFromNotionAsync(item2);
+        id2.Should().Be(id1);
+
+        var recordAfterBoth = (await _repo.GetDailySummariesByDateAsync("2026-09-17")).Single();
+        recordAfterBoth.NotionPageId.Should().Be("page-valheim-1", "绝不能被第二条冲掉 pageId 导致串号");
+        recordAfterBoth.DurationMinutes.Should().Be(132, "遇到同日重复页面时应跳过叠加，保持已收录的权威时长，杜绝多轮同步循环累加");
+    }
+
+    [Fact]
+    public async Task BackfillRelations_DoesNotOverwriteRemoteDuration_AndPreservesOriginalSuffix()
+    {
+        // 🚨 回填总表关系时，只改 relation / 状态 / 标题呈现，绝不改 Notion 上的单次时长数值
+        _client.GameMasterItems.Add(new NotionGameCatalogItem
+        {
+            PageId = "master-valheim-bf", Name = "英灵神殿", IconType = "external", IconUrl = "https://example.com/v.png"
+        });
+        await _sync.RefreshGameCatalogCacheAsync();
+
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("manual", "manual:valheim-bf", "英灵神殿", "valheim.exe", @"C:\valheim.exe"));
+
+        // 本地存着 144 分钟（2.4h），但 Notion 上的标题是带 2.2h 的手写记录
+        var inserted = await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-bf",
+            Date = "2026-09-16",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 2.2h",
+            DurationMinutes = 132,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = null // 尚未关联总表
+        });
+
+        // 将该记录状态置为 unmapped，游戏绑定总表，触发回填
+        await _repo.UpdateDailySyncStatusAsync(inserted, "unmapped");
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-valheim-bf");
+
+        await _sync.BackfillRelationsAsync();
+
+        // 断言：绝不能写「单次时长」数值属性
+        _client.UpdatedPages.Should().BeEmpty("回填 relation 时绝不允许写 Notion 的单次时长");
+
+        // 断言：写出的标题保留了原始的时长后缀 2.2h，没有用本地的 2.4h 重拼
+        _client.UpdatedTitles.Should().ContainSingle()
+            .Which.Should().Be("英灵神殿 2.2h", "回填标题必须保留原标题中的时长文本");
+    }
+
+    [Fact]
+    public async Task Pull_WhenMigratingGhostGameRecordToMasterGameThatAlreadyHasRecordOnSameDate_MergesSafelyWithoutUniqueCrash()
+    {
+        // 🚨 2026-09-19 QA 最新报错真实复现：
+        // 幽灵记录要迁移到正规游戏，但正规游戏当天已有一条汇总（例如 Steam 玩过或多条合并）。
+        // 旧代码盲目 UPDATE daily_summary SET game_id = targetGameId，直接触发：
+        // SQLite Error 19: 'UNIQUE constraint failed: daily_summary.date, daily_summary.game_id'.
+        
+        // 1. 创建正规游戏并关联总表
+        var masterGame = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "892970", "英灵神殿", "valheim.exe", @"C:\valheim.exe"));
+        await _repo.UpdateGameNotionIdAsync(masterGame.Id, "master-valheim-mig");
+
+        // 2. 正规游戏在当天已有一条记录（60 分钟）
+        await _repo.AddSessionDurationToDailyAsync("2026-09-17", masterGame.Id, 60 * 60);
+
+        // 3. 历史上存在一个幽灵游戏（如「英灵神殿2.4h」），且它也在当天有一条记录（pageId = page-ghost-1）
+        var ghostGame = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("manual", "manual:valheim-ghost", "英灵神殿2.4h", "", ""));
+        var ghostRecordId = await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-ghost-1",
+            Date = "2026-09-17",
+            GameTitle = "英灵神殿2.4h",
+            RawTitle = "英灵神殿2.4h",
+            DurationMinutes = 144,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = null // 最初未关联
+        });
+
+        // 4. QA 在 Notion 关联了总表，重新拉取这条 page-ghost-1 记录（此时带上了 GameMasterPageId）
+        var updateItem = new NotionDailyRecordItem
+        {
+            PageId = "page-ghost-1",
+            Date = "2026-09-17",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 · 2.4 h",
+            DurationMinutes = 144,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim-mig" // 关联到正规游戏
+        };
+
+        // 执行同步：绝不能报 SQLite Error 19，且两行合并为一行
+        var finalId = await _repo.SyncDailyRecordFromNotionAsync(updateItem);
+        finalId.Should().BeGreaterThan(0);
+
+        // 当天应该只有一条英灵神殿的记录，且时长取较大值（144分钟）
+        var summaries = await _repo.GetDailySummariesByDateAsync("2026-09-17");
+        summaries.Should().ContainSingle();
+        summaries.Single().GameId.Should().Be(masterGame.Id);
+        summaries.Single().DurationMinutes.Should().Be(144);
+    }
+
+    [Fact]
+    public async Task SyncPendingDailyRecords_WhenHistoricalRecordHasPendingStatus_DoesNotCallUpdateDailyRecord_AndMarksSyncedInDb()
+    {
+        // 🚨 核心守护测试：历史日期（如 2025-01-03）无论何种原因在本地变为 pending，
+        // 同步时绝不能调用 UpdateDailyRecordAsync 去改写 Notion 上的单次时长数值，
+        // 并应直接在本地自愈为 synced。
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("manual", "manual:sons-forest", "森林之子", "forest.exe", @"C:\forest.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-forest");
+
+        // 插入一条 2025-01-03 的历史记录，模拟异常带有 pending 状态
+        var summaryId = await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-forest-history",
+            Date = "2025-01-03",
+            GameTitle = "森林之子",
+            RawTitle = "森林之子 · 6.3 h",
+            DurationMinutes = 378,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-forest"
+        });
+
+        // 模拟本地因某种原因被标记为 pending
+        using (var conn = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await conn.ExecuteAsync("UPDATE daily_summary SET sync_status = 'pending' WHERE id = @summaryId;", new { summaryId });
+        }
+
+        // 执行推送同步
+        await _sync.SyncPendingDailyRecordsAsync();
+
+        // 断言：UpdateDailyRecordAsync 绝不能被调用（UpdatedPages 为空）
+        _client.UpdatedPages.Should().BeEmpty("历史记录绝不允许向 Notion 回推写时长");
+
+        // 断言：本地状态已自动自愈为 synced
+        var records = await _repo.GetDailySummariesByDateAsync("2025-01-03");
+        records.Single().SyncStatus.Should().Be("synced", "历史记录应直接在本地自愈为 synced");
+    }
+
+    [Fact]
+    public async Task SyncDailyRecordFromNotion_WhenHistoricalRecord_NeverMarksPendingOrLocalAhead_AlwaysTakesRemoteValue()
+    {
+        // 🚨 核心守护测试：如果 QA 在 Notion 上手动把时长修改回 6.3h（378分钟），
+        // 即使本地 SQLite 原本因 Bug 存了膨胀的时长（如 756分钟），
+        // 拉取时也必须 100% 尊崇 Notion 权威数值，将其重置为 378 分钟，且状态置为 synced（绝不 localAhead）
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("manual", "manual:sons-forest-2", "森林之子", "forest.exe", @"C:\forest.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-forest-2");
+
+        var summaryId = await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-forest-history-2",
+            Date = "2025-01-03",
+            GameTitle = "森林之子",
+            RawTitle = "森林之子 · 12.6 h",
+            DurationMinutes = 756,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-forest-2"
+        });
+
+        // 模拟 QA 在 Notion 将其改回 6.3h（378分钟）后重新拉取
+        await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-forest-history-2",
+            Date = "2025-01-03",
+            GameTitle = "森林之子",
+            RawTitle = "森林之子 · 6.3 h",
+            DurationMinutes = 378,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-forest-2"
+        });
+
+        var records = await _repo.GetDailySummariesByDateAsync("2025-01-03");
+        var record = records.Single();
+        record.DurationMinutes.Should().Be(378, "历史记录应完全尊崇 Notion 远端权威数值，绝不能用 Math.Max 取本地旧值");
+        record.SyncStatus.Should().Be("synced", "历史记录绝不能被判定为 localAhead 或 pending");
+    }
+
+    [Fact]
+    public async Task SyncDailyRecordFromNotion_WhenUserChangesDateInNotion_UpdatesDateInDatabase()
+    {
+        // 🧪 测试：用户在 Notion 中将一条记录的日期由 2026-09-16 改为 2026-09-17
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "123456", "英灵神殿", "valheim.exe", @"C:\valheim.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-valheim");
+
+        // 首次拉取：2026-09-16
+        await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-1",
+            Date = "2026-09-16",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 · 2.2 h",
+            DurationMinutes = 132,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim"
+        });
+
+        (await _repo.GetDailySummariesByDateAsync("2026-09-16")).Should().HaveCount(1);
+        (await _repo.GetDailySummariesByDateAsync("2026-09-17")).Should().BeEmpty();
+
+        // 用户在 Notion 将日期修改为 2026-09-17
+        await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-1",
+            Date = "2026-09-17",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 · 2.4 h",
+            DurationMinutes = 144,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim"
+        });
+
+        // 验证：旧日期的记录已移动至新日期，旧日期应为空，新日期应有且仅有1条
+        (await _repo.GetDailySummariesByDateAsync("2026-09-16")).Should().BeEmpty("旧日期的记录应已移走或删除");
+        var newRecords = await _repo.GetDailySummariesByDateAsync("2026-09-17");
+        newRecords.Should().HaveCount(1);
+        newRecords[0].Date.Should().Be("2026-09-17");
+        newRecords[0].DurationMinutes.Should().Be(144);
+        newRecords[0].NotionPageId.Should().Be("page-valheim-1");
+    }
+
+    [Fact]
+    public async Task SyncDailyRecordFromNotion_WhenUserChangesDateAndTargetSlotAlreadyExists_MergesSafelyWithoutUniqueViolation()
+    {
+        // 🧪 核心安全测试：用户在 Notion 将日期改为 2026-09-17，但本地 2026-09-17 本来就有一条该游戏的未绑定或老记录
+        // 必须执行安全合并更新，且删除旧日期的孤儿行，绝不能触发 UNIQUE constraint failed: daily_summary.date, daily_summary.game_id 崩溃
+        var game = await _repo.GetOrCreateGameAsync(
+            new GameIdentity("steam", "123456", "英灵神殿", "valheim.exe", @"C:\valheim.exe"));
+        await _repo.UpdateGameNotionIdAsync(game.Id, "master-valheim");
+
+        // 1. 在 2026-09-16 存在 page-valheim-old
+        await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+        {
+            PageId = "page-valheim-old",
+            Date = "2026-09-16",
+            GameTitle = "英灵神殿",
+            RawTitle = "英灵神殿 · 2.2 h",
+            DurationMinutes = 132,
+            DurationUnitIsMinutes = false,
+            GameMasterPageId = "master-valheim"
+        });
+
+        // 2. 本地在 2026-09-17 已存在一条记录（例如本地游玩记录，尚未绑定 pageId）
+        using (var conn = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await conn.ExecuteAsync(@"
+                INSERT INTO daily_summary (game_id, date, duration_seconds, duration_minutes, session_count, sync_status)
+                VALUES (@GameId, @Date, 1800, 30, 1, 'pending');",
+                new { GameId = game.Id, Date = "2026-09-17" });
+        }
+
+        // 确认 16 日和 17 日各有一条
+        (await _repo.GetDailySummariesByDateAsync("2026-09-16")).Should().HaveCount(1);
+        (await _repo.GetDailySummariesByDateAsync("2026-09-17")).Should().HaveCount(1);
+
+        // 3. 用户在 Notion 把 page-valheim-old 的日期改为 2026-09-17，触发碰撞
+        Func<Task> act = async () =>
+        {
+            await _repo.SyncDailyRecordFromNotionAsync(new NotionDailyRecordItem
+            {
+                PageId = "page-valheim-old",
+                Date = "2026-09-17",
+                GameTitle = "英灵神殿",
+                RawTitle = "英灵神殿 · 2.4 h",
+                DurationMinutes = 144,
+                DurationUnitIsMinutes = false,
+                GameMasterPageId = "master-valheim"
+            });
+        };
+
+        // 绝不允许抛出任何异常（特别是 SQLite Error 19 UNIQUE 约束异常）
+        await act.Should().NotThrowAsync();
+
+        // 验证：16 日孤儿行被删除，17 日槽位正确合并为 authoritative 的 Notion 数据
+        (await _repo.GetDailySummariesByDateAsync("2026-09-16")).Should().BeEmpty("16日的旧孤儿行必须被删除");
+        var records17 = await _repo.GetDailySummariesByDateAsync("2026-09-17");
+        records17.Should().HaveCount(1, "17日应只有合并后的一条记录");
+        records17[0].NotionPageId.Should().Be("page-valheim-old");
+        records17[0].DurationMinutes.Should().Be(144);
+    }
+
+    [Fact]
+    public async Task BackfillRelations_WhenRemoteRecordIsUnbound_ShouldUpdateBindingStatusToUnbound()
+    {
+        // 模拟远端有一条未关联总表、且尚未设置「绑定状态」的每日记录
+        _client.DailyRecords.Add(new NotionDailyRecordItem
+        {
+            PageId = "daily-unbound-1",
+            Date = "2026-09-18",
+            GameTitle = "独立游戏Demo",
+            DurationMinutes = 60,
+            GameMasterPageId = null,
+            Status = null
+        });
+
+        // 1. 先拉取
+        await _sync.PullDailyRecordsFromNotionAsync();
+
+        // 2. 执行回填链路
+        await _sync.BackfillRelationsAsync();
+
+        // 断言：应当调用 UpdateDailyBindingStatusAsync 将其更新为「未绑定」
+        _client.BindingStatusUpdates.Should().Contain(u => u.PageId == "daily-unbound-1" && u.Status == "未绑定");
+    }
 }
+
+

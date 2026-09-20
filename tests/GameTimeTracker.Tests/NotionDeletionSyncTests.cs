@@ -267,4 +267,27 @@ public class NotionDeletionSyncTests : IDisposable
         // 本地仍按用户意图删除，但失败必须能报出来（不能像以前那样静默吞掉）
         (await _repo.GetDailySummaryByIdAsync(id)).Should().BeNull();
     }
+
+    [Fact]
+    public async Task Reconcile_DoesNotDeleteLocalRecord_WhenNotionSecondaryCheckConfirmsPageExists()
+    {
+        // 模拟 2026-09-19 QA 事故：
+        // 游戏刚结束推送到 Notion，全量 Query 因 Notion 检索延迟未返回该记录，
+        // 但通过二次确权检测到 Notion 页面依然健在，绝不能误删本地记录！
+        var game = await SeedGameAsync("法老马赛克");
+        var mosaicId = await SeedDailyAsync(game.Id, "2026-09-19", 35, "page-pharaoh-mosaic");
+
+        // 远端全量返回空或其它页（模拟延时），不含 page-pharaoh-mosaic
+        _client.DailyRecords.Add(new NotionDailyRecordItem { PageId = "page-other", Date = "2026-09-18" });
+
+        // 但向 Notion 单独查询该 page 时，Notion 确认它存在且未归档
+        _client.ActiveExistingPageIds.Add("page-pharaoh-mosaic");
+
+        var result = await _sync.ReconcileNotionDeletionsAsync();
+
+        result.DeletedDailyRecords.Should().Be(0);
+        var record = await _repo.GetDailySummaryByIdAsync(mosaicId);
+        record.Should().NotBeNull();
+        record!.Date.Should().Be("2026-09-19");
+    }
 }

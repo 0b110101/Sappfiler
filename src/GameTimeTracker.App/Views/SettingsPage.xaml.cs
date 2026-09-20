@@ -1,4 +1,5 @@
-﻿using GameTimeTracker.Core.Interfaces;
+using GameTimeTracker.App.Services;
+using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure.Notion;
@@ -13,7 +14,9 @@ public sealed partial class SettingsPage : Page
     private IDatabaseRepository? _repo;
     private TrackerConfig? _config;
     private INotionClient? _notionClient;
+    private bool _isInitializingAutoStart;
     private bool _isInitializingTheme;
+    private bool _isInitializingCutoff;
 
     public SettingsPage()
     {
@@ -34,16 +37,55 @@ public sealed partial class SettingsPage : Page
             _config = config;
             _notionClient = client;
 
+            _isInitializingAutoStart = true;
+            AutoStartToggle.IsOn = AutoStartHelper.IsAutoStartEnabled();
+            _isInitializingAutoStart = false;
+
             var themeMode = await _repo.GetSettingAsync("theme_mode");
             _isInitializingTheme = true;
             ThemeToggle.IsOn = themeMode == "Dark";
             _isInitializingTheme = false;
+
+            var cutoffStr = await _repo.GetSettingAsync("daily_cutoff_hour");
+            int cutoffHour = int.TryParse(cutoffStr, out var parsedCutoff)
+                ? parsedCutoff
+                : _config.DailyCutoffHour;
+            _isInitializingCutoff = true;
+            SelectCutoffHourInCombo(cutoffHour);
+            _isInitializingCutoff = false;
 
             TokenInput.Password = await _repo.GetSettingAsync("notion_token") ?? _config.NotionToken;
             GameDbInput.Text = await _repo.GetSettingAsync("game_database_id") ?? _config.GameDatabaseId;
             DailyDbInput.Text = await _repo.GetSettingAsync("daily_database_id") ?? _config.DailyDatabaseId;
 
             RefreshStorageUi();
+        }
+    }
+
+    private void SelectCutoffHourInCombo(int hour)
+    {
+        var targetTag = hour.ToString();
+        for (int i = 0; i < CutoffHourCombo.Items.Count; i++)
+        {
+            if (CutoffHourCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == targetTag)
+            {
+                CutoffHourCombo.SelectedIndex = i;
+                return;
+            }
+        }
+        CutoffHourCombo.SelectedIndex = 0; // 默认 24
+    }
+
+    private async void OnCutoffHourChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isInitializingCutoff || _repo == null || _config == null) return;
+
+        if (CutoffHourCombo.SelectedItem is ComboBoxItem selected &&
+            int.TryParse(selected.Tag?.ToString(), out var hour))
+        {
+            _config.DailyCutoffHour = hour;
+            await _repo.SetSettingAsync("daily_cutoff_hour", hour.ToString());
+            MainWindow.CurrentWindow?.UpdateDailyCutoffHour(hour);
         }
     }
 
@@ -56,6 +98,32 @@ public sealed partial class SettingsPage : Page
                    && !string.IsNullOrWhiteSpace(info.InformationalVersion)
             ? info.InformationalVersion.Split('+')[0]
             : asm.GetName().Version?.ToString() ?? "unknown";
+    }
+
+    private async void OnAutoStartToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializingAutoStart || _repo == null) return;
+        var isEnabled = AutoStartToggle.IsOn;
+        var success = AutoStartHelper.SetAutoStart(isEnabled);
+        if (success)
+        {
+            await _repo.SetSettingAsync("auto_start", isEnabled ? "1" : "0");
+            StatusInfoBar.Severity = InfoBarSeverity.Success;
+            StatusInfoBar.Title = isEnabled ? "开机自启已开启" : "开机自启已关闭";
+            StatusInfoBar.Message = isEnabled ? "系统登录后将自动在后台托盘静默启动。" : "已取消开机自启动设置。";
+            StatusInfoBar.IsOpen = true;
+        }
+        else
+        {
+            _isInitializingAutoStart = true;
+            AutoStartToggle.IsOn = !isEnabled;
+            _isInitializingAutoStart = false;
+
+            StatusInfoBar.Severity = InfoBarSeverity.Error;
+            StatusInfoBar.Title = "设置失败";
+            StatusInfoBar.Message = "无法读写注册表开机启动项，请检查系统安全权限。";
+            StatusInfoBar.IsOpen = true;
+        }
     }
 
     private async void OnThemeToggled(object sender, RoutedEventArgs e)

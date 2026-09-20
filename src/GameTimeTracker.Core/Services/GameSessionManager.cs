@@ -13,6 +13,11 @@ public class GameSessionManager
     public event EventHandler<GameSession>? SessionEnded;
     public event EventHandler<GameSession>? SessionHeartbeat;
 
+    /// <summary>
+    /// 跨日结算时间点（整点 24 ~ 30 点，默认 24 = 00:00）。
+    /// </summary>
+    public int DailyCutoffHour { get; set; } = 24;
+
     public GameSessionManager(IDatabaseRepository repo)
     {
         _repo = repo;
@@ -89,28 +94,7 @@ public class GameSessionManager
 
             if (deltaSeconds > 0)
             {
-                // Check if midnight was crossed between lastFlush and now
-                if (lastFlush.Date == now.Date)
-                {
-                    // Same day
-                    await _repo.AddSessionDurationToDailyAsync(now.ToString("yyyy-MM-dd"), session.GameId, deltaSeconds);
-                }
-                else
-                {
-                    // Crossed midnight! Split into yesterday and today
-                    var midnight = now.Date; // 00:00:00 of today
-                    var yesterdayDelta = (int)Math.Max(0, (midnight - lastFlush).TotalSeconds);
-                    var todayDelta = (int)Math.Max(0, (now - midnight).TotalSeconds);
-
-                    if (yesterdayDelta > 0)
-                    {
-                        await _repo.AddSessionDurationToDailyAsync(lastFlush.ToString("yyyy-MM-dd"), session.GameId, yesterdayDelta);
-                    }
-                    if (todayDelta > 0)
-                    {
-                        await _repo.AddSessionDurationToDailyAsync(now.ToString("yyyy-MM-dd"), session.GameId, todayDelta);
-                    }
-                }
+                await FlushDurationToDailyAsync(lastFlush, now, session.GameId, deltaSeconds);
 
                 session.DurationSeconds = totalDuration;
                 session.LastHeartbeat = now;
@@ -145,25 +129,7 @@ public class GameSessionManager
 
             if (deltaSeconds > 0)
             {
-                if (lastFlush.Date == end.Date)
-                {
-                    await _repo.AddSessionDurationToDailyAsync(end.ToString("yyyy-MM-dd"), session.GameId, deltaSeconds);
-                }
-                else
-                {
-                    var midnight = end.Date;
-                    var yesterdayDelta = (int)Math.Max(0, (midnight - lastFlush).TotalSeconds);
-                    var todayDelta = (int)Math.Max(0, (end - midnight).TotalSeconds);
-
-                    if (yesterdayDelta > 0)
-                    {
-                        await _repo.AddSessionDurationToDailyAsync(lastFlush.ToString("yyyy-MM-dd"), session.GameId, yesterdayDelta);
-                    }
-                    if (todayDelta > 0)
-                    {
-                        await _repo.AddSessionDurationToDailyAsync(end.ToString("yyyy-MM-dd"), session.GameId, todayDelta);
-                    }
-                }
+                await FlushDurationToDailyAsync(lastFlush, end, session.GameId, deltaSeconds);
             }
 
             session.EndTime = end;
@@ -213,4 +179,40 @@ public class GameSessionManager
             await EndSessionAsync(pid);
         }
     }
+
+    /// <summary>
+    /// 将本次增量时间刷新至对应的每日汇总表中。
+    /// 遵循 DailyCutoffHour 跨日结算点设定（24~30点）：
+    /// 若跨越结算点，则精确将前一段与后一段的秒数分割写入对应的业务归属日期。
+    /// </summary>
+    private async Task FlushDurationToDailyAsync(DateTime lastFlush, DateTime current, int gameId, int deltaSeconds)
+    {
+        if (deltaSeconds <= 0) return;
+
+        var date1 = AccountingDateHelper.GetAccountingDate(lastFlush, DailyCutoffHour);
+        var date2 = AccountingDateHelper.GetAccountingDate(current, DailyCutoffHour);
+
+        if (date1 == date2)
+        {
+            // 未跨越结算点，归入同一业务日期
+            await _repo.AddSessionDurationToDailyAsync(date1.ToString("yyyy-MM-dd"), gameId, deltaSeconds);
+        }
+        else
+        {
+            // 跨越了跨日结算点！精确分割分界点前后的秒数
+            var boundary = AccountingDateHelper.GetNextCutoffBoundary(lastFlush, DailyCutoffHour);
+            var prevDelta = (int)Math.Max(0, (boundary - lastFlush).TotalSeconds);
+            var nextDelta = (int)Math.Max(0, (current - boundary).TotalSeconds);
+
+            if (prevDelta > 0)
+            {
+                await _repo.AddSessionDurationToDailyAsync(date1.ToString("yyyy-MM-dd"), gameId, prevDelta);
+            }
+            if (nextDelta > 0)
+            {
+                await _repo.AddSessionDurationToDailyAsync(date2.ToString("yyyy-MM-dd"), gameId, nextDelta);
+            }
+        }
+    }
 }
+

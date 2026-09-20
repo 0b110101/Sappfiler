@@ -17,14 +17,31 @@
             <!-- Test Connection InfoBar -->
             <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="True" />
 
-            <!-- Appearance & Theme Card -->
+            <!-- Appearance & System Card -->
             <Border CornerRadius="14"
                     BorderBrush="{ThemeResource CardBorderBrush}"
                     BorderThickness="1"
                     Background="{ThemeResource CardBackgroundBrush}"
                     Padding="22">
-                <StackPanel Spacing="14">
-                    <TextBlock Text="外观与主题" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                <StackPanel Spacing="16">
+                    <TextBlock Text="系统与外观" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+
+                    <!-- 开机自启动 (默认关闭) -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="开机自启动" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="开机登录后自动在后台托盘静默运行，无需手动启动（默认关闭）" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AutoStartToggle" Grid.Column="1" Toggled="OnAutoStartToggled" OnContent="已开启" OffContent="已关闭" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <!-- 深色模式 -->
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -62,6 +79,38 @@
                 </StackPanel>
             </Border>
 
+            <!-- Daily Cutoff Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="跨日时间戳设置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="设定每日游戏时长的归属结算点。适合习惯深夜游玩的用户，避免凌晨游戏记录被割裂到次日。"
+                               FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="2">
+                            <TextBlock Text="每日跨日结算时间点 (整点)" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="在该时刻之前游玩的时间均归属于前一日" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ComboBox x:Name="CutoffHourCombo" Grid.Column="1" MinWidth="220" SelectionChanged="OnCutoffHourChanged">
+                            <ComboBoxItem Content="24:00 (次日 00:00 - 标准跨日)" Tag="24" />
+                            <ComboBoxItem Content="25:00 (次日 01:00)" Tag="25" />
+                            <ComboBoxItem Content="26:00 (次日 02:00)" Tag="26" />
+                            <ComboBoxItem Content="27:00 (次日 03:00)" Tag="27" />
+                            <ComboBoxItem Content="28:00 (次日 04:00 - 深夜玩家推荐)" Tag="28" />
+                            <ComboBoxItem Content="29:00 (次日 05:00)" Tag="29" />
+                            <ComboBoxItem Content="30:00 (次日 06:00)" Tag="30" />
+                        </ComboBox>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- Tracker Performance Card -->
             <Border CornerRadius="14"
                     BorderBrush="{ThemeResource CardBorderBrush}"
@@ -69,8 +118,9 @@
                     Background="{ThemeResource CardBackgroundBrush}"
                     Padding="22">
                 <StackPanel Spacing="12">
-                    <TextBlock Text="后台监控参数" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="后台监控与同步策略" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
                     <TextBlock Text="进程轮询心跳: 5 秒 (极低 CPU 消耗)" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                    <TextBlock Text="Notion 同步策略: 应用启动时自动同步、游戏退出时自动同步 (无游戏时不空转轮询)" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                     <TextBlock Text="本地数据库: SQLite WAL 高性能模式" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                     <TextBlock Text="系统托盘: 点击右上角 × 关闭按钮自动最小化至托盘" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                 </StackPanel>

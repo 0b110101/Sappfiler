@@ -47,6 +47,7 @@ public class GameRecord : System.ComponentModel.INotifyPropertyChanged
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     public bool IsNotionBound => !string.IsNullOrWhiteSpace(NotionPageId);
+    public bool IsIgnored => Status == "ignored";
     public string NotionStatusText => IsNotionBound ? "● 已绑定" : "● 未绑定";
 
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
@@ -106,6 +107,7 @@ public class NotionGameCatalogItem
     public string Name { get; set; } = string.Empty;
     public List<string> Aliases { get; set; } = new();
     public List<string> Identifiers { get; set; } = new();
+    public List<string> Genres { get; set; } = new();
     public string? CoverUrl { get; set; }
 
     /// <summary>总表页面的 page icon（正方形小图），做列表封面的首选；cover 是横幅，留给背景图。</summary>
@@ -219,8 +221,14 @@ public class TrackerConfig
     public string DailyDatabaseId { get; set; } = string.Empty;
     public int ProcessScanIntervalSeconds { get; set; } = 5;
     public int SessionHeartbeatIntervalSeconds { get; set; } = 15;
-    public int SyncIntervalMinutes { get; set; } = 15;
+    public int SyncIntervalMinutes { get; set; } = 60;
     public bool AutoCreateGames { get; set; } = false;
+
+    /// <summary>
+    /// 跨日结算时间点（整点小时）：支持 24 ~ 30 点（24 = 00:00，28 = 次日 04:00）。
+    /// 在该时刻前游玩的时间均归属于前一日的每日统计，避免深夜游戏跨日割裂。默认 24。
+    /// </summary>
+    public int DailyCutoffHour { get; set; } = 24;
 
     // ⚠️ 已废弃：模糊匹配于 2026-09-19 移除（只保留确定性匹配），
     //    这两个值**不再被任何代码读取**。按「不改配置键」的规则保留字段，

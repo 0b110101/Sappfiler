@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -11,12 +11,12 @@
   <Identity
     Name="DDD89790-07AA-46F1-9E2E-64A12B4D4276"
     Publisher="CN=AppPublisher"
-    Version="0.2.21.2" />
+    Version="0.3.1.0" />
 
   <mp:PhoneIdentity PhoneProductId="DDD89790-07AA-46F1-9E2E-64A12B4D4276" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
-    <DisplayName>GameTimeTracker.App</DisplayName>
+    <DisplayName>GameTimeTracker</DisplayName>
     <PublisherDisplayName>AppPublisher</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -35,8 +35,8 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="GameTimeTracker.App"
-        Description="GameTimeTracker.App"
+        DisplayName="GameTimeTracker"
+        Description="GameTimeTracker"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">

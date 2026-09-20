@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Text.Json;
 using Dapper;
 using GameTimeTracker.Core.Interfaces;
@@ -128,6 +128,7 @@ public class SqliteRepository : IDatabaseRepository
                 name TEXT NOT NULL,
                 aliases_json TEXT NOT NULL DEFAULT '[]',
                 identifiers_json TEXT NOT NULL DEFAULT '[]',
+                genres_json TEXT NOT NULL DEFAULT '[]',
                 cover_url TEXT,
                 icon_url TEXT,
                 icon_type TEXT,
@@ -195,6 +196,177 @@ public class SqliteRepository : IDatabaseRepository
             alterCmd6.ExecuteNonQuery();
         }
         catch { }
+
+        try
+        {
+            using var alterCmd7 = conn.CreateCommand();
+            alterCmd7.CommandText = "ALTER TABLE game_catalog ADD COLUMN genres_json TEXT NOT NULL DEFAULT '[]';";
+            alterCmd7.ExecuteNonQuery();
+        }
+        catch { }
+
+        // 启动时自动检查并合并同名/同总表关联的分裂游戏条目及同日时长记录
+        DeduplicateGamesAndDailySummaries(conn);
+    }
+
+
+    private static string NormalizePageId(string? pageId)
+        => string.IsNullOrWhiteSpace(pageId)
+            ? string.Empty
+            : pageId.Replace("-", string.Empty).Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// 自动合并重复游戏条目（同 notion_page_id 或同名），将 sessions 与 daily_summary 汇总迁移并清理冗余游戏行。
+    /// </summary>
+    private void DeduplicateGamesAndDailySummaries(SqliteConnection conn)
+    {
+        try
+        {
+            var allGames = conn.Query<GameRecord>("SELECT * FROM games ORDER BY id ASC;").ToList();
+            if (allGames.Count <= 1) return;
+
+            var groups = new List<List<GameRecord>>();
+            var visited = new HashSet<int>();
+
+            for (int i = 0; i < allGames.Count; i++)
+            {
+                var g1 = allGames[i];
+                if (visited.Contains(g1.Id)) continue;
+
+                var group = new List<GameRecord> { g1 };
+                visited.Add(g1.Id);
+
+                for (int j = i + 1; j < allGames.Count; j++)
+                {
+                    var g2 = allGames[j];
+                    if (visited.Contains(g2.Id)) continue;
+
+                    bool sameNotion = !string.IsNullOrEmpty(g1.NotionPageId) &&
+                                      !string.IsNullOrEmpty(g2.NotionPageId) &&
+                                      string.Equals(NormalizePageId(g1.NotionPageId), NormalizePageId(g2.NotionPageId), StringComparison.OrdinalIgnoreCase);
+
+                    bool sameName = !string.IsNullOrWhiteSpace(g1.Name) &&
+                                    !string.IsNullOrWhiteSpace(g2.Name) &&
+                                    string.Equals(g1.Name.Trim(), g2.Name.Trim(), StringComparison.OrdinalIgnoreCase);
+
+                    if (sameNotion || sameName)
+                    {
+                        group.Add(g2);
+                        visited.Add(g2.Id);
+                    }
+                }
+
+                if (group.Count > 1)
+                {
+                    groups.Add(group);
+                }
+            }
+
+            foreach (var group in groups)
+            {
+                int Score(GameRecord g)
+                {
+                    int s = 0;
+                    if (!string.IsNullOrWhiteSpace(g.ExecutablePath)) s += 100;
+                    if (!string.IsNullOrWhiteSpace(g.Platform) && g.Platform != "manual" && g.PlatformId.Length != 8 && g.PlatformId.Length != 16) s += 50;
+                    if (!string.IsNullOrWhiteSpace(g.NotionPageId)) s += 20;
+                    if (!string.IsNullOrWhiteSpace(g.CoverUrl)) s += 10;
+                    return s;
+                }
+
+                var canonical = group.OrderByDescending(Score).ThenBy(g => g.Id).First();
+                var duplicates = group.Where(g => g.Id != canonical.Id).ToList();
+
+                string? bestNotionId = canonical.NotionPageId;
+                string? bestCoverUrl = canonical.CoverUrl;
+                string bestExe = canonical.Executable;
+                string bestExePath = canonical.ExecutablePath;
+                string bestPlatform = canonical.Platform;
+                string bestPlatformId = canonical.PlatformId;
+
+                foreach (var dup in duplicates)
+                {
+                    if (string.IsNullOrEmpty(bestNotionId) && !string.IsNullOrEmpty(dup.NotionPageId)) bestNotionId = dup.NotionPageId;
+                    if (string.IsNullOrEmpty(bestCoverUrl) && !string.IsNullOrEmpty(dup.CoverUrl)) bestCoverUrl = dup.CoverUrl;
+                    if (string.IsNullOrEmpty(bestExe) && !string.IsNullOrEmpty(dup.Executable)) bestExe = dup.Executable;
+                    if (string.IsNullOrEmpty(bestExePath) && !string.IsNullOrEmpty(dup.ExecutablePath)) bestExePath = dup.ExecutablePath;
+                    if ((bestPlatform == "manual" || bestPlatformId.Length == 8 || bestPlatformId.Length == 16) &&
+                        (!string.IsNullOrEmpty(dup.Platform) && dup.Platform != "manual" && dup.PlatformId.Length != 8 && dup.PlatformId.Length != 16))
+                    {
+                        bestPlatform = dup.Platform;
+                        bestPlatformId = dup.PlatformId;
+                    }
+                }
+
+                conn.Execute("""
+                    UPDATE games
+                    SET notion_page_id = @bestNotionId,
+                        cover_url = @bestCoverUrl,
+                        executable = @bestExe,
+                        executable_path = @bestExePath,
+                        platform = @bestPlatform,
+                        platform_id = @bestPlatformId,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = @id;
+                    """,
+                    new { bestNotionId, bestCoverUrl, bestExe, bestExePath, bestPlatform, bestPlatformId, id = canonical.Id });
+
+                foreach (var dup in duplicates)
+                {
+                    conn.Execute("UPDATE sessions SET game_id = @canonicalId WHERE game_id = @dupId;",
+                        new { canonicalId = canonical.Id, dupId = dup.Id });
+
+                    var dupSummaries = conn.Query<DailySummaryRow>(
+                        "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE game_id = @dupId;",
+                        new { dupId = dup.Id }).ToList();
+
+                    foreach (var ds in dupSummaries)
+                    {
+                        var targetRow = conn.QueryFirstOrDefault<DailySummaryRow>(
+                            "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE date = @date AND game_id = @canonicalId LIMIT 1;",
+                            new { date = ds.Date, canonicalId = canonical.Id });
+
+                        if (targetRow != null)
+                        {
+                            int combinedSecs = targetRow.DurationSeconds + ds.DurationSeconds;
+                            int combinedMins = combinedSecs / 60;
+                            int combinedSessions = targetRow.SessionCount + ds.SessionCount;
+                            string? finalPageId = !string.IsNullOrEmpty(targetRow.NotionPageId) ? targetRow.NotionPageId : ds.NotionPageId;
+                            string? finalTitle = !string.IsNullOrEmpty(targetRow.NotionTitle) ? targetRow.NotionTitle : ds.NotionTitle;
+                            string? finalIcon = !string.IsNullOrEmpty(targetRow.NotionIconUrl) ? targetRow.NotionIconUrl : ds.NotionIconUrl;
+                            string finalStatus = (targetRow.SyncStatus == "synced" && ds.SyncStatus == "synced") ? "synced" : "pending";
+
+                            conn.Execute("""
+                                UPDATE daily_summary
+                                SET duration_seconds = @combinedSecs,
+                                    duration_minutes = @combinedMins,
+                                    session_count = @combinedSessions,
+                                    notion_page_id = @finalPageId,
+                                    notion_title = @finalTitle,
+                                    notion_icon_url = @finalIcon,
+                                    sync_status = @finalStatus
+                                WHERE id = @targetId;
+
+                                DELETE FROM daily_summary WHERE id = @dupDailyId;
+                                """,
+                                new { combinedSecs, combinedMins, combinedSessions, finalPageId, finalTitle, finalIcon, finalStatus, targetId = targetRow.Id, dupDailyId = ds.Id });
+                        }
+                        else
+                        {
+                            conn.Execute("UPDATE daily_summary SET game_id = @canonicalId WHERE id = @id;",
+                                new { canonicalId = canonical.Id, id = ds.Id });
+                        }
+                    }
+
+                    conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id });
+                    AppLog.Info($"[维护] 自动合并重复游戏记录：「{canonical.Name}」(保留 id={canonical.Id}, 清理重复 id={dup.Id})");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[维护] 游戏去重合并异常: {ex.Message}");
+        }
     }
 
     // ----------------- Game Operations -----------------
@@ -223,21 +395,44 @@ public class SqliteRepository : IDatabaseRepository
                     new { identity.ExecutablePath, identity.Executable });
             }
 
+            // 3. Fallback: match by Game Name (prevent creating duplicate game rows in SQLite)
+            if (existing == null && !string.IsNullOrWhiteSpace(identity.Name))
+            {
+                existing = await conn.QueryFirstOrDefaultAsync<GameRecord>(
+                    """
+                    SELECT * FROM games 
+                    WHERE LOWER(name) = LOWER(@Name)
+                    ORDER BY (CASE WHEN notion_page_id IS NOT NULL AND notion_page_id != '' THEN 0 ELSE 1 END), (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC;
+                    """,
+                    new { identity.Name });
+            }
+
             if (existing != null)
             {
+                // If existing has manual or generic platform, but identity has a real platform (e.g. steam, xbox), upgrade it!
+                bool upgradePlatform = (existing.Platform == "manual" || existing.PlatformId.Length == 8 || existing.PlatformId.Length == 16) &&
+                                       identity.Platform != "manual" && !string.IsNullOrEmpty(identity.PlatformId);
+
+                string finalPlatform = upgradePlatform ? identity.Platform : existing.Platform;
+                string finalPlatformId = upgradePlatform ? identity.PlatformId : existing.PlatformId;
+
                 await conn.ExecuteAsync(
                     """
                     UPDATE games 
                     SET name = CASE WHEN name IS NULL OR name = '' THEN @Name ELSE name END,
                         executable = CASE WHEN @Executable != '' THEN @Executable ELSE executable END,
                         executable_path = CASE WHEN @ExecutablePath != '' THEN @ExecutablePath ELSE executable_path END, 
+                        platform = @finalPlatform,
+                        platform_id = @finalPlatformId,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = @Id;
                     """,
-                    new { identity.Name, identity.Executable, identity.ExecutablePath, existing.Id });
+                    new { identity.Name, identity.Executable, identity.ExecutablePath, finalPlatform, finalPlatformId, existing.Id });
                 if (string.IsNullOrEmpty(existing.Name)) existing.Name = identity.Name;
                 if (!string.IsNullOrEmpty(identity.Executable)) existing.Executable = identity.Executable;
                 if (!string.IsNullOrEmpty(identity.ExecutablePath)) existing.ExecutablePath = identity.ExecutablePath;
+                existing.Platform = finalPlatform;
+                existing.PlatformId = finalPlatformId;
                 return existing;
             }
 
@@ -786,6 +981,19 @@ public class SqliteRepository : IDatabaseRepository
         return rows.Select(MapDailySummary).ToList();
     }
 
+    /// <summary>
+    /// 判定一个日期是否属于历史日期（早于 7 天前）。
+    /// 历史日期在 Notion 上的单次时长为唯一权威数据，Pull 时绝不判定 localAhead，绝不标记 pending。
+    /// </summary>
+    private static bool IsHistoricalDate(string dateStr)
+    {
+        if (DateTime.TryParse(dateStr, out var dt))
+        {
+            return dt.Date < DateTime.Today.AddDays(-7);
+        }
+        return false;
+    }
+
     public async Task<int> SyncDailyRecordFromNotionAsync(NotionDailyRecordItem item)
     {
         if (string.IsNullOrWhiteSpace(item.Date)) return 0;
@@ -824,7 +1032,7 @@ public class SqliteRepository : IDatabaseRepository
                             Identifiers = System.Text.Json.JsonSerializer
                                 .Deserialize<List<string>>((string)catRow.identifiers_json) ?? new(),
                             CoverUrl = (string?)catRow.cover_url,
-                            LastSyncedAt = DateTime.Parse((string)catRow.last_synced_at)
+                            LastSyncedAt = ParseDateTime(catRow.last_synced_at)
                         };
 
                     if (catItem != null)
@@ -870,11 +1078,18 @@ public class SqliteRepository : IDatabaseRepository
 
                         if (game == null)
                         {
-                            // 再用**总表条目名**认一条尚未绑定的本地行。
-                            // 这是「Notion 里手动补了 relation，程序里仍显示未绑定」的解法：
-                            // 记录标题是用户手写的（常带「2.2h」「通关」等噪音），
-                            // 但 relation 指向的总表条目名是权威的官方名。
-                            game = await FindUnboundGameByNameAsync(conn, catItem.Name);
+                            // 优先查找同名已有游戏行（不限是否已绑定，避免分身）
+                            game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
+                                "SELECT * FROM games WHERE LOWER(name) = LOWER(@name) ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
+                                new { name = catItem.Name })
+                                ?? await FindUnboundGameByNameAsync(conn, catItem.Name);
+
+                            if (game != null && string.IsNullOrEmpty(game.NotionPageId) && !string.IsNullOrEmpty(item.GameMasterPageId))
+                            {
+                                await conn.ExecuteAsync("UPDATE games SET notion_page_id = @notionPageId WHERE id = @id;",
+                                    new { notionPageId = item.GameMasterPageId, id = game.Id });
+                                game.NotionPageId = item.GameMasterPageId;
+                            }
                         }
 
                         if (game == null)
@@ -896,11 +1111,16 @@ public class SqliteRepository : IDatabaseRepository
             if (game == null && !string.IsNullOrEmpty(item.GameTitle))
             {
                 game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                    "SELECT * FROM games WHERE LOWER(name) = LOWER(@title) LIMIT 1;",
+                    "SELECT * FROM games WHERE LOWER(name) = LOWER(@title) ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
                     new { title = item.GameTitle })
-                    // 精确同名找不到时按归一化再认一次
-                    // （消掉标点、大小写、罗马数字、年份/版本后缀、时长后缀的差异）
                     ?? await FindUnboundGameByNameAsync(conn, item.GameTitle);
+
+                if (game != null && string.IsNullOrEmpty(game.NotionPageId) && !string.IsNullOrEmpty(item.GameMasterPageId))
+                {
+                    await conn.ExecuteAsync("UPDATE games SET notion_page_id = @notionPageId WHERE id = @id;",
+                        new { notionPageId = item.GameMasterPageId, id = game.Id });
+                    game.NotionPageId = item.GameMasterPageId;
+                }
             }
 
             if (game == null)
@@ -934,154 +1154,205 @@ public class SqliteRepository : IDatabaseRepository
             }
 
             // 2. Check if daily_summary exists
-            var existing = await conn.QueryFirstOrDefaultAsync<dynamic>(
+            int targetGameId = game.Id;
+            string? rawTitle = string.IsNullOrWhiteSpace(item.RawTitle) ? null : item.RawTitle;
+            bool isHistorical = IsHistoricalDate(item.Date);
+
+            // ① 优先按 notion_page_id 精确查找（同一个 Notion 页面的拉取更新）
+            var rowByPage = await conn.QueryFirstOrDefaultAsync<DailySummaryRow>(
                 """
-                SELECT id, game_id, duration_seconds, duration_minutes, notion_page_id, sync_status 
+                SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, 
+                       duration_minutes AS DurationMinutes, notion_page_id AS NotionPageId, sync_status AS SyncStatus 
                 FROM daily_summary 
-                WHERE notion_page_id = @pageId OR (date = @date AND game_id = @gameId)
+                WHERE notion_page_id = @pageId
                 LIMIT 1;
                 """,
-                new { pageId = item.PageId, date = item.Date, gameId = game.Id });
+                new { pageId = item.PageId });
 
+            // ② 查询目标 (date, game_id) 是否在本地已存在行
+            var rowByDateAndGame = await conn.QueryFirstOrDefaultAsync<DailySummaryRow>(
+                """
+                SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, 
+                       duration_minutes AS DurationMinutes, notion_page_id AS NotionPageId, sync_status AS SyncStatus 
+                FROM daily_summary 
+                WHERE date = @date AND game_id = @targetGameId
+                LIMIT 1;
+                """,
+                new { date = item.Date, targetGameId });
+
+            // 计算权威时长与同步状态
+            bool isBound = !string.IsNullOrEmpty(game.NotionPageId) || !string.IsNullOrEmpty(item.GameMasterPageId);
+            int finalMinutes = item.DurationMinutes;
+            int finalSeconds = item.DurationMinutes * 60;
+            string newStatus = isBound ? "synced" : "unmapped";
+
+            DailySummaryRow? existing = rowByPage ?? rowByDateAndGame;
             if (existing != null)
             {
-                int existingMinutes = (int)existing.duration_minutes;
-                int existingSeconds = (int)existing.duration_seconds;
+                int existingMinutes = existing.DurationMinutes;
+                int existingSeconds = existing.DurationSeconds;
 
-                // ── 修复"旧分钟值被当成小时"造成的历史膨胀（2026-09-19 雾山报的严重错误）──
-                // 单位从分钟改成小时那次，只按"≤24 当小时"判单位，于是旧行里的
-                // 5（分钟）被读成 5 小时 → 本地存了 300 分钟，**整整放大 60 倍**。
-                // 现在改成按标题里的单位判、能读到正确值，但那批被放大的本地数字必须清掉：
-                // 否则下面的 localAhead 会判成"本地领先"→ 把 300 分钟（=5 小时）推回 Notion，
-                // 反而把线上表写坏。
-                //
-                // 判据收得很紧，四个条件同时满足才修：
-                //   ① 远端标题明确写着单位是分钟（DurationUnitIsMinutes）
-                //   ② 有 notion_page_id —— 只有来自 Notion 的行才可能被这样误读过
-                //   ③ 远端值 > 0 —— 否则会把本地清零
-                //   ④ 本地 ≥ 远端 × 60 —— 正是当初那次误判的倍数
                 bool inflatedByMinuteUnitBug =
                     item.DurationUnitIsMinutes &&
                     item.DurationMinutes > 0 &&
-                    !string.IsNullOrEmpty((string?)existing.notion_page_id) &&
+                    !string.IsNullOrEmpty(existing.NotionPageId) &&
                     existingMinutes >= item.DurationMinutes * 60;
-
-                int finalMinutes;
-                int finalSeconds;
-                bool localAhead;
 
                 if (inflatedByMinuteUnitBug)
                 {
-                    // 以远端为准 —— 远端是原始数据，本地那份是误读出来的
                     finalMinutes = item.DurationMinutes;
                     finalSeconds = item.DurationMinutes * 60;
-                    localAhead = false;
+                    newStatus = isBound ? "synced" : "unmapped";
                     AppLog.Warn(
                         $"[同步] 修正历史时长膨胀：「{item.GameTitle}」{item.Date} " +
                         $"本地 {existingMinutes} 分钟 → {finalMinutes} 分钟（旧版把分钟当成了小时）");
+                }
+                else if (isHistorical)
+                {
+                    // 🚨 历史日期：Notion 上的时长为唯一权威！
+                    finalMinutes = item.DurationMinutes;
+                    finalSeconds = item.DurationMinutes * 60;
+                    newStatus = isBound ? "synced" : "unmapped";
                 }
                 else
                 {
                     finalMinutes = Math.Max(existingMinutes, item.DurationMinutes);
                     finalSeconds = Math.Max(existingSeconds, item.DurationMinutes * 60);
-
-                    // 本地时长领先（Notion 还停在旧值）时必须保留 pending，
-                    // 否则每轮 Pull 都会把心跳刚标记的 pending 洗成 synced，
-                    // 推送永远查不到待上传记录 —— Notion 时长就停在首次创建时的值。
-                    //
-                    // ⚠️ 必须**按分钟比**，不能用秒：
-                    //    duration_minutes 是 duration_seconds / 60 的整数除法结果
-                    //    （见 AddSessionDurationToDailyAsync），所以秒总比分钟多出 <60 的余数。
-                    //    用 existingSeconds > item.DurationMinutes * 60 的话，
-                    //    910 秒(15分) vs 远端 15 分会判成"本地领先" →
-                    //    但推上去的还是同样的 15 分钟 → 数值不变 → 下一轮再次判领先 → **永远重推**。
-                    //    按分钟比则 15 == 15，正确判为已同步。
-                    //
-                    // 而 push 出去的就是 duration_minutes，所以"本地是否领先"本就该用分钟衡量。
-                    localAhead = existingMinutes > item.DurationMinutes;
+                    newStatus = (existingMinutes > item.DurationMinutes) ? "pending" : (isBound ? "synced" : "unmapped");
                 }
-
-                // ── 记录归属修正（2026-09-19 QA 反馈的核心 bug）─────────────────────
-                // 这条每日记录可能挂在**错误的游戏行**上。真实场景：
-                // 雾山把总表/每日表的属性改名后，程序还是旧版本 —— 旧版本读不到
-                // 「关联游戏」，于是把每条记录都当成"没有关联"，为它新建了一个
-                // **未绑定**的游戏行。后来升级、能读到 relation 了，这里又为同一条记录
-                // 解析出正确的游戏行，但下面的 UPDATE 只改时长和 page_id、**没动 game_id**
-                // —— 记录就一直留在那个未绑定的行上，而正确绑定的行是空的。
-                // 用户看到的就是「映射库里一堆未绑定，绑好的游戏却没有记录」。
-                //
-                // 修法：旧行**没绑定** + 这次解析出的游戏**绑定了关系** ⇒ 把记录挪过去。
-                // 反向绝不动：旧行已绑定说明它有自己的归属，可能是用户手动改过的。
-                int currentGameId = (int)existing.game_id;
-                int targetGameId = currentGameId;
-                bool migrated = false;
-                if (currentGameId != game.Id && !string.IsNullOrEmpty(item.GameMasterPageId))
-                {
-                    var oldGame = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                        "SELECT * FROM games WHERE id = @id;", new { id = currentGameId });
-
-                    if (oldGame is not null && string.IsNullOrEmpty(oldGame.NotionPageId))
-                    {
-                        targetGameId = game.Id;
-                        migrated = true;
-                    }
-                }
-
-                await conn.ExecuteAsync(
-                    """
-                    UPDATE daily_summary
-                    SET duration_seconds = @finalSeconds,
-                        duration_minutes = @finalMinutes,
-                        notion_page_id = @pageId,
-                        notion_title = COALESCE(@title, notion_title),
-                        sync_status = @newStatus,
-                        game_id = @gameId,
-                        last_sync_at = CURRENT_TIMESTAMP
-                    WHERE id = @id;
-                    """,
-                    new
-                    {
-                        finalSeconds,
-                        finalMinutes,
-                        pageId = item.PageId,
-                        gameId = targetGameId,
-                        // Pull 拿到的标题就是远端现状 —— 记下来，回刷时用它比对即可跳过无变化的记录。
-                        // 但要防呆：有些路径只给 pageId 不给标题（GameTitle 是被剥过时长后缀的裸名），
-                        // 那种情况必须传 null 保住旧快照，否则会把「不思议迷宫 · 0.7 h」写成裸名，
-                        // 下一轮回刷就会误判为"不一致"而反复 PATCH。
-                        title = string.IsNullOrWhiteSpace(item.RawTitle) ? null : item.RawTitle,
-                        newStatus = localAhead ? "pending" : "synced",
-                        id = (int)existing.id
-                    });
-
-                // 迁移完成 → 顺手清掉被搬空的幽灵行，否则它会在「待处理」里永远挂着。
-                // 条件收得很紧（见方法注释），避免误删用户真在用的游戏。
-                if (migrated)
-                {
-                    await TryDropGhostGameAsync(conn, currentGameId);
-                }
-
-                return (int)existing.id;
             }
-            else
+
+            // ── 情况 1: 本地已有该 Notion 页面的记录 (rowByPage != null) ───────────
+            if (rowByPage != null)
             {
-                var insertedId = await conn.ExecuteScalarAsync<int>(
-                    """
-                    INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status, notion_page_id, last_sync_at)
-                    VALUES (@date, @gameId, @seconds, @minutes, 1, 'synced', @pageId, CURRENT_TIMESTAMP);
-                    SELECT last_insert_rowid();
-                    """,
-                    new
-                    {
-                        date = item.Date,
-                        gameId = game.Id,
-                        seconds = item.DurationMinutes * 60,
-                        minutes = item.DurationMinutes,
-                        pageId = item.PageId
-                    });
+                int oldGameId = rowByPage.GameId;
 
-                return insertedId;
+                // 如果目标 (item.Date, targetGameId) 已经有另一行（例如用户在 Notion 改了日期或关系，撞上了已有行）：
+                if (rowByDateAndGame != null && rowByDateAndGame.Id != rowByPage.Id)
+                {
+                    // 🚨 冲突安全合并：绝不触发 UNIQUE constraint 崩溃！
+                    // 把权威数据合入 rowByDateAndGame，并删除旧日期的旧行 rowByPage
+                    await conn.ExecuteAsync(
+                        """
+                        UPDATE daily_summary
+                        SET notion_page_id = @pageId,
+                            duration_seconds = @finalSeconds,
+                            duration_minutes = @finalMinutes,
+                            notion_title = COALESCE(@title, notion_title),
+                            sync_status = @newStatus,
+                            last_sync_at = CURRENT_TIMESTAMP
+                        WHERE id = @targetId;
+
+                        DELETE FROM daily_summary WHERE id = @oldId;
+                        """,
+                        new
+                        {
+                            pageId = item.PageId,
+                            finalSeconds,
+                            finalMinutes,
+                            title = rawTitle,
+                            newStatus,
+                            targetId = rowByDateAndGame.Id,
+                            oldId = rowByPage.Id
+                        });
+
+                    if (oldGameId != targetGameId)
+                    {
+                        await TryDropGhostGameAsync(conn, oldGameId);
+                    }
+                    return rowByDateAndGame.Id;
+                }
+                else
+                {
+                    // 目标槽位无碰撞：直接更新 date 与 game_id（完整支持用户在 Notion 修改日期或绑定！）
+                    await conn.ExecuteAsync(
+                        """
+                        UPDATE daily_summary
+                        SET date = @date,
+                            game_id = @targetGameId,
+                            duration_seconds = @finalSeconds,
+                            duration_minutes = @finalMinutes,
+                            notion_title = COALESCE(@title, notion_title),
+                            sync_status = @newStatus,
+                            last_sync_at = CURRENT_TIMESTAMP
+                        WHERE id = @id;
+                        """,
+                        new
+                        {
+                            date = item.Date,
+                            targetGameId,
+                            finalSeconds,
+                            finalMinutes,
+                            title = rawTitle,
+                            newStatus,
+                            id = rowByPage.Id
+                        });
+
+                    if (oldGameId != targetGameId)
+                    {
+                        await TryDropGhostGameAsync(conn, oldGameId);
+                    }
+                    return rowByPage.Id;
+                }
             }
+
+            // ── 情况 2: rowByPage == null，但目标 (item.Date, targetGameId) 已经存在行 ──
+            if (rowByDateAndGame != null)
+            {
+                // 如果该行尚未绑定 Notion 页面（如心跳刚生成），认领绑定：
+                if (string.IsNullOrEmpty(rowByDateAndGame.NotionPageId))
+                {
+                    await conn.ExecuteAsync(
+                        """
+                        UPDATE daily_summary
+                        SET notion_page_id = @pageId,
+                            duration_seconds = @finalSeconds,
+                            duration_minutes = @finalMinutes,
+                            notion_title = COALESCE(@title, notion_title),
+                            sync_status = @newStatus,
+                            last_sync_at = CURRENT_TIMESTAMP
+                        WHERE id = @id;
+                        """,
+                        new
+                        {
+                            pageId = item.PageId,
+                            finalSeconds,
+                            finalMinutes,
+                            title = rawTitle,
+                            newStatus,
+                            id = rowByDateAndGame.Id
+                        });
+                    return rowByDateAndGame.Id;
+                }
+                else
+                {
+                    // 同一天同一个游戏在 Notion 录入了多个页面：跳过覆盖，杜绝主键崩溃与循环累加
+                    AppLog.Warn(
+                        $"[同步] 检测到同一天同一游戏存在多个 Notion 页面：「{item.GameTitle}」{item.Date} " +
+                        $"(已收录 pageId={rowByDateAndGame.NotionPageId}, 跳过同日重复页面 pageId={item.PageId})。请在 Notion 中核对并修正日期或合并。");
+                    return rowByDateAndGame.Id;
+                }
+            }
+
+            // ── 情况 3: 既没有该页面记录，目标 (date, game_id) 也是空的：全新插入 ────
+            var insertedId = await conn.ExecuteScalarAsync<int>(
+                """
+                INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status, notion_page_id, notion_title, last_sync_at)
+                VALUES (@date, @targetGameId, @finalSeconds, @finalMinutes, 1, @newStatus, @pageId, @title, CURRENT_TIMESTAMP);
+                SELECT last_insert_rowid();
+                """,
+                new
+                {
+                    date = item.Date,
+                    targetGameId,
+                    finalSeconds,
+                    finalMinutes,
+                    newStatus,
+                    pageId = item.PageId,
+                    title = rawTitle
+                });
+
+            return insertedId;
         }
         finally
         {
@@ -1168,6 +1439,28 @@ public class SqliteRepository : IDatabaseRepository
         }
     }
 
+    private static DateTime ParseDateTime(object? value)
+    {
+        if (value == null || value is DBNull) return DateTime.UtcNow;
+        if (value is DateTime dt) return dt;
+        var s = value.ToString();
+        if (string.IsNullOrWhiteSpace(s)) return DateTime.UtcNow;
+        return DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var result)
+            ? result
+            : (DateTime.TryParse(s, out var fallback) ? fallback : DateTime.UtcNow);
+    }
+
+    private static DateTime? ParseDateTimeNullable(object? value)
+    {
+        if (value == null || value is DBNull) return null;
+        if (value is DateTime dt) return dt;
+        var s = value.ToString();
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        return DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var result)
+            ? result
+            : (DateTime.TryParse(s, out var fallback) ? fallback : null);
+    }
+
     private static DailySummary MapDailySummary(dynamic r)
     {
         return new DailySummary
@@ -1180,7 +1473,7 @@ public class SqliteRepository : IDatabaseRepository
             SessionCount = (int)r.session_count,
             SyncStatus = (string)r.sync_status,
             NotionPageId = (string?)r.notion_page_id,
-            LastSyncAt = r.last_sync_at != null ? DateTime.Parse((string)r.last_sync_at) : null,
+            LastSyncAt = ParseDateTimeNullable(r.last_sync_at),
             ErrorMessage = (string?)r.error_message,
             NotionTitle = TryGetString(r, "notion_title"),
             NotionIconUrl = TryGetString(r, "notion_icon_url"),
@@ -1293,18 +1586,36 @@ public class SqliteRepository : IDatabaseRepository
         var list = new List<NotionGameCatalogItem>();
         foreach (var r in rows)
         {
-            var aliases = JsonSerializer.Deserialize<List<string>>((string)r.aliases_json) ?? new();
-            var identifiers = JsonSerializer.Deserialize<List<string>>((string)r.identifiers_json) ?? new();
+            List<string> aliases = new();
+            List<string> identifiers = new();
+            List<string> genres = new();
+            var aJson = TryGetString(r, "aliases_json");
+            if (!string.IsNullOrWhiteSpace(aJson))
+            {
+                try { aliases = JsonSerializer.Deserialize<List<string>>(aJson) ?? new List<string>(); } catch { }
+            }
+            var iJson = TryGetString(r, "identifiers_json");
+            if (!string.IsNullOrWhiteSpace(iJson))
+            {
+                try { identifiers = JsonSerializer.Deserialize<List<string>>(iJson) ?? new List<string>(); } catch { }
+            }
+            var gJson = TryGetString(r, "genres_json");
+            if (!string.IsNullOrWhiteSpace(gJson))
+            {
+                try { genres = JsonSerializer.Deserialize<List<string>>(gJson) ?? new List<string>(); } catch { }
+            }
+
             list.Add(new NotionGameCatalogItem
             {
                 PageId = (string)r.page_id,
                 Name = (string)r.name,
                 Aliases = aliases,
                 Identifiers = identifiers,
+                Genres = genres,
                 CoverUrl = (string?)r.cover_url,
                 IconUrl = (string?)r.icon_url,
                 IconType = (string?)r.icon_type,
-                LastSyncedAt = DateTime.Parse((string)r.last_synced_at)
+                LastSyncedAt = ParseDateTime(r.last_synced_at)
             });
         }
         return list;
@@ -1330,18 +1641,37 @@ public class SqliteRepository : IDatabaseRepository
             new { pageId, normalized });
 
         if (r == null) return null;
-        var aliases = JsonSerializer.Deserialize<List<string>>((string)r.aliases_json) ?? new();
-        var identifiers = JsonSerializer.Deserialize<List<string>>((string)r.identifiers_json) ?? new();
+
+        List<string> aliases = new();
+        List<string> identifiers = new();
+        List<string> genres = new();
+        var aJson = TryGetString(r, "aliases_json");
+        if (!string.IsNullOrWhiteSpace(aJson))
+        {
+            try { aliases = JsonSerializer.Deserialize<List<string>>(aJson) ?? new List<string>(); } catch { }
+        }
+        var iJson = TryGetString(r, "identifiers_json");
+        if (!string.IsNullOrWhiteSpace(iJson))
+        {
+            try { identifiers = JsonSerializer.Deserialize<List<string>>(iJson) ?? new List<string>(); } catch { }
+        }
+        var gJson = TryGetString(r, "genres_json");
+        if (!string.IsNullOrWhiteSpace(gJson))
+        {
+            try { genres = JsonSerializer.Deserialize<List<string>>(gJson) ?? new List<string>(); } catch { }
+        }
+
         return new NotionGameCatalogItem
         {
             PageId = (string)r.page_id,
             Name = (string)r.name,
             Aliases = aliases,
             Identifiers = identifiers,
+            Genres = genres,
             CoverUrl = (string?)r.cover_url,
             IconUrl = (string?)r.icon_url,
             IconType = (string?)r.icon_type,
-            LastSyncedAt = DateTime.Parse((string)r.last_synced_at)
+            LastSyncedAt = ParseDateTime(r.last_synced_at)
         };
     }
 
@@ -1356,20 +1686,22 @@ public class SqliteRepository : IDatabaseRepository
             {
                 var aliasesJson = JsonSerializer.Serialize(item.Aliases);
                 var identsJson = JsonSerializer.Serialize(item.Identifiers);
+                var genresJson = JsonSerializer.Serialize(item.Genres);
                 await conn.ExecuteAsync(
                     """
-                    INSERT INTO game_catalog (page_id, name, aliases_json, identifiers_json, cover_url, icon_url, icon_type, last_synced_at)
-                    VALUES (@PageId, @Name, @aliasesJson, @identsJson, @CoverUrl, @IconUrl, @IconType, CURRENT_TIMESTAMP)
+                    INSERT INTO game_catalog (page_id, name, aliases_json, identifiers_json, genres_json, cover_url, icon_url, icon_type, last_synced_at)
+                    VALUES (@PageId, @Name, @aliasesJson, @identsJson, @genresJson, @CoverUrl, @IconUrl, @IconType, CURRENT_TIMESTAMP)
                     ON CONFLICT(page_id) DO UPDATE SET
                         name = excluded.name,
                         aliases_json = excluded.aliases_json,
                         identifiers_json = excluded.identifiers_json,
+                        genres_json = excluded.genres_json,
                         cover_url = excluded.cover_url,
                         icon_url = excluded.icon_url,
                         icon_type = excluded.icon_type,
                         last_synced_at = CURRENT_TIMESTAMP;
                     """,
-                    new { item.PageId, item.Name, aliasesJson, identsJson, item.CoverUrl, item.IconUrl, item.IconType },
+                    new { item.PageId, item.Name, aliasesJson, identsJson, genresJson, item.CoverUrl, item.IconUrl, item.IconType },
                     transaction: tx);
             }
             tx.Commit();
@@ -1393,6 +1725,47 @@ public class SqliteRepository : IDatabaseRepository
             _writeLock.Release();
         }
     }
+
+    public async Task<Dictionary<string, List<string>>> GetGameGenresMapAsync()
+    {
+        var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var conn = CreateConnection();
+            var rows = await conn.QueryAsync<dynamic>(
+                """
+                SELECT g.name AS GameName, c.genres_json AS GenresJson
+                FROM games g
+                JOIN game_catalog c ON (
+                    (g.notion_page_id IS NOT NULL AND g.notion_page_id != '' AND (g.notion_page_id = c.page_id OR REPLACE(g.notion_page_id, '-', '') = REPLACE(c.page_id, '-', '')))
+                    OR (LOWER(TRIM(g.name)) = LOWER(TRIM(c.name)))
+                )
+                WHERE c.genres_json IS NOT NULL AND c.genres_json != '' AND c.genres_json != '[]';
+                """);
+
+            foreach (var r in rows)
+            {
+                string? gameName = TryGetString(r, "GameName");
+                string? gJson = TryGetString(r, "GenresJson");
+                if (!string.IsNullOrWhiteSpace(gameName) && !string.IsNullOrWhiteSpace(gJson))
+                {
+                    try
+                    {
+                        var genres = JsonSerializer.Deserialize<List<string>>(gJson);
+                        if (genres != null && genres.Count > 0)
+                        {
+                            map[gameName.Trim()] = genres;
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+
+        return map;
+    }
+
 
     // ----------------- Settings -----------------
 
@@ -1422,4 +1795,19 @@ public class SqliteRepository : IDatabaseRepository
             _writeLock.Release();
         }
     }
+
+    private sealed class DailySummaryRow
+    {
+        public int Id { get; set; }
+        public string Date { get; set; } = "";
+        public int GameId { get; set; }
+        public int DurationSeconds { get; set; }
+        public int DurationMinutes { get; set; }
+        public int SessionCount { get; set; } = 1;
+        public string? NotionPageId { get; set; }
+        public string? SyncStatus { get; set; }
+        public string? NotionTitle { get; set; }
+        public string? NotionIconUrl { get; set; }
+    }
 }
+

@@ -92,12 +92,46 @@ public class NotionWireFormatTests
     {
         var (client, handler) = MakeClient("""{"id":"page-1"}""");
 
-        await client.UpdateDailyRecordAsync("page-1", 120, gamePageId: null, gameName: "测试游戏");
+        await client.UpdateDailyRecordAsync("page-1", 120, gamePageId: null, gameName: "测试游戏", writeDuration: true);
 
         handler.RequestBodies.Should().ContainSingle();
         using var doc = JsonDocument.Parse(handler.RequestBodies[0]);
         doc.RootElement.GetProperty("properties").GetProperty("单次时长").GetProperty("number")
             .GetDouble().Should().Be(2.0, "120 分钟 = 2 小时");
+        doc.RootElement.GetProperty("properties").GetProperty("绑定状态").GetProperty("select").GetProperty("name")
+            .GetString().Should().Be("未绑定", "未绑定的游戏更新时必须明确写入「未绑定」状态");
+    }
+
+    [Fact]
+    public async Task UpdateDailyRecord_WhenBound_ShouldSendBoundStatus()
+    {
+        var (client, handler) = MakeClient("""{"id":"page-1"}""");
+
+        await client.UpdateDailyRecordAsync("page-1", 120, gamePageId: "master-page-1", gameName: "测试游戏", writeDuration: true);
+
+        handler.RequestBodies.Should().ContainSingle();
+        using var doc = JsonDocument.Parse(handler.RequestBodies[0]);
+        var props = doc.RootElement.GetProperty("properties");
+        props.GetProperty("绑定状态").GetProperty("select").GetProperty("name")
+            .GetString().Should().Be("已绑定", "已绑定的游戏更新时应写入「已绑定」状态");
+        props.GetProperty("关联游戏").GetProperty("relation")[0].GetProperty("id")
+            .GetString().Should().Be("master-page-1");
+    }
+
+    [Fact]
+    public async Task UpdateDailyBindingStatus_ShouldOnlyPatchBindingStatus()
+    {
+        var (client, handler) = MakeClient("""{"id":"page-1"}""");
+
+        await client.UpdateDailyBindingStatusAsync("page-1", "未绑定");
+
+        handler.RequestBodies.Should().ContainSingle();
+        using var doc = JsonDocument.Parse(handler.RequestBodies[0]);
+        var props = doc.RootElement.GetProperty("properties");
+        props.GetProperty("绑定状态").GetProperty("select").GetProperty("name")
+            .GetString().Should().Be("未绑定");
+        props.TryGetProperty("单次时长", out _).Should().BeFalse("单独更新绑定状态绝不能携带单次时长");
+        props.TryGetProperty("游戏动态", out _).Should().BeFalse("单独更新绑定状态绝不能携带标题");
     }
 
     [Fact]

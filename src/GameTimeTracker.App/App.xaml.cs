@@ -51,7 +51,22 @@ public partial class App : Application
     /// <param name="args">Details about the launch request for the process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
-        _window.Activate();
+        var cmdArgs = Environment.GetCommandLineArgs();
+        var isAutoStart = cmdArgs.Any(a =>
+            string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "--autostart", StringComparison.OrdinalIgnoreCase));
+
+        var mainWindow = new MainWindow();
+        _window = mainWindow;
+
+        if (isAutoStart)
+        {
+            AppLog.Info("[启动] 检测到 --autostart / --minimized 参数，以静默托盘模式启动");
+            mainWindow.StartMinimized();
+        }
+        else
+        {
+            _window.Activate();
+        }
     }
 }

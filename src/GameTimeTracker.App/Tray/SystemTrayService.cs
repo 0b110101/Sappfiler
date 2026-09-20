@@ -290,13 +290,15 @@ public class SystemTrayService : IDisposable
         AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)10, gameStatusText);
 
         // 2. Today's Total
-        var todaySummaries = await _repo.GetDailySummariesByDateAsync(DateTime.Today.ToString("yyyy-MM-dd"));
+        var todayDateStr = AccountingDateHelper.GetAccountingDateString(DateTime.Now, _sessionManager.DailyCutoffHour);
+        var todaySummaries = await _repo.GetDailySummariesByDateAsync(todayDateStr);
         var todayMins = todaySummaries.Sum(s => s.DurationMinutes);
         AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)11, $"📅 今日总计: {DailyAggregator.FormatDuration(todayMins)}");
 
-        // 3. Pending count
+        // 3. Pending count (过滤掉已忽略的游戏，与主界面角标与待处理页保持一致)
         var pending = await _repo.GetPendingGamesAsync();
-        AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)12, $"⚠️ 待处理: {pending.Count}");
+        var pendingCount = pending.Count(p => p.Status != "ignored");
+        AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)12, $"⚠️ 待处理: {pendingCount}");
 
         AppendMenu(hMenu, MF_SEPARATOR, IntPtr.Zero, "");
 

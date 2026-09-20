@@ -1,507 +1,275 @@
-﻿# GameTimeTracker
+# GameTimeTracker
 
-Windows 后台自动统计游戏时长，并把每日时长同步到 Notion 的桌面应用（WinUI 3）。
+[![Release](https://img.shields.io/github/v/release/bbbab/GameTimeTracker?style=flat-square&color=blue)](https://github.com/bbbab/GameTimeTracker/releases)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/bbbab/GameTimeTracker)
+[![Framework](https://img.shields.io/badge/.NET-10.0-purple?style=flat-square)](https://dotnet.microsoft.com/)
+[![UI Framework](https://img.shields.io/badge/UI-WinUI%203-0078D7?style=flat-square)](https://learn.microsoft.com/windows/apps/winui/winui3/)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-orange.svg?style=flat-square)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-常驻托盘，自动识别你正在玩的游戏并计时，跨午夜自动拆分；本地记录与 Notion 双向同步，
-任一侧删除都会对账。
-
-> **这份文档是给第一次使用的人（含 QA）看的**，按顺序走一遍即可跑通。
-> 卡住时先看文末「常见问题」，那里覆盖了 90% 的踩坑点。
+Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据库的现代化桌面应用。
 
 ---
 
 ## 目录
 
-1. [快速开始](#1-快速开始)
-2. [客户端依赖（系统要求）](#2-客户端依赖系统要求)
-3. [Notion 配置](#3-notion-配置)
-4. [把本地游戏绑定到总表（relation）](#4-把本地游戏绑定到总表relation)
-5. [用 Rollup 把时长累积到总表](#5-用-rollup-把时长累积到总表)
-6. [日常使用](#6-日常使用)
-7. [版本更新](#7-版本更新)
-8. [常见问题](#8-常见问题)
-9. [从源码构建](#9-从源码构建)
+- [💡 为什么需要 GameTimeTracker](#-为什么需要-gametimetracker)
+- [✨ 核心特性](#-核心特性)
+- [🚀 快速开始](#-快速开始)
+- [🔗 Notion 关联配置指南（核心）](#-notion-关联配置指南核心)
+  - [1. 创建 Notion 内部集成并获取 Token](#1-创建-notion-内部集成并获取-token)
+  - [2. 为两个数据库授权连接（关键步骤）](#2-为两个数据库授权连接关键步骤)
+  - [3. 获取 Database ID](#3-获取-database-id)
+  - [4. 数据库结构定义与属性配置](#4-数据库结构定义与属性配置)
+  - [5. 在总表中自动汇总累计时长（Formula 公式）](#5-在总表中自动汇总累计时长formula-公式)
+- [🎮 游戏识别与映射机制](#-游戏识别与映射机制)
+- [🔄 版本更新与数据安全](#-版本更新与数据安全)
+- [⛔ 项目边界（What it doesn't do）](#-项目边界what-it-doesnt-do)
+- [🛠️ 技术栈](#️-技术栈)
+- [📦 从源码构建](#-从源码构建)
+- [📄 开源协议](#-开源协议)
+- [🙏 致谢](#-致谢)
 
 ---
 
-## 1. 快速开始
+## 💡 为什么需要 GameTimeTracker
 
-1. 到 [Releases](../../releases) 下载 `GameTimeTracker-vX.X.X-win-x64.zip`
-2. **解压到任意可写目录**（例如 `D:\Tools\GameTimeTracker`）
-   > ⚠️ **不要放 `C:\Program Files`**。程序会在自身目录下写 `data\logs\`，
-   在 Program Files 里会因权限不足而失败。
-3. 双击 `GameTimeTracker.App.exe` 启动 —— **无需安装任何运行时**
-4. 按第 3 节配置 Notion，之后同步全自动
-
-程序启动后常驻托盘。点右上角 `×` 是最小化到托盘，不是退出；
-要真正退出请右键托盘图标 → 退出。
+- **碎片化平台的痛点**：Steam、Epic、WeGame、GOG、Xbox 以及各类模拟器与独立游戏客户端分布分散，玩家无法在一个统一的看板中完整汇总自己的跨平台游玩历程。
+- **Notion 个人数据库的优势与门槛**：Notion 是搭建个人全能游戏库与自由看板的绝佳工具，但手工打卡耗时费力、极易遗漏，且容易因记账负担过重而放弃。
+- **自动化无感解决方案**：GameTimeTracker 在 Windows 后台低开销静默常驻，全自动识别当前运行的游戏进程并精确记录时长，自动处理跨午夜拆分，并将每日明细实时同步至你的专属 Notion 数据库，真正实现「玩游戏零打扰，查数据全自动」。
 
 ---
 
-## 2. 客户端依赖（系统要求）
+## ✨ 核心特性
 
-| 项目 | 要求 |
-|---|---|
-| 操作系统 | Windows 10 **1809（build 17763）** 或更高 / Windows 11 |
-| 架构 | **x64** |
-| .NET 运行时 | **不需要**（已自包含打包） |
-| Windows App SDK 运行时 | **不需要**（已自包含打包） |
-| WebView2 运行时 | Win10/11 通常随 Edge 预装，无需单独处理 |
-| 磁盘 | 约 300 MB（解压后） |
-| 权限 | 普通用户即可；**不需要管理员** |
-
-**不需要**安装 Notion 桌面版，也不需要浏览器扩展——程序直接调用 Notion 官方 API。
+- **零感心跳监控**：轻量级进程检测，每 5 秒进行一次增量心跳累加；突发断电或强退进程最多仅丢失 5 秒统计，数据极其稳健。
+- **午夜自动拆分**：跨越午夜 00:00 的连续游玩进程，自动切分归属自然日，保证每日统计精确无偏差。
+- **Notion 双向增量同步**：
+  - 自动向「每日时长表」推送打卡记录，并建立与「游戏总表」的 Relation 关联。
+  - 双向状态对账与防漏同步：支持本地与 Notion 任意一侧的数据删除核验，本地更具备已删除归档兜底保护。
+  - 绑定状态全自动标记：每日记录自动标定 `已绑定` 与 `未绑定` 状态，未绑定游戏后续关联总表时自动回填历史明细。
+- **多平台广泛兼容**：原生支持 Steam、Epic Games、GOG Galaxy、Ubisoft Connect、EA Desktop、Xbox PC、WeGame 等主流平台，并支持通过可执行文件（.exe）手动添加任意游戏。
+- **离线优先与数据自决**：数据完全持久化于本地 SQLite 数据库，即便无网络或未配置 Notion 亦可离线统计，提供 GitHub 风格年度热力图、时长排行、分类占比环形图等丰富离线可视化视图。
+- **原生 WinUI 3 体验**：基于 Windows App SDK 与 WinUI 3 构建，支持 Mica 云母透明材质与系统级深浅色主题自适应，界面流畅细腻。
 
 ---
 
-## 3. Notion 配置
+## 🚀 快速开始
 
-一共 6 步。**第 3.2 步（连接集成）最容易漏，漏了程序会拿到空数据。**
+1. 前往 [Releases](https://github.com/bbbab/GameTimeTracker/releases) 下载最新发行包 `GameTimeTracker-vX.X.X-win-x64.zip`。
+2. **解压至任意可写目录**（例如 `D:\Tools\GameTimeTracker`，请勿置于 `C:\Program Files` 以免受 UAC 写入权限限制）。
+3. 双击运行 `GameTimeTracker.exe`，程序将常驻于系统托盘。
+4. 打开程序「设置」界面，按照下方指南配置 Notion，保存后即可开启全自动同步。
 
-### 3.1 创建 Integration 并拿到 Token
+> 💡 **系统要求**：Windows 10 1809（Build 17763）或更高版本 / Windows 11（x64 架构）。程序为独立自包含打包，无需用户安装任何额外的 .NET 或 WinUI 运行时。
 
-1. 打开 <https://www.notion.so/my-integrations>
-2. 点 **New integration**
-   - **Name**：随便起，例如 `GameTimeTracker`
-   - **Type**：必须选 **Internal**（选错类型拿不到可用的 Token）
-   - **Associated workspace**：选你要同步的那个工作区
-3. 创建后进入该 Integration 的 **Secrets** 页
-4. 复制 **Internal Integration Secret**
+---
 
-   - 形如 `ntn_xxxxxxxxxxxx...` 或 `secret_xxxxxxxxxxxx...`
-   - **这是密钥，不要发到群里或提交进 git**
-   - 若不小心泄露，在同一个页面 **Regenerate** 即可作废旧的
+## 🔗 Notion 关联配置指南（核心）
 
-> **这个 Token 就是程序设置页要填的 `Notion Token`。**
-
-### 3.2 把两个数据库连接给 Integration ⚠️ 最容易漏
-
-Notion 的权限模型是：**Integration 默认看不到任何页面**，必须逐个授权。
-
-对**「游戏总表」**和**「每日时长表」**这两个数据库**分别**执行：
-
-1. 用浏览器打开该数据库，**把它展开成整页**（不要停在侧边栏预览状态）
-2. 点右上角 **`···`** → **Connections**（连接）
-3. 搜索你刚创建的 Integration 名字 → 点击添加
-4. 确认数据库标题下方出现该 Integration 的名字
-
-> **两个库都要做。** 只连一个的话，症状是"同步成功但另一个库没数据"。
->
-> 如果程序报 **403**，就是这一步没做或做漏了。
-
-### 3.3 拿到两个 Database ID
-
-在浏览器里打开数据库整页，看地址栏：
+Notion 同步需建立两个 Database：**「游戏总表」**（管理你的全部游戏库藏）与**「每日时长表」**（记录每天各游戏的游玩明细）。
 
 ```
-https://www.notion.so/<工作区名>/1a2b3c4d5e6f7890abcdef1234567890?v=...
-                                  └────────── 这 32 位就是 Database ID ──────────┘
+┌─────────────────────────────────┐       Relation 关联       ┌─────────────────────────────────┐
+│           游戏总表               │ ◄─────────────────────────┤          每日时长表              │
+│  - 游戏名称 (Title)             │                           │  - 游戏动态 (Title)             │
+│  - 累计时长 (Formula 自动汇总)   │ ────────────────────────► │  - 日期 (Date)                  │
+└─────────────────────────────────┘      Formula 反向汇总     │  - 单次时长 (Number, 小时)      │
+                                                              │  - 绑定状态 (Select)            │
+                                                              │  - 关联游戏 (Relation)          │
+                                                              └─────────────────────────────────┘
 ```
 
-- 取 `notion.so/` 后面那串 **32 位字符**
-- 带连字符也可以（程序会自动处理）
-- 两个数据库各取一个 ID，填到程序设置页的「游戏总表 Database ID」和「每日时长表 Database ID」
+### 1. 创建 Notion 内部集成并获取 Token
 
-> 不想从 URL 里抠？也可以在数据库 `···` 菜单里 **Copy link**，链接里同样含这串 ID。
+1. 登录 Notion 并访问 [Notion My Integrations](https://www.notion.so/my-integrations)。
+2. 点击 **New integration**：
+   - **Name**：填写自定义名称（例如 `GameTimeTracker`）。
+   - **Type**：必须选择 **Internal**。
+   - **Associated workspace**：选择存放你游戏数据库的工作区。
+3. 创建完成后，复制 **Internal Integration Secret**（格式为 `ntn_...` 或 `secret_...`）。此密钥即为客户端设置中的 `Notion Token`。
 
-### 3.4 准备「游戏总表」的属性
+[![Notion Integration Token Setup](https://img.shields.io/badge/Tutorial_Step_1-Notion_Integration_Token-blue?style=for-the-badge)](#)
 
-这是你的游戏库，一个游戏一行。程序**读取**它用于识别游戏和取封面。
+### 2. 为两个数据库授权连接（关键步骤）
 
-| 属性名 | 类型 | 必需 | 说明 |
+> ⚠️ **权限说明**：Notion API 采用严格授权机制，集成默认无法读取任何未授权页面。若未授权，程序将返回 `403 Forbidden`。
+
+针对**「游戏总表」**和**「每日时长表」**两个数据库，分别执行：
+1. 在浏览器或客户端中将该数据库**展开为完整全页（Full Page）**。
+2. 点击页面右上角的 **`···`** 菜单。
+3. 选择 **Connections**（连接）并在列表中搜索你创建的 Integration 名称并点击添加。
+
+[![Notion Connection Authorization](https://img.shields.io/badge/Tutorial_Step_2-Authorize_Connections-orange?style=for-the-badge)](#)
+
+### 3. 获取 Database ID
+
+打开数据库全页，观察浏览器地址栏 URL：
+
+```
+https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
+                                  └────────── 32 位 Database ID ──────────┘
+```
+
+- 复制链接中 `notion.so/` 之后的 **32 位字符串**（带或不带连字符均可，程序内部会自动归一化解析）。
+- 分别获取两张表的 ID，填入客户端设置中的「游戏总表 Database ID」与「每日时长表 Database ID」。
+
+[![Notion Database ID](https://img.shields.io/badge/Tutorial_Step_3-Get_Database_IDs-lightgrey?style=for-the-badge)](#)
+
+### 4. 数据库结构定义与属性配置
+
+请确保 Notion 数据库中创建的属性名称与数据类型严格符合下表（名称不匹配会导致 Notion API 报 400 错误）：
+
+#### A. 游戏总表（Game Catalog Database）
+用于程序识别游戏名称、封面和别名：
+
+| 属性名 | 字段类型 (Type) | 必需 | 说明 |
 |---|---|---|---|
-| `游戏名称` | **Title** | ✅ | 游戏名。程序会把这个名字写进每日记录标题 |
-| `封面` | URL / Files | 可选 | 用于界面背景与图标；也可以直接用页面的 Cover |
-| `别名` | 多选 或 文本 | 可选 | 游戏名的其它叫法，**辅助匹配**（见下） |
-| `游戏标识` | 多选 或 文本 | 可选 | 填 `steam:appid`（如 `steam:3112010`）可精确匹配；**不填也行** |
+| `游戏名称` | **Title** | ✅ | 游戏主标题，每日打卡与历史回刷将引用此名称 |
+| `封面` | Files & media 或 URL | 可选 | 用于客户端展示背景与海报（亦可直接使用 Notion 页面 Cover） |
+| `类型` | Multi-select 或 Text | 可选 | 游戏分类/标签（支持属性名：`类型` / `游戏类型` / `Genre` / `Genres` / `分类`，如 `RPG`、`动作`、`独立`、`FPS`）。用于客户端「统计」页生成游戏类型占比环形图 |
+| `别名` | Multi-select 或 Text | 可选 | 辅助匹配别名（如带括号的发布年 `Valheim (2020)`） |
+| `游戏标识` | Multi-select 或 Text | 可选 | 填入 `steam:appid`（例如 `steam:3112010`）实现 100% 精确映射 |
 
-> **关于匹配**：程序**以游戏名（含别名）为主**来识别游戏，**不需要**你逐个填 Steam AppID。
-> 库里游戏多的话不必去补 `游戏标识`——那只是锦上添花。
->
-> **别名怎么写更好**：如果你习惯在游戏名后加年份，建议写成**带括号**的形式，
-> 例如 `Valheim (2020)`。程序会剥掉末尾括号里的年份再比对，
-> 所以进程名 `Valheim` 能匹配上。
-> 写成裸年份 `Valheim 2020` 则无法安全剥掉——因为 `Football Manager 2024` 这类
-> 游戏名里的年份是有意义的，剥了会让不同代互相误匹配。
->
-> 版本后缀（`Deluxe / Ultimate / Definitive / Complete / Gold / Premium / Special /
-> Collector's / Enhanced / Anniversary Edition`、`Game of the Year Edition`、`Remastered`）
-> 在比对时会被忽略，所以总表写「XX Deluxe Edition」、进程名是「XX」也能匹配上。
+> 💡 **游戏类型与分类统计说明**：
+> - 客户端「统计」页展示的「游戏类型分布」环形图，其数据正是读取自游戏总表的 **`类型`**（或 `游戏类型`）属性。
+> - 客户端在同步总表目录时会自动拉取并持久化至本地缓存；若游戏总表中未填写类型或游戏尚未绑定，统计时自动归类为「其他」。
+> - 环形图取所选周期内游玩时长最多的前 5 大分类，其余标签合并至「其他」（鼠标悬停于图例「其他」可查看全部具体子标签）。
 
-### 3.5 准备「每日时长表」的属性
+#### B. 每日时长表（Daily Records Database）
+用于程序写入每天的游戏打卡数据：
 
-程序**写入**这张表，一天一个游戏一行。**属性名必须完全一致**，否则 Notion 会报 400。
-
-| 属性名 | 类型 | 必需 | 说明 |
+| 属性名 | 字段类型 (Type) | 必需 | 说明 |
 |---|---|---|---|
-| `游戏动态` | **Title** | ✅ | 程序写入，格式为 `游戏名 · 0.7 h` |
-| `日期` | **Date** | ✅ | 游玩日期，拉取时按天对账 |
-| `单次时长` | **Number** | ✅ | **单位是小时**，保留 2 位小数（如 `0.25` 表示 15 分钟）。Rollup 求和就靠它 |
-| `绑定状态` | **Select** | ✅ | 程序写入 `已绑定` / `未绑定`。**选项不用手工建**，见下 |
-| `关联游戏` | **Relation → 游戏总表** | ✅ | 指向总表条目。**第 5 节的 Rollup 依赖它** |
+| `游戏动态` | **Title** | ✅ | 程序自动写入，格式为 `游戏名 · X.X h` |
+| `日期` | **Date** | ✅ | 记录游玩归属日期（UTC 归一化） |
+| `单次时长` | **Number** | ✅ | **单位为小时**，保留 2 位小数（例如 0.50 表示 30 分钟） |
+| `绑定状态` | **Select** | ✅ | 程序自动写入 `已绑定` 或 `未绑定`（选项无需提前手工创建） |
+| `关联游戏` | **Relation** | ✅ | 关联到「游戏总表」，用于支持总表时长聚合统计 |
 
-> **必须先把这 5 个属性建好，且属性名要和上表完全一致。**
-> 属性名不匹配时 Notion 会返回 400（`property does not exist`），同步会失败。
-> 类型也要对——比如 `单次时长` 必须是 Number，否则写不进去。
->
-> **`绑定状态` 的两个选项不用手工创建。** Notion API 会在程序首次写入时自动把
-> `已绑定` / `未绑定` 加进选项列表（官方文档：*"If the select data source property
-> doesn't have an option by that name yet, then the name is added to the data source schema"*）。
-> 想自己定颜色的话，提前建好也无妨。
->
-> ⚠️ **注意「游戏动态」是每日时长表的标题属性。总表那个标题属性仍叫「游戏名称」，不要一起改。**
+[![Notion Database Schema](https://img.shields.io/badge/Tutorial_Step_4-Database_Schema_Properties-success?style=for-the-badge)](#)
 
-### 3.6 在程序里填配置并首次同步
+### 5. 在总表中自动汇总累计时长（Formula 公式）
 
-1. 打开程序 → 左侧 **设置**
-2. 依次填入：
-   - `Notion Token` → 3.1 复制的密钥
-   - `游戏总表 Database ID` → 3.3
-   - `每日时长表 Database ID` → 3.3
-3. 建议先点 **测试连接** 确认凭证有效
-4. 点 **保存设置**
+无需复杂的第三方自动化流程，利用 Notion 现代 **Formula 2.0** 即可实现自动求和：
 
-   **首次保存会自动跑一次完整同步**（程序会显示「正在首次同步」），
-   把总表和已有记录都拉下来。之后每 15 分钟自动同步一次，也可以在首页点「立即同步」。
-
----
-
-## 4. 把本地游戏绑定到总表（relation）
-
-程序识别到的本地游戏，需要和总表里的条目建立关联，才能：
-- 用总表里的（通常是中文）游戏名作为每日记录的标题
-- 让第 5 节的 Rollup 统计到时长
-
-**三种绑定方式，按推荐顺序：**
-
-### 方式 A：自动关联（多数情况够用）
-
-保存配置后，程序会自动尝试匹配。可靠的匹配信号有两个：
-
-1. 总表的 `游戏标识` 属性（`steam:appid`）—— 最准
-2. 封面 URL 里内嵌的 Steam AppID（`.../steam/apps/<appid>/...`）—— 总表没填标识时的兜底
-
-**只有确定性匹配才会自动绑定**；模糊匹配一律留给你人工确认，避免绑错。
-
-### 方式 B：在「待处理」页人工绑定
-
-左侧 **待处理** → 列出尚未绑定的游戏 → 点 **绑定到 Notion** → 从候选里选总表条目。
-
-候选会按匹配度排序，`exact` / `normalized` 这类确定性命中排在前面。
-
-### 方式 C：在「游戏映射」页查看与调整
-
-左侧 **游戏映射** → 列出所有本地游戏身份及其绑定状态（`● 已绑定` / `● 未绑定`），
-可按游戏名或可执行文件名搜索。适合核对"哪些还没绑"。
-
-> 绑定后，程序会**回刷该游戏的历史每日记录**：标题改成总表里的名字，
-> 并补上总表的 page icon。所以你改完总表的名字，历史记录也会跟着变。
-
----
-
-## 5. 用 Rollup 把时长累积到总表
-
-**这是把 GameTimeTracker 的时长汇总回总表的关键一步。**
-
-程序只往**每日时长表**写数据（一天一行）。如果你希望总表上能看到「这个游戏总共玩了多久」，
-就用 Notion 的 **Rollup** 属性自动汇总。
-
-### 5.1 先确认 relation 是双向的
-
-Rollup 需要一个「反向关联」，所以先让 `关联游戏` 这个 relation 双向可见：
-
-1. 打开**每日时长表**，点 `关联游戏` 属性表头 → **编辑属性**（Edit property）
-2. 在弹出的面板里找到**「在…中显示」/「Show on …」**那个开关（后面跟着目标库名），**打开它**
-3. 完成后，**游戏总表**里会自动多出一个 relation 属性（默认名是每日表的库名，可改名）
-
-> 这个开关是 Notion 的双向关联开关。中文界面可能显示为「在 游戏总表 中显示」，
-> 英文是「Show on 游戏总表」，位置在 relation 设置面板的下半部分。
->
-> 如果总表里已经有这个反向属性，跳过这步。
-
-### 5.2 在总表加一个 Rollup 属性
-
-打开**游戏总表** → 新增属性：
-
-| 设置项 | 选什么 |
-|---|---|
-| 属性名 | 例如 `GameTimeTracker 时长` |
-| 类型 | **Rollup** |
-| **Relation** | 选上一步的反向关联（如 `每日时长表`） |
-| **Property** | 选 **`单次时长`** |
-| **Calculate** | **Sum**（求和） |
-
-保存后，每个游戏行的这个属性就会显示**该游戏所有每日记录时长之和**。
-
-### 5.3 如果总表里本来就有「游戏时长」，想叠加而不是替换
-
-场景：你原本手工维护了一个 `游戏时长` 列，现在想让「手工值 + GameTimeTracker 自动统计」合在一起。
-
-**Rollup 本身不能加到另一个属性上**（它是只读的计算值）。要叠加得再加一个 **Formula** 属性：
-
-1. 按 5.2 建好 Rollup，假设命名为 `GT 累计`
-2. 新增一个属性：
-   - 类型选 **Formula**
-   - 表达式写：
-
+1. **建立双向关联**：
+   - 打开「每日时长表」，点击 `关联游戏` 属性表头 → **Edit property**。
+   - 开启 **Show on 游戏总表** 开关。
+   - 此时「游戏总表」中会自动出现反向关联属性（通常命名为 `每日时长表`）。
+2. **添加求和公式**：
+   - 在「游戏总表」中添加一个属性，类型选择 **Formula**，填入以下公式：
+     ```notion
+     prop("每日时长表").map(current.prop("单次时长")).sum()
      ```
-     prop("游戏时长") + prop("GT 累计")
+   - *（注：请将 `prop("每日时长表")` 替换为你总表中关联属性的实际名称；保存后即可实时显示该游戏的所有历史累计小时数。）*
+3. **（可选）叠加原有手工维护的历史时长**：
+   - 若总表中已有一列手工历史游玩时间（如 `历史时长`，单位为小时），可通过公式无缝合并：
+     ```notion
+     prop("历史时长") + prop("每日时长表").map(current.prop("单次时长")).sum()
      ```
 
-     > `游戏时长` 换成你原来那个列的实际名字。
-
-3. 新属性名可以叫 `总时长`，以后就看这一列
-
-**单位要对齐**——Rollup 拿到的是**小时**（与 `单次时长` 同单位）。
-
-- 你原来的 `游戏时长` 也是**小时** → 直接相加：
-  ```
-  prop("游戏时长") + prop("GT 累计")
-  ```
-- 你原来的列是**分钟** → 把 Rollup 的小时换算成分钟：
-  ```
-  prop("游戏时长") + prop("GT 累计") * 60
-  ```
-
-### 5.4 注意事项
-
-- **Rollup 只统计"已绑定"的记录**。没有 relation 的每日记录（`绑定状态` = `未绑定`）
-  不会被算进去 —— 所以第 4 节的绑定不是可选项，而是这一步的前提。
-- `单次时长` 必须是 **Number** 类型，否则 Sum 选不出来。
-- 程序**不会读写** Rollup / Formula 属性，它们完全由 Notion 计算，不会冲突。
-- 刚绑定时 Rollup 可能要等几秒才刷新，属于 Notion 正常行为。
-- 删除每日记录（程序内或 Notion 内）后，Rollup 会自动减少，无需手工维护。
-
-### 5.5 一个完整的例子
-
-假设总表原本是这样：
-
-| 游戏名称 | 游戏时长（小时，手工填） |
-|---|---|
-| 不思议迷宫 | 120 |
-
-配置后变成：
-
-| 游戏名称 | 游戏时长（手工，小时） | GT 累计（Rollup，小时） | 总时长（Formula） |
-|---|---|---|---|
-| 不思议迷宫 | 120 | 4 | `120 + 4` = **124** |
-
-> Rollup 累计的 4 小时 = 程序记的 4 小时（比如 4 天各玩了 1 小时）。
-> 若你手工那列用的是分钟，Formula 要写成 `prop("游戏时长") + prop("GT 累计") * 60`。
+[![Notion Formula Rollup](https://img.shields.io/badge/Tutorial_Step_5-Formula_Sum_Setup-blueviolet?style=for-the-badge)](#)
 
 ---
 
-## 6. 日常使用
+## 🎮 游戏识别与映射机制
 
-### 界面
-
-| 位置 | 说明 |
-|---|---|
-| **首页** | 游玩热力图、今日 Top 3、最近记录 |
-| **历史** | 按日期查看历史记录 |
-| **待处理** | 尚未绑定总表的游戏，可在此绑定或忽略 |
-| **游戏映射** | 所有本地游戏及其 Notion 绑定状态 |
-| **设置** | Notion 凭证、主题、存档位置 |
-| 侧边栏左下 | 添加游戏 / 打开 Notion / 同步状态 |
-
-### 计时是怎么算的
-
-程序每 5 秒扫描一次运行中的进程，识别到游戏就累计时长。
-
-- **强杀进程最多丢 5 秒**（按心跳增量累加，不是"开始到结束"一刀切）
-- **跨午夜自动拆分**：23:50 玩到 00:10，会分别记到两天
-- 手动添加的游戏按可执行文件名匹配
-
-### 支持的平台
-
-Steam、Epic、GOG、Ubisoft、EA、Xbox、WeGame，以及手动添加的任意游戏。
-
-### 同步时机
-
-- 启动时
-- 每 15 分钟（可在设置里调整）
-- 首页点「立即同步」
-- 窗口重新获得焦点时（检查 Notion 侧是否有删除）
-
-### 删除行为
-
-- **程序内删游戏**：Notion 每日表该游戏所有记录 + 总表条目一起归档，本地记录删除
-- **Notion 里删**：下次同步时本地跟着删
-- 所有删除入口**都会弹确认框**并列出影响条数
-- 物理删除前会写本地归档表 `deleted_archive` 留底
-- Notion 侧是**归档（进回收站）**，30 天内可恢复
-
-### 数据存放位置
-
-| 内容 | 位置 |
-|---|---|
-| 数据库、封面缓存 | `%LocalAppData%\GameTimeTracker\` |
-| 日志 | `<程序目录>\data\logs\app.log`（超 2MB 轮转为 `app.old.log`） |
-
-设置页可以把存档位置改到别处（写入引导文件，重启生效）。
+1. **自动化分级匹配**：
+   - **Level 1（确定性）**：通过可执行文件与 Steam 安装清单直接比对 Steam AppID，若总表包含匹配的 `steam:appid` 或封面内嵌 AppID，实现 100% 自动绑定。
+   - **Level 2（名称归一化）**：程序自动滤除进程名与总表名中的特殊符号、空格与常见版本后缀（如 `Deluxe Edition`、`Remastered`、`GOTY` 等）进行高精度比对。
+   - **Level 3（模糊待定）**：对于多重重名或低确定度命中，程序不妄作推断，统一收录至「待处理」列表由用户确认，杜绝错误关联。
+2. **一键绑定与历史回刷**：
+   - 在客户端「待处理」页面，用户可一键将本地游戏绑定到 Notion 总表条目。
+   - 绑定生效后，程序会自动回溯修补本地及 Notion 云端历史记录，将记录标题、关联 Relation 与 `绑定状态`（置为 `已绑定`）自动回填更新。
 
 ---
 
-## 7. 版本更新
+## 🔄 版本更新与数据安全
 
-**一句话：关掉程序 → 把新包解压到原目录、选择"覆盖" → 重新启动。数据不会丢。**
-
-### 为什么覆盖安装是安全的
-
-程序把**数据**和**程序文件**分开存：
-
-| 内容 | 位置 | 覆盖安装会动到吗 |
-|---|---|---|
-| 数据库（游戏、时长、绑定关系） | `%LocalAppData%\GameTimeTracker\gametime.db` | ❌ 不会 |
-| 封面缓存 | `%LocalAppData%\GameTimeTracker\cache\` | ❌ 不会 |
-| 自定义存档位置设置 | `%LocalAppData%\GameTimeTracker\data_location.txt` | ❌ 不会 |
-| 运行日志 | `<程序目录>\data\logs\` | ⚠️ 在程序目录里，覆盖时会保留但**删除目录会丢** |
-
-**数据全在 `%LocalAppData%`，不在程序目录**，所以覆盖安装碰不到你的记录。
-
-> 快捷查看数据目录：文件资源管理器地址栏粘贴 `%LocalAppData%\GameTimeTracker` 回车。
-
-### 具体步骤
-
-1. **先退出程序**——点右上角 `×` 只是最小化到托盘，
-   请右键**托盘图标 → 退出**。程序在运行时文件被占用，覆盖会失败。
-2. 解压新包到**原目录**，提示"文件已存在"时选 **全部覆盖 / 替换**。
-3. 启动 `GameTimeTracker.App.exe`。
-4. 到**设置**页确认版本号已变（如 `v0.9.5-alpha19`）。
-
-### 两种替代做法
-
-- **解压到新目录**：也可以，数据同样还在（在 LocalAppData）。
-  唯一区别是 `data\logs\` 里的**历史日志**不会跟过去——不影响使用，
-  但如果你正打算报 bug，建议保留旧日志。
-- **不想覆盖，想并存两个版本**：解压到不同目录即可。但**别同时运行**——
-  两个实例会同时写同一个数据库。
-
-### ⚠️ 升级前请先退出程序
-
-程序运行时数据库是被占用的（SQLite）。虽然不会损坏数据，
-但覆盖 `GameTimeTracker.App.exe` 会因文件占用而失败，出现"无法复制"之类报错。
-
-### 从旧版本升级时要注意
-
-**v0.9.5-alpha19 改了「每日时长表」的三个属性名**。如果你的表还是旧名字，
-同步会报 `400: property does not exist`。请按下表改名（**只改每日时长表，总表不用动**）：
-
-| 旧名 | 新名 | 类型 |
-|---|---|---|
-| `游戏名称` | **`游戏动态`** | Title |
-| `时长` | **`单次时长`** | Number |
-| `游戏` | **`关联游戏`** | Relation → 游戏总表 |
-
-> 总表的标题属性**仍然叫「游戏名称」**，不要一起改。
->
-> 程序**读取**时会同时认新旧名（为了能拉回改名前的历史记录），
-> 但**写入**只用新名——所以表里的属性名必须改成新的。
+- **数据与程序分离架构**：
+  - 本地 SQLite 核心数据、自定义别名及封面缓存均存储于系统目录：
+    `%LocalAppData%\GameTimeTracker\`
+  - 运行日志存放于 `<程序安装目录>\data\logs\app.log`，具备 2MB 自动滚卷轮转机制。
+- **平滑升级（零丢失风险）**：
+  1. 右键系统托盘图标，选择 **退出**（务必完全退出程序以释放文件锁定）。
+  2. 下载新版本压缩包，直接解压并**覆盖替换**原安装目录中的所有文件。
+  3. 重新启动客户端即可。升级过程绝不影响 `%LocalAppData%` 内的个人历史数据。
 
 ---
 
-## 8. 常见问题
+## ⛔ 项目边界（What it doesn't do）
 
-**报 401 / 提示 Token 无效**
-Token 复制不全或已过期。回 <https://www.notion.so/my-integrations> 重新复制。
-注意改完 Token 要回设置页点一次**保存**（程序会即时生效，不用重启）。
-
-**报 403 / 拒绝访问**
-第 3.2 步没做。两个数据库**都要**在 `···` → Connections 里连接你的 Integration。
-
-**同步成功，但 Notion 里没数据**
-- 确认填的是「每日时长表」的 ID，不是总表的
-- 确认第 3.5 节的 5 个属性**都已建好、且属性名完全一致**（属性名不匹配会返回 400）
-
-**每日记录显示的是进程名（如 `Gumballs`）而不是中文名**
-该游戏还没绑定到总表。去「待处理」页绑定，绑定后历史记录会自动回刷成总表里的名字。
-
-**Rollup 显示 0 或为空**
-- 检查 relation 是否双向（5.1）
-- 检查 Rollup 的 Property 选的是 `单次时长`、Calculate 选的是 `Sum`
-- 检查该游戏的每日记录 `绑定状态` 是否为 `已绑定`——未绑定的不算
-
-**程序一启动就崩 / 提示缺少 DLL**
-解压不完整，或被杀软拦截。**完整解压**（不要直接在压缩包里运行），
-并确认目录里有 `Microsoft.UI.Xaml.dll`。
-
-**同步很慢**
-若历史记录很多，首次同步会慢（要逐条比对）。之后正常同步应该是秒级。
-如果**每次都**很慢，把 `data\logs\app.log` 发给开发者。
-
-**怎么彻底退出程序**
-点 `×` 只是收托盘。右键托盘图标 → 退出。
-
-**想反馈 bug**
-把 `<程序目录>\data\logs\app.log` 发给开发者即可定位（日志自动轮转，不会无限变大）。
+为保障系统稳定性与用户账号绝对安全，本项目严格遵守以下技术原则：
+- **🚫 绝不注入任何游戏进程**：不使用任何 DLL 注入、API Hook 或驱动级监测技术，仅依赖 Windows 官方进程快照与性能计数器。**完全不会触发任何游戏反作弊系统（如 EAC、VAC、BattlEye）的误封**。
+- **🚫 无第三方中间服务器**：客户端直连 Notion 官方 HTTPS API，不存在任何中转服务器或收集个人数据的后门，Token 与游戏历史绝不离开本地环境。
+- **🚫 非在线社交对战平台**：专注服务于单机、联机全平台玩家的个人数字化生活记录与离线聚合分析。
 
 ---
 
-## 9. 从源码构建
+## 🛠️ 技术栈
 
-依赖：Windows 10/11、[.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-（Windows App SDK 随 NuGet 自动还原）。
+- **Language & Runtime**: C# 13 / [.NET 10](https://dotnet.microsoft.com/)
+- **UI Framework**: [WinUI 3](https://learn.microsoft.com/windows/apps/winui/winui3/) / [Windows App SDK](https://learn.microsoft.com/windows/apps/windows-app-sdk/)
+- **Architecture**: MVVM + High-Performance Event-Driven Sync
+- **Local Persistence**: SQLite + [Dapper](https://github.com/DapperLib/Dapper)
+- **Visuals & Charts**: WinUI Native Canvas / Path Vector Graphics
+- **System Integration**: Win32 Interop, Shell NotifyIcon (Tray), Mica Backdrop
 
+---
+
+## 📦 从源码构建
+
+### 开发环境需求
+- Windows 10 (1809+) 或 Windows 11
+- [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- Visual Studio 2022 (v17.12+) 或 VS Code（配合 C# Dev Kit）
+
+### 构建与运行
 ```powershell
+# 克隆仓库
+git clone https://github.com/bbbab/GameTimeTracker.git
+cd GameTimeTracker
+
+# 还原并编译
 dotnet build GameTimeTracker.slnx
+
+# 运行单元测试 (158 项自动化测试)
+dotnet test tests/GameTimeTracker.Tests/GameTimeTracker.Tests.csproj
+
+# 启动应用程序
 dotnet run --project src/GameTimeTracker.App
 ```
 
-**打包发布**（跑测试 + 发布 + 产物校验 + 压缩）：
-
+### 本地发布打包
+运行根目录下的一键自动化打包脚本：
 ```powershell
 .\publish.cmd
 ```
+产物将输出至 `dist/GameTimeTracker-vX.X.X-win-x64/` 及对应 `.zip` 压缩包。
 
-产物在 `dist/GameTimeTracker-v<版本>-win-x64/` 与同名 `.zip`。
+---
 
-> ⚠️ **不要开 `PublishTrimmed`**。WinUI 3 不支持裁剪——XAML 绑定靠反射解析类型，
-> 裁剪会把 WinUI 的 native 组件删掉，产出的包能生成、测试也全过，但**一启动就崩**。
-> `publish.cmd` 已内置产物校验，缺关键文件会直接中止打包。
+## 📄 开源协议与非商业条款
 
-### 版本号规则（SemVer）
+本项目采用 **[CC BY-NC-SA 4.0 (知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议)](LICENSE)** 进行开源保护。
 
-采用 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)：
+### 核心权益与限制说明
+- ✅ **个人自用免费**：允许任何个人出于非商业目的免费下载、安装、使用本软件。
+- ✅ **源码透明可审计**：源码完全开放，供玩家与技术同行审计安全性、反作弊机制（零内存读写、零 DLL 注入）及本地数据流转。
+- ❌ **严格禁止任何商业行为（Non-Commercial）**：
+  - **严禁任何个人、团队或机构将本项目源代码、编译产物（.exe / .zip）或二次修改版本用于任何盈利性商业活动**。
+  - 严禁行为包括但不限于：打包倒卖、上架收费软件分发平台、网盘付费下载、植入商业广告/流氓推广、捆绑第三方商业插件、提供付费托管服务等。
+- 🔄 **相同方式共享（Share-Alike）**：任何基于本项目二次开发的代码分发，必须沿用相同的 CC BY-NC-SA 4.0 协议开源，并保留原始项目与作者署名。
 
-```
-MAJOR.MINOR.PATCH[-预发布标识.序号][+构建信息]
-  0  .  2  .  21  -   alpha . 1
-```
+完整法律文本请参阅仓库根目录下的 [LICENSE](LICENSE) 文件。
 
-**数字段**（递增某一段时，右侧各段归零）：
+---
 
-| 段 | 何时递增 | 例 |
-|---|---|---|
-| `MAJOR` | 不兼容的改动（对外行为 / 接口破坏性变更） | `0.2.21` → `1.0.0` |
-| `MINOR` | 向下兼容地**新增功能** | `0.2.21` → `0.3.0` |
-| `PATCH` | 向下兼容地**修缺陷** | `0.2.21` → `0.2.22` |
+## 🙏 致谢
 
-**当前处于初始开发阶段（`0.Y.Z`），约定：**
+在 GameTimeTracker 的架构设计、核心算法推演与代码工程化实现过程中，感谢以下前沿大语言模型与 AI 编程伙伴提供的深度协助：
 
-- **正式确认可用的版本**：`0.2.20`、`0.2.21` …… 每个交付包递增 `PATCH`。
-- **调试中的版本**：在目标 `PATCH` 后加预发布序号 —— `0.2.21-alpha.2`、`-alpha.2`……
-  测试通过、正式确定之后**去掉 `-alpha.N`**，版本落成 `0.2.21`。
-  也就是说：**修订号在测试通过前不落实**，先在 alpha 上迭代。
-
-正式发布时改为 `1.0.0`。
-
-**预发布段**优先级**低于**同号正式版（`0.2.21-alpha.1` < `0.2.21`）。
-比较时按**数字**而非字符串：`alpha.2 < alpha.10`。
-
-#### 改版本号改哪里
-
-**唯一来源是仓库根 `Directory.Build.props`**，四个工程自动继承。出新包时**必须同时改这几处**，
-只改一处会让 exe 的文件属性仍显示旧版本、无法分辨包的新旧：
-
-| 位置 | 作用 |
-|---|---|
-| `Directory.Build.props` → `VersionPrefix` | 版本主体，程序界面里显示的就是它（如 `0.2.21`） |
-| `Directory.Build.props` → `VersionSuffix` | 预发布序号（如 `alpha.1`）；正式确认后留空 |
-| `Directory.Build.props` → `FileVersion` | exe 文件属性「文件版本」。只能是四段纯数字，**末段放预发布序号**（如 `0.2.21.1`；无预发布时写 `0`） |
-| `src/GameTimeTracker.App/Package.appxmanifest` → `Identity/@Version` | 必须与 `FileVersion` 完全一致 |
-
-`publish.cmd` 会自动读这几处并**校验一致性**，不一致会直接中止打包。
-
-## License
-
-MIT，见 [LICENSE](LICENSE)。
+- [Google Gemini](https://deepmind.google/technologies/gemini/)
+- [OpenAI GPT](https://openai.com/)
+- [Anthropic Claude](https://www.anthropic.com/)
+- [DeepSeek](https://www.deepseek.com/)

@@ -1,4 +1,4 @@
-﻿<Project>
+<Project>
 
   <!--
     全仓库统一的版本号定义。
@@ -35,17 +35,17 @@
       AssemblyVersion               -> 程序集绑定版本，只在 MAJOR 变动时改
   -->
   <PropertyGroup>
-    <VersionPrefix>0.2.21</VersionPrefix>
+    <VersionPrefix>0.3.1</VersionPrefix>
     <!-- 预发布序号：调试中用 alpha.N；测试确认后留空并把 VersionPrefix 定为该版本 -->
-    <VersionSuffix>alpha.2</VersionSuffix>
+    <VersionSuffix></VersionSuffix>
 
     <!-- FileVersion 只能是四段纯数字：MAJOR.MINOR.PATCH.<预发布序号>（无预发布时为 0） -->
-    <FileVersion>0.2.21.2</FileVersion>
-    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <FileVersion>0.3.1.0</FileVersion>
+    <AssemblyVersion>0.3.1.0</AssemblyVersion>
 
     <Product>GameTimeTracker</Product>
     <Company>GameTimeTracker</Company>
-    <Copyright>MIT License</Copyright>
+    <Copyright>CC BY-NC-SA 4.0</Copyright>
   </PropertyGroup>
 
 </Project>

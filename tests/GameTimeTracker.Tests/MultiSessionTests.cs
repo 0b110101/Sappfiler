@@ -86,4 +86,44 @@ public class MultiSessionTests : IDisposable
         _manager.GetActiveSessions().Should().ContainSingle("A 退出后 B 仍应保持活动")
             .Which.GameId.Should().Be(b.Id);
     }
+
+    [Fact]
+    public async Task MultiProcessGame_GroupsByGameId_AndMaintainsDeterministicOrder()
+    {
+        var gameA = await MakeGameAsync("游戏A", "3031");
+        var gameB = await MakeGameAsync("游戏B", "3032");
+
+        var startA1 = new DateTime(2026, 9, 18, 12, 0, 0);
+        var startB = new DateTime(2026, 9, 18, 12, 1, 0);
+        var startA2 = new DateTime(2026, 9, 18, 12, 2, 0); // 游戏 A 的子进程后启动
+
+        await _manager.StartSessionAsync(gameA, new DetectedProcess(101, "a_launcher.exe", @"C://a_launcher.exe", "游戏A 启动器"), startA1);
+        await _manager.StartSessionAsync(gameB, new DetectedProcess(201, "b.exe", @"C://b.exe", "游戏B"), startB);
+        await _manager.StartSessionAsync(gameA, new DetectedProcess(102, "a_game.exe", @"C://a_game.exe", "游戏A 主进程"), startA2);
+
+        var sessions = _manager.GetActiveSessions();
+        sessions.Should().HaveCount(3);
+
+        // 分组按 GameId 升序，去重后应只有 2 款游戏，且顺序不受各子进程启动时间影响
+        var distinctGames = sessions
+            .GroupBy(s => s.GameId)
+            .Select(g => new
+            {
+                GameId = g.Key,
+                EarliestSession = g.OrderBy(s => s.StartTime).First(),
+                EarliestStartTime = g.Min(s => s.StartTime),
+                MaxDurationSeconds = g.Max(s => s.DurationSeconds)
+            })
+            .OrderBy(g => g.GameId)
+            .ToList();
+
+        distinctGames.Should().HaveCount(2);
+        distinctGames[0].GameId.Should().Be(Math.Min(gameA.Id, gameB.Id));
+        distinctGames[1].GameId.Should().Be(Math.Max(gameA.Id, gameB.Id));
+
+        // 游戏 A 的最早启动时间应为启动器的启动时间
+        var summaryA = distinctGames.First(g => g.GameId == gameA.Id);
+        summaryA.EarliestStartTime.Should().Be(startA1);
+        summaryA.EarliestSession.Pid.Should().Be(101);
+    }
 }

@@ -53,16 +53,20 @@ public sealed partial class PendingPage : Page
         await LoadPendingGamesAsync();
     }
 
+    private bool _isIgnoredExpanded = false;
+    private List<GameRecord> _ignoredGames = new();
+
     private async Task LoadPendingGamesAsync()
     {
         if (_repo == null) return;
         var pending = await _repo.GetPendingGamesAsync();
         var activePending = pending.Where(p => p.Status != "ignored").ToList();
+        _ignoredGames = pending.Where(p => p.Status == "ignored").ToList();
 
         // 填充本地封面路径（复用与其它页面一致的缓存查找；缺失时按需提取一次图标）
         if (_coverCache != null)
         {
-            foreach (var game in activePending)
+            foreach (var game in activePending.Concat(_ignoredGames))
             {
                 try
                 {
@@ -84,6 +88,12 @@ public sealed partial class PendingPage : Page
 
         PendingRepeater.ItemsSource = activePending;
         EmptyNotice.Visibility = activePending.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // 已忽略游戏列表与折叠栏
+        IgnoredRepeater.ItemsSource = _ignoredGames;
+        IgnoredSection.Visibility = _ignoredGames.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        IgnoredTitleText.Text = $"已忽略的游戏 ({_ignoredGames.Count})";
+
         OnPendingCountChanged?.Invoke();
     }
 
@@ -150,6 +160,47 @@ public sealed partial class PendingPage : Page
         {
             await _repo.UpdateGameStatusAsync(game.Id, "ignored");
             await LoadPendingGamesAsync();
+
+            var undoBtn = new Button
+            {
+                Content = "撤销",
+                FontSize = 12,
+                Padding = new Thickness(10, 4, 10, 4)
+            };
+            undoBtn.Click += async (s, args) =>
+            {
+                await _repo.UpdateGameStatusAsync(game.Id, "active");
+                await LoadPendingGamesAsync();
+                StatusInfoBar.IsOpen = false;
+            };
+
+            StatusInfoBar.Severity = InfoBarSeverity.Informational;
+            StatusInfoBar.Title = "已忽略";
+            StatusInfoBar.Message = $"已忽略「{game.Name}」，它已移至下方「已忽略的游戏」中，可随时恢复。";
+            StatusInfoBar.ActionButton = undoBtn;
+            StatusInfoBar.IsOpen = true;
+        }
+    }
+
+    private void OnToggleIgnoredClicked(object sender, RoutedEventArgs e)
+    {
+        _isIgnoredExpanded = !_isIgnoredExpanded;
+        IgnoredRepeater.Visibility = _isIgnoredExpanded ? Visibility.Visible : Visibility.Collapsed;
+        IgnoredChevronIcon.Glyph = _isIgnoredExpanded ? "\uE70E" : "\uE70D";
+    }
+
+    private async void OnRestoreGameClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: GameRecord game } && _repo != null)
+        {
+            await _repo.UpdateGameStatusAsync(game.Id, "active");
+            await LoadPendingGamesAsync();
+
+            StatusInfoBar.Severity = InfoBarSeverity.Success;
+            StatusInfoBar.Title = "已恢复";
+            StatusInfoBar.Message = $"已将「{game.Name}」恢复至待处理队列。";
+            StatusInfoBar.ActionButton = null;
+            StatusInfoBar.IsOpen = true;
         }
     }
 

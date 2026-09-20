@@ -39,12 +39,12 @@
                         <!-- Dark Theme Resources -->
                         <ResourceDictionary x:Key="Dark">
                             <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#1A1B2E" />
-                            <SolidColorBrush x:Key="HeatmapLevel0Brush" Color="#262B3A" />
-                            <SolidColorBrush x:Key="HeatmapLevel0BorderBrush" Color="#333A4D" />
-                            <SolidColorBrush x:Key="HeatmapLevel1Brush" Color="#1E2040" />
-                            <SolidColorBrush x:Key="HeatmapLevel2Brush" Color="#3333AA" />
-                            <SolidColorBrush x:Key="HeatmapLevel3Brush" Color="#6666CC" />
-                            <SolidColorBrush x:Key="HeatmapLevel4Brush" Color="#9999DD" />
+                            <SolidColorBrush x:Key="HeatmapLevel0Brush" Color="#2A2D45" />
+                            <SolidColorBrush x:Key="HeatmapLevel0BorderBrush" Color="Transparent" />
+                            <SolidColorBrush x:Key="HeatmapLevel1Brush" Color="#3C3E5F" />
+                            <SolidColorBrush x:Key="HeatmapLevel2Brush" Color="#606187" />
+                            <SolidColorBrush x:Key="HeatmapLevel3Brush" Color="#8485AF" />
+                            <SolidColorBrush x:Key="HeatmapLevel4Brush" Color="#A8A8D7" />
                             <SolidColorBrush x:Key="HeatmapLevel5Brush" Color="#CCCCFF" />
                             <SolidColorBrush x:Key="CardBackgroundBrush" Color="#212338" Opacity="0.92" />
                             <SolidColorBrush x:Key="CardBorderBrush" Color="#2D3050" />
@@ -75,6 +75,11 @@
                     <converters:BoolToVisibilityConverter x:Key="InverseBoolToVisConverter" Invert="True" />
                     <converters:NullToVisibilityConverter x:Key="NullToVisConverter" />
                     <converters:NullToVisibilityConverter x:Key="InverseNullToVisConverter" Invert="True" />
+                    <converters:BoolToAccentBrushConverter x:Key="BoolToAccentBrushConverter" />
+                    <converters:BoolToContrastTextBrushConverter x:Key="BoolToContrastTextBrushConverter" />
+                    <converters:HexToBrushConverter x:Key="HexToBrushConverter" />
+                    <converters:RankToBadgeBrushConverter x:Key="RankToBadgeBrushConverter" />
+                    <converters:RankToTextBrushConverter x:Key="RankToTextBrushConverter" />
                 </ResourceDictionary>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>

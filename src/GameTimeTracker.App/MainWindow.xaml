@@ -17,48 +17,39 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="170" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
 
-        <!-- Custom TitleBar -->
-        <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="GameTime Tracker">
-            <TitleBar.IconSource>
-                <ImageIconSource>
-                    <ImageIconSource.ImageSource>
-                        <BitmapImage UriSource="ms-appx:///Assets/logo.png" DecodePixelWidth="32" />
-                    </ImageIconSource.ImageSource>
-                </ImageIconSource>
-            </TitleBar.IconSource>
-        </TitleBar>
+        <!-- 170px Left Sidebar Background (Extends to the very top window edge with rounded top-right corner) -->
+        <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="0"
+                Background="{ThemeResource SidebarBackgroundBrush}"
+                BorderBrush="{ThemeResource CardBorderBrush}"
+                BorderThickness="0,0,1,0"
+                CornerRadius="0,10,0,0" />
 
-        <!-- Main Body Grid: 220px Sidebar + Content Frame -->
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="220" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+        <!-- Custom TitleBar (Full-width for window dragging & caption buttons) -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Grid.ColumnSpan="2" Height="40" Background="Transparent">
+            <!-- Brand: Larger 26x26 Logo + Bold 14px Text (Over white sidebar background) -->
+            <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center" Margin="6,0,0,0"
+                        HorizontalAlignment="Left" IsHitTestVisible="False">
+                <Border Width="26" Height="26" CornerRadius="6" Background="Transparent">
+                    <Image Width="26" Height="26" Source="ms-appx:///Assets/logo.png" />
+                </Border>
+                <TextBlock Text="GameTime Tracker" FontSize="14" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
 
-            <!-- 220px Left Sidebar -->
-            <Border Grid.Column="0"
-                    Background="{ThemeResource SidebarBackgroundBrush}"
-                    BorderBrush="{ThemeResource CardBorderBrush}"
-                    BorderThickness="0,0,1,0"
-                    Padding="16,20,16,16">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
+        <!-- Sidebar Navigation Content (Row 1, Column 0) -->
+        <Grid Grid.Row="1" Grid.Column="0" Padding="12,12,12,16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-                    <!-- App Brand -->
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="4,0,0,24">
-                        <Border Width="32" Height="32" CornerRadius="8" Background="Transparent">
-                            <Image Width="32" Height="32" Source="ms-appx:///Assets/logo.png" />
-                        </Border>
-                        <TextBlock Text="GameTime Tracker" FontSize="16" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
-                    </StackPanel>
-
-                    <!-- Nav Items -->
-                    <StackPanel Grid.Row="1" Spacing="4">
+                    <!-- Nav Items (Shifted up ~40px) -->
+                    <StackPanel Grid.Row="0" Spacing="4">
                         <!-- 今日 (Active Tab) -->
                         <Border x:Name="NavHomeBtn" Tag="Home"
                                 Tapped="OnNavHomeClicked"
@@ -74,7 +65,12 @@
                                 <Border x:Name="NavHomeIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
                                         Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Visible" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                                    <FontIcon x:Name="NavHomeIcon" Glyph="&#xE80F;" FontSize="16" Foreground="{ThemeResource AccentBlueBrush}" />
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path x:Name="NavHomePath" Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 5 12 l -2 0 l 9 -9 l 9 9 l -2 0 M 5 12 v 7 a 2 2 0 0 0 2 2 h 10 a 2 2 0 0 0 2 -2 v -7 M 9 21 v -6 a 2 2 0 0 1 2 -2 h 2 a 2 2 0 0 1 2 2 v 6" />
+                                        </Canvas>
+                                    </Viewbox>
                                     <TextBlock x:Name="NavHomeText" Text="今日" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
                                 </StackPanel>
                             </Grid>
@@ -94,8 +90,39 @@
                                 <Border x:Name="NavHistoryIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
                                         Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Collapsed" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                                    <FontIcon x:Name="NavHistoryIcon" Glyph="&#xE81C;" FontSize="16" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path x:Name="NavHistoryPath" Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 12 8 l 0 4 l 2 2 M 3.05 11 a 9 9 0 1 1 0.5 4 m -0.5 5 v -5 h 5" />
+                                        </Canvas>
+                                    </Viewbox>
                                     <TextBlock x:Name="NavHistoryText" Text="历史" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <!-- 统计 -->
+                        <Border x:Name="NavStatsBtn" Tag="Stats"
+                                Tapped="OnNavStatsClicked"
+                                PointerEntered="OnNavPointerEntered" PointerExited="OnNavPointerExited"
+                                HorizontalAlignment="Stretch"
+                                Background="Transparent" CornerRadius="10" Padding="10,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="NavStatsIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
+                                        Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Collapsed" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <!-- Tabler chart-bar icon -->
+                                            <Path x:Name="NavStatsPath" Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 3 12 h 4 v 8 h -4 z M 10 7 h 4 v 13 h -4 z M 17 3 h 4 v 17 h -4 z" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock x:Name="NavStatsText" Text="统计" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -115,7 +142,12 @@
                                 <Border x:Name="NavPendingIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
                                         Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Collapsed" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                                    <FontIcon x:Name="NavPendingIcon" Glyph="&#xE7BA;" FontSize="16" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path x:Name="NavPendingPath" Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 12 9 v 4 M 10.363 3.591 l -8.106 13.534 a 1.914 1.914 0 0 0 1.636 2.871 h 16.214 a 1.914 1.914 0 0 0 1.636 -2.87 l -8.106 -13.536 a 1.914 1.914 0 0 0 -3.274 0 z M 12 16 h 0.01" />
+                                        </Canvas>
+                                    </Viewbox>
                                     <TextBlock x:Name="NavPendingText" Text="待处理" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                                 </StackPanel>
                                 <Border x:Name="PendingBadgeBorder" Grid.Column="2" Background="{ThemeResource StatusRedBrush}"
@@ -147,7 +179,12 @@
                                 <Border x:Name="NavMappingsIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
                                         Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Collapsed" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                                    <FontIcon x:Name="NavMappingsIcon" Glyph="&#xE71B;" FontSize="16" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path x:Name="NavMappingsPath" Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 9 15 l 6 -6 M 11 6 l 0.463 -0.536 a 5 5 0 0 1 7.071 7.072 l -0.534 0.464 M 13 18 l -0.397 0.534 a 5.068 5.068 0 0 1 -7.127 0 a 4.972 4.972 0 0 1 0 -7.071 l 0.524 -0.463" />
+                                        </Canvas>
+                                    </Viewbox>
                                     <TextBlock x:Name="NavMappingsText" Text="游戏映射" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                                 </StackPanel>
                             </Grid>
@@ -167,7 +204,12 @@
                                 <Border x:Name="NavSettingsIndicator" Grid.Column="0" Width="3" Height="16" CornerRadius="1.5"
                                         Background="{ThemeResource AccentBlueBrush}" Margin="-2,0,10,0" Visibility="Collapsed" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                                    <FontIcon x:Name="NavSettingsIcon" Glyph="&#xE713;" FontSize="16" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                    <Viewbox Width="17" Height="17" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path x:Name="NavSettingsPath" Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 10.325 4.317 c 0.426 -1.756 2.924 -1.756 3.35 0 a 1.724 1.724 0 0 0 2.573 1.066 c 1.543 -0.94 3.31 0.826 2.37 2.37 a 1.724 1.724 0 0 0 1.065 2.572 c 1.756 0.426 1.756 2.924 0 3.35 a 1.724 1.724 0 0 0 -1.066 2.573 c 0.94 1.543 -0.826 3.31 -2.37 2.37 a 1.724 1.724 0 0 0 -2.572 1.065 c -0.426 1.756 -2.924 1.756 -3.35 0 a 1.724 1.724 0 0 0 -2.573 -1.066 c -1.543 0.94 -3.31 -0.826 -2.37 -2.37 a 1.724 1.724 0 0 0 -1.065 -2.572 c -1.756 -0.426 -1.756 -2.924 0 -3.35 a 1.724 1.724 0 0 0 1.066 -2.573 c -0.94 -1.543 0.826 -3.31 2.37 -2.37 c 1 0.608 2.296 0.07 2.572 -1.065 z M 9 12 a 3 3 0 1 0 6 0 a 3 3 0 0 0 -6 0" />
+                                        </Canvas>
+                                    </Viewbox>
                                     <TextBlock x:Name="NavSettingsText" Text="设置" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                                 </StackPanel>
                             </Grid>
@@ -175,7 +217,7 @@
                     </StackPanel>
 
                     <!-- Bottom Actions & Status Capsule -->
-                    <StackPanel Grid.Row="2" Spacing="8">
+                    <StackPanel Grid.Row="1" Spacing="8">
                         <!-- 1. 手动添加游戏 -->
                         <Button x:Name="ManualAddGameBtn"
                                 Click="OnManualAddGameClicked"
@@ -185,15 +227,20 @@
                                 BorderBrush="{ThemeResource CardBorderBrush}"
                                 BorderThickness="1"
                                 CornerRadius="10"
-                                Padding="12,8">
+                                Padding="10,7">
                             <Grid HorizontalAlignment="Stretch">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                                    <FontIcon Glyph="&#xE710;" FontSize="13" Foreground="{ThemeResource AccentBlueBrush}" />
-                                    <TextBlock Text="添加游戏" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 12 5 l 0 14 M 5 12 l 14 0" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="添加游戏" FontSize="11.5" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
                                 </StackPanel>
                                 <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
                             </Grid>
@@ -208,15 +255,20 @@
                                 BorderBrush="{ThemeResource CardBorderBrush}"
                                 BorderThickness="1"
                                 CornerRadius="10"
-                                Padding="12,8">
+                                Padding="10,7">
                             <Grid HorizontalAlignment="Stretch">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                                    <FontIcon Glyph="&#xE8A7;" FontSize="13" Foreground="{ThemeResource AccentPurpleBrush}" />
-                                    <TextBlock Text="打开 Notion" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                    <Viewbox Width="14" Height="14" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{ThemeResource AccentPurpleBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="M 12 6 h -6 a 2 2 0 0 0 -2 2 v 10 a 2 2 0 0 0 2 2 h 10 a 2 2 0 0 0 2 -2 v -6 M 11 13 l 9 -9 M 15 4 h 5 v 5" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="打开 Notion" FontSize="11.5" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
                                 </StackPanel>
                                 <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
                             </Grid>
@@ -233,11 +285,9 @@
                             </StackPanel>
                         </Border>
                     </StackPanel>
-                </Grid>
-            </Border>
-
-            <!-- Main Content Frame -->
-            <Frame x:Name="ContentFrame" Grid.Column="1" />
         </Grid>
+
+        <!-- Main Content Frame -->
+        <Frame x:Name="ContentFrame" Grid.Row="1" Grid.Column="1" />
     </Grid>
 </Window>

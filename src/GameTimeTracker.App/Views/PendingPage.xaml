@@ -48,8 +48,12 @@
                                         <Image Source="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource StringToImageConverter}}"
                                                Stretch="UniformToFill"
                                                Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource NullToVisConverter}}" />
-                                        <FontIcon Glyph="&#xE7FC;" FontSize="22" Foreground="{ThemeResource AccentBlueBrush}"
-                                                  Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}" />
+                                         <Viewbox Width="24" Height="24" Visibility="{x:Bind CoverPath, Mode=OneWay, Converter={StaticResource InverseNullToVisConverter}}">
+                                            <Canvas Width="24" Height="24">
+                                                <Path Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                      Data="M 8 12 a 1 1 0 1 0 2 0 a 1 1 0 0 0 -2 0 M 14 12 a 1 1 0 1 0 2 0 a 1 1 0 0 0 -2 0 M 15.5 17 c 0 1 1.5 3 2 3 c 1.5 0 2.833 -1.667 3.5 -3 c 0.667 -1.667 0.5 -5.833 -1.5 -11.5 c -1.457 -1.015 -3 -1.34 -4.5 -1.5 l -0.972 1.923 a 11.913 11.913 0 0 0 -4.053 0 l -0.975 -1.923 c -1.5 0.16 -3.043 0.485 -4.5 1.5 c -2 5.667 -2.167 9.833 -1.5 11.5 c 0.667 1.333 2 3 3.5 3 c 0.5 0 2 -2 2 -3 M 7 16.5 c 3.5 1 6.5 1 10 0" />
+                                            </Canvas>
+                                        </Viewbox>
                                     </Grid>
                                 </Border>
 
@@ -82,6 +86,56 @@
                     </DataTemplate>
                 </ItemsRepeater.ItemTemplate>
             </ItemsRepeater>
+
+            <!-- Ignored Games Section (反悔药) -->
+            <StackPanel x:Name="IgnoredSection" Spacing="10" Margin="0,16,0,0" Visibility="Collapsed">
+                <Button x:Name="ToggleIgnoredBtn" Click="OnToggleIgnoredClicked" Background="Transparent" BorderThickness="0" Padding="4,4">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon x:Name="IgnoredChevronIcon" Glyph="&#xE70D;" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock x:Name="IgnoredTitleText" Text="已忽略的游戏 (0)" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                    </StackPanel>
+                </Button>
+
+                <ItemsRepeater x:Name="IgnoredRepeater" Visibility="Collapsed">
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="models:GameRecord">
+                            <Border Margin="0,0,0,8" CornerRadius="10"
+                                    BorderBrush="{ThemeResource CardBorderBrush}"
+                                    BorderThickness="1"
+                                    Background="{ThemeResource CardBackgroundBrush}"
+                                    Opacity="0.85"
+                                    Padding="14,10">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock Text="{x:Bind Name}" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                            <Border Background="#154F8FFF" CornerRadius="4" Padding="4,1">
+                                                <TextBlock Text="{x:Bind Platform}" FontSize="11" Foreground="{ThemeResource AccentBlueBrush}" />
+                                            </Border>
+                                            <Border Background="#15888888" CornerRadius="4" Padding="4,1">
+                                                <TextBlock Text="已忽略" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Text="{x:Bind ExecutablePath}" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+
+                                    <Button Grid.Column="1" Tag="{x:Bind}" Click="OnRestoreGameClicked" CornerRadius="6" Padding="10,5" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon Glyph="&#xE7A7;" FontSize="12" />
+                                            <TextBlock Text="恢复到待处理" FontSize="12" />
+                                        </StackPanel>
+                                    </Button>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

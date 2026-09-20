@@ -55,7 +55,7 @@ internal sealed class DetectorScanLog
     {
         if (_skipReasons.Count == 0)
         {
-            AppLog.Info($"[游戏库] {_platform}: 扫描 {_seen}，收录 {_kept}");
+            AppLog.Info($"[平台检索] {_platform}: 扫描 {_seen}，收录 {_kept}");
             return;
         }
 
@@ -65,6 +65,6 @@ internal sealed class DetectorScanLog
             .Select(kv => $"{kv.Key}×{kv.Value}"));
 
         var skipped = _seen - _kept;
-        AppLog.Info($"[游戏库] {_platform}: 扫描 {_seen}，收录 {_kept}，跳过 {skipped}（{detail}）");
+        AppLog.Info($"[平台检索] {_platform}: 扫描 {_seen}，收录 {_kept}，跳过 {skipped}（{detail}）");
     }
 }

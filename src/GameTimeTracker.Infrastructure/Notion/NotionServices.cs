@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -63,6 +63,20 @@ internal static class DailyRecordTitle
     /// <summary>剥掉标题末尾的时长后缀，得到裸游戏名。</summary>
     internal static string StripSuffix(string rawTitle)
         => SuffixRegex.Replace(rawTitle, string.Empty).Trim();
+
+    /// <summary>提取裸游戏名（同 StripSuffix）。</summary>
+    internal static string ExtractBaseName(string rawTitle)
+        => StripSuffix(rawTitle);
+
+    /// <summary>
+    /// 取出标题末尾的时长后缀**原文**（如「 · 2.2 h」「2.2h」「(42分)」），没有则返回空串。
+    /// 回刷标题时靠它保留用户原本写的时长文本 —— 不能拿本地值重新拼。
+    /// </summary>
+    internal static string ExtractSuffix(string rawTitle)
+    {
+        var m = SuffixRegex.Match(rawTitle);
+        return m.Success ? m.Value : string.Empty;
+    }
 }
 
 public class NotionClient : INotionClient
@@ -219,6 +233,7 @@ public class NotionClient : INotionClient
                     var name = ExtractTitle(props);
                     var aliases = ExtractMultiSelectOrText(props, "别名", "Aliases");
                     var idents = ExtractMultiSelectOrText(props, "游戏标识", "Identifiers", "Steam ID");
+                    var genres = ExtractMultiSelectOrText(props, "类型", "游戏类型", "Genre", "Genres", "分类");
                     var coverUrl = ExtractCoverUrl(page, props);
                     var (iconUrl, iconType) = ExtractPageIcon(page);
 
@@ -230,6 +245,7 @@ public class NotionClient : INotionClient
                             Name = name,
                             Aliases = aliases,
                             Identifiers = idents,
+                            Genres = genres,
                             CoverUrl = coverUrl,
                             IconUrl = iconUrl,
                             IconType = iconType,
@@ -369,17 +385,30 @@ public class NotionClient : INotionClient
         int durationMinutes,
         string? gamePageId,
         string? gameName = null,
-        string? iconUrl = null)
+        string? iconUrl = null,
+        bool writeDuration = false,
+        string? titleOverride = null)
     {
         var cleanPageId = pageId.Replace("-", "");
         // 属性名同 CreateDailyRecordAsync：游戏动态 / 单次时长 / 关联游戏
-        var properties = new Dictionary<string, object>
-        {
-            // 值是**小时**（1 位小数），与创建时以及标题后缀保持一致
-            ["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) }
-        };
+        var properties = new Dictionary<string, object>();
 
-        if (!string.IsNullOrEmpty(gameName))
+        if (writeDuration)
+        {
+            // ⚠️ 只有**推送路径**（本地时长确实领先）才写这个属性。
+            //    历史记录在 Notion 上的数值是权威 —— 拿本地缓存去覆盖它属于毁灭性错误
+            //    （2026-09-19 回刷链路就是这么篡改了 QA 786 条记录）。
+            //    只改"呈现"（标题 / 关系 / 图标）的调用必须传 writeDuration: false。
+            // 值是**小时**（2 位小数），与创建时以及标题后缀保持一致
+            properties["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) };
+        }
+
+        if (!string.IsNullOrEmpty(titleOverride))
+        {
+            // 优先使用传入的显式标题（例如保留原标题时长后缀后的「新游戏名 · 2.2 h」）
+            properties["游戏动态"] = new { title = new[] { new { text = new { content = titleOverride } } } };
+        }
+        else if (!string.IsNullOrEmpty(gameName))
         {
             // 永远按「gameName + 当前时长」重算整个标题，不做"只改游戏名那一段"的局部替换。
             // 理由：时长本身也在标题里，且老行可能还是「(42分)」这种旧格式 ——
@@ -396,6 +425,66 @@ public class NotionClient : INotionClient
             properties["关联游戏"] = new { relation = new[] { new { id = gamePageId } } };
             properties["绑定状态"] = new { select = new { name = "已绑定" } };
         }
+        else
+        {
+            properties["绑定状态"] = new { select = new { name = "未绑定" } };
+        }
+
+        var payload = string.IsNullOrWhiteSpace(iconUrl)
+            ? (object)new { properties }
+            : new { properties, icon = new { type = "external", external = new { url = iconUrl } } };
+
+        using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", payload);
+        var res = await SendWithRetryAsync(req);
+        return res.TryGetProperty("id", out _);
+    }
+
+    /// <summary>
+    /// **只**改每日记录的「绑定状态」属性（已绑定 / 未绑定）—— 绝不碰「单次时长」「日期」或标题等属性。
+    /// </summary>
+    public async Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status)
+    {
+        var cleanPageId = pageId.Replace("-", "");
+        var properties = new Dictionary<string, object>
+        {
+            ["绑定状态"] = new { select = new { name = status } }
+        };
+
+        try
+        {
+            using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", new { properties });
+            var res = await SendWithRetryAsync(req);
+            return res.TryGetProperty("id", out _);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[UpdateDailyBindingStatusAsync] 更新页面 {pageId} 绑定状态失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// **只**改每日记录的标题（以及可选图标）—— 绝不碰「单次时长」「日期」等数据属性。
+    /// </summary>
+    /// <remarks>
+    /// 🚨 2026-09-19 事故：回刷标题原先走 <see cref="UpdateDailyRecordAsync"/>，
+    ///    而那个方法**必然同时写「单次时长」**（当年设计如此：标题串里含时长，
+    ///    于是更新就顺带把时长也写了）。结果回刷拿**本地的**分钟数去覆盖 Notion 上
+    ///    原本的数值 —— QA 那次一次运行就改写了 **786 条**，历史时长被篡改。
+    ///
+    ///    原则：Notion 侧的历史记录是**权威数据**，程序只允许改"呈现"（标题 / 图标），
+    ///    不允许改"数值"。要改数值只能走 <see cref="UpdateDailyRecordAsync"/>（推送路径），
+    ///    那条路径写的是本地确实领先的时长。
+    /// </remarks>
+    public async Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null)
+    {
+        var cleanPageId = pageId.Replace("-", "");
+
+        // 只带「游戏动态」一个属性 —— PATCH 只改传进去的属性，不传的保持原样。
+        var properties = new Dictionary<string, object>
+        {
+            ["游戏动态"] = new { title = new[] { new { text = new { content = title } } } }
+        };
 
         var payload = string.IsNullOrWhiteSpace(iconUrl)
             ? (object)new { properties }
@@ -448,6 +537,40 @@ public class NotionClient : INotionClient
         });
         var res = await SendWithRetryAsync(req);
         return res.TryGetProperty("id", out _);
+    }
+
+    /// <summary>
+    /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
+    /// </summary>
+    public async Task<bool> IsPageDeletedAsync(string pageId)
+    {
+        if (string.IsNullOrWhiteSpace(pageId)) return true;
+
+        var cleanPageId = pageId.Replace("-", "");
+        try
+        {
+            using var req = CreateRequest(HttpMethod.Get, $"/pages/{cleanPageId}");
+            var res = await SendWithRetryAsync(req);
+
+            if (res.TryGetProperty("archived", out var archived) && archived.GetBoolean())
+            {
+                return true;
+            }
+            if (res.TryGetProperty("in_trash", out var inTrash) && inTrash.GetBoolean())
+            {
+                return true;
+            }
+            return false;
+        }
+        catch (HttpRequestException ex) when (ex.Message.Contains("404") || ex.Message.Contains("Could not find page") || ex.Message.Contains("object_not_found"))
+        {
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[删除对账] 检查 Notion 页面 {pageId} 状态失败: {ex.Message}，为防误删判定为未删除");
+            return false;
+        }
     }
 
     private static string ExtractTitle(JsonElement props)
@@ -718,6 +841,7 @@ public class NotionSyncService : INotionSyncService
     private readonly INotionClient _client;
     private readonly TrackerConfig _config;
     private readonly IGameMatcher _matcher;
+    private List<NotionDailyRecordItem> _lastPulledDailyRecords = new();
 
     /// <summary>
     /// 把原始异常翻译成用户能行动的文案：401 是 Token 无效（复制不全/过期），
@@ -785,9 +909,10 @@ public class NotionSyncService : INotionSyncService
             var iconUrl = string.IsNullOrWhiteSpace(cat.IconUrl) ? null : cat.IconUrl;
             return (displayName, iconUrl);
         }
-        catch
+        catch (Exception ex)
         {
-            // 取目录失败不该阻断同步本身；退回进程名即可。
+            // 取目录失败不该阻断同步本身；记录警告并退回进程名即可。
+            AppLog.Warn($"[ResolveDailyDisplayAsync] 读取总表条目异常 ({gameNotionPageId}): {ex.Message}");
             return (localName, null);
         }
     }
@@ -825,7 +950,7 @@ public class NotionSyncService : INotionSyncService
 
         try
         {
-            SyncStatusChanged?.Invoke(this, "正在刷新游戏库...");
+            SyncStatusChanged?.Invoke(this, "正在刷新游戏总表...");
             var items = await _client.QueryGameMasterAsync(_config.GameDatabaseId);
 
             // 只有拿到「非空且完整」的结果才动缓存：
@@ -839,11 +964,11 @@ public class NotionSyncService : INotionSyncService
                 // 现在让 game_catalog 成为总表的忠实快照，删除对账也依赖这份快照。
                 var removed = await _repo.DeleteCatalogItemsNotInAsync(items.Select(i => i.PageId));
                 SyncStatusChanged?.Invoke(this,
-                    removed > 0 ? $"游戏库已更新（清理 {removed} 条已失效条目）" : "游戏库已更新");
+                    removed > 0 ? $"游戏总表已更新（清理 {removed} 条已失效条目）" : "游戏总表已更新");
                 return;
             }
 
-            SyncStatusChanged?.Invoke(this, "游戏库已更新");
+            SyncStatusChanged?.Invoke(this, "游戏总表已更新");
         }
         catch (Exception ex)
         {
@@ -857,8 +982,8 @@ public class NotionSyncService : INotionSyncService
 
         try
         {
-            SyncStatusChanged?.Invoke(this, "正在从 Notion 拉取每日记录...");
-            var records = await _client.QueryDailyRecordsAsync(_config.DailyDatabaseId);
+            SyncStatusChanged?.Invoke(this, "正在从每日时长表拉取记录...");
+            var rawRecords = await _client.QueryDailyRecordsAsync(_config.DailyDatabaseId);
             _lastPullSucceeded = true;
             int synced = 0;
             int skippedOrphan = 0;
@@ -868,12 +993,18 @@ public class NotionSyncService : INotionSyncService
             // 防"复活"：每日记录若指向一个已不在总表里的游戏（总表条目被删了），
             // 就不能再拉回本地 —— 否则 SyncDailyRecordFromNotionAsync 会凭空把游戏造回来，
             // 于是你在程序里刚删掉的游戏下一轮同步又冒出来。
-            var catalogIds = (await _repo.GetCatalogItemsAsync())
+            var catalogItems = await _repo.GetCatalogItemsAsync();
+            var catalogIds = catalogItems
                 .Select(c => NormalizePageId(c.PageId))
                 .Where(id => id.Length > 0)
                 .ToHashSet();
 
-            foreach (var r in records)
+            var catalogNames = catalogItems
+                .Where(c => !string.IsNullOrWhiteSpace(c.PageId) && !string.IsNullOrWhiteSpace(c.Name))
+                .ToDictionary(c => NormalizePageId(c.PageId), c => c.Name.Trim().ToLowerInvariant());
+
+            var validRecords = new List<NotionDailyRecordItem>();
+            foreach (var r in rawRecords)
             {
                 if (catalogIds.Count > 0 &&
                     !string.IsNullOrWhiteSpace(r.GameMasterPageId) &&
@@ -882,7 +1013,119 @@ public class NotionSyncService : INotionSyncService
                     skippedOrphan++;
                     continue;
                 }
+                validRecords.Add(r);
+            }
 
+            // 自动检测并合并 Notion 远端同日同一游戏的多个重复页面（累计合并并清理冗余页面）
+            var groupedRecords = new Dictionary<string, List<NotionDailyRecordItem>>();
+            foreach (var r in validRecords)
+            {
+                var date = r.Date?.Trim() ?? "";
+                string gameKey;
+                var normMasterId = NormalizePageId(r.GameMasterPageId);
+                if (!string.IsNullOrEmpty(normMasterId) && catalogNames.TryGetValue(normMasterId, out var catName))
+                {
+                    gameKey = catName;
+                }
+                else if (!string.IsNullOrEmpty(normMasterId))
+                {
+                    gameKey = $"m:{normMasterId}";
+                }
+                else
+                {
+                    gameKey = DailyRecordTitle.ExtractBaseName(r.GameTitle ?? "").Trim().ToLowerInvariant();
+                }
+
+                var key = $"{date}|{gameKey}";
+                if (!groupedRecords.TryGetValue(key, out var list))
+                {
+                    list = new List<NotionDailyRecordItem>();
+                    groupedRecords[key] = list;
+                }
+                list.Add(r);
+            }
+
+            var deduplicatedRecords = new List<NotionDailyRecordItem>();
+            foreach (var entry in groupedRecords)
+            {
+                var group = entry.Value;
+                if (group.Count == 1)
+                {
+                    deduplicatedRecords.Add(group[0]);
+                    continue;
+                }
+
+                // 同一天同一游戏在 Notion 存在多个页面（例如用户截图中的 3 条记录）！
+                // 1. 选取权威主页面：优先匹配本地已绑定的 pageId，否则选时长最大的
+                var groupDate = group[0].Date;
+                var localRows = await _repo.GetDailySummariesByDateAsync(groupDate);
+                var matchedLocal = localRows.FirstOrDefault(l => group.Any(g => NormalizePageId(g.PageId) == NormalizePageId(l.NotionPageId)));
+
+                var canonical = matchedLocal != null
+                    ? group.First(g => NormalizePageId(g.PageId) == NormalizePageId(matchedLocal.NotionPageId))
+                    : group.OrderByDescending(g => g.DurationMinutes).First();
+
+                var duplicates = group.Where(g => g.PageId != canonical.PageId).ToList();
+
+                // 2. 累计合并总时长
+                int sumMinutes = group.Sum(g => g.DurationMinutes);
+                int localMinutes = matchedLocal?.DurationMinutes ?? 0;
+                int totalMinutes = Math.Max(sumMinutes, localMinutes);
+
+                // 3. 将多余的重复页面归档移入 Notion 回收站
+                foreach (var dup in duplicates)
+                {
+                    try
+                    {
+                        await _client.ArchivePageAsync(dup.PageId);
+                        AppLog.Info($"[同步] 自动归档 Notion 冗余每日记录页面: {dup.PageId} (「{dup.GameTitle}」{dup.Date} {dup.DurationMinutes}m)");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"[同步] 归档 Notion 重复页面失败 ({dup.PageId}): {ex.Message}");
+                    }
+                }
+
+                // 4. 更新权威页面为合并后的总时长
+                var masterPageId = !string.IsNullOrEmpty(canonical.GameMasterPageId)
+                    ? canonical.GameMasterPageId
+                    : group.FirstOrDefault(g => !string.IsNullOrEmpty(g.GameMasterPageId))?.GameMasterPageId;
+
+                var (displayName, iconUrl) = await ResolveDailyDisplayAsync(canonical.GameTitle, masterPageId);
+                try
+                {
+                    await _client.UpdateDailyRecordAsync(
+                        canonical.PageId,
+                        totalMinutes,
+                        masterPageId,
+                        displayName,
+                        iconUrl,
+                        writeDuration: true);
+                    AppLog.Info($"[同步] 自动合并 Notion 同日重复记录：「{displayName}」{canonical.Date} 合并 {group.Count} 个页面为单个页面（总时长 {totalMinutes} 分钟），已更新远端页面 {canonical.PageId}");
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[同步] 更新 Notion 合并记录页面失败: {ex.Message}");
+                }
+
+                var mergedRecord = new NotionDailyRecordItem
+                {
+                    PageId = canonical.PageId,
+                    Date = canonical.Date,
+                    DurationMinutes = totalMinutes,
+                    GameTitle = displayName,
+                    GameMasterPageId = masterPageId,
+                    RawTitle = DailyRecordTitle.Build(displayName, totalMinutes),
+                    DurationUnitIsMinutes = false
+                };
+
+                deduplicatedRecords.Add(mergedRecord);
+            }
+
+            _lastPulledDailyRecords = deduplicatedRecords;
+
+            foreach (var r in deduplicatedRecords)
+            {
                 try
                 {
                     await _repo.SyncDailyRecordFromNotionAsync(r);
@@ -898,7 +1141,7 @@ public class NotionSyncService : INotionSyncService
             }
 
             var parts = new List<string>();
-            parts.Add($"已从 Notion 同步 {synced} 条记录");
+            parts.Add($"已从每日时长表同步 {synced} 条记录");
             if (skippedOrphan > 0) parts.Add($"跳过 {skippedOrphan} 条总表已不存在的游戏");
             if (failed > 0) parts.Add($"{failed} 条失败（{lastError}）");
 
@@ -909,9 +1152,59 @@ public class NotionSyncService : INotionSyncService
         catch (Exception ex)
         {
             _lastPullSucceeded = false;
-            SyncStatusChanged?.Invoke(this, $"拉取记录失败: {FriendlyNotionError(ex)}");
+            SyncStatusChanged?.Invoke(this, $"每日时长表拉取失败: {FriendlyNotionError(ex)}");
             return 0;
         }
+    }
+
+    /// <summary>
+    /// 判定一个日期是否属于历史日期（早于 7 天前）。
+    /// 历史日期在 Notion 上的单次时长与日期为绝对权威数据，程序绝不能向 Notion 回推写时长。
+    /// </summary>
+    private static bool IsHistoricalDate(string dateStr)
+    {
+        if (DateTime.TryParse(dateStr, out var dt))
+        {
+            return dt.Date < DateTime.Today.AddDays(-7);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 在已拉取的 Notion 每日记录中查找是否存在指定游戏和日期的页面（防止向远端重复创建）
+    /// </summary>
+    private static NotionDailyRecordItem? FindMatchingNotionDailyRecord(
+        IEnumerable<NotionDailyRecordItem>? records,
+        string gameName,
+        string? gameNotionId,
+        string date)
+    {
+        if (records == null) return null;
+        string targetDate = date.Trim();
+        string targetMasterId = NormalizePageId(gameNotionId);
+        string targetBaseName = DailyRecordTitle.ExtractBaseName(gameName).Trim();
+
+        foreach (var r in records)
+        {
+            if (r.Date?.Trim() != targetDate) continue;
+
+            if (!string.IsNullOrEmpty(targetMasterId) &&
+                !string.IsNullOrEmpty(r.GameMasterPageId) &&
+                string.Equals(NormalizePageId(r.GameMasterPageId), targetMasterId, StringComparison.OrdinalIgnoreCase))
+            {
+                return r;
+            }
+
+            var rBaseName = DailyRecordTitle.ExtractBaseName(r.GameTitle ?? "").Trim();
+            if (!string.IsNullOrEmpty(targetBaseName) &&
+                !string.IsNullOrEmpty(rBaseName) &&
+                string.Equals(rBaseName, targetBaseName, StringComparison.OrdinalIgnoreCase))
+            {
+                return r;
+            }
+        }
+
+        return null;
     }
 
     public async Task<int> SyncPendingDailyRecordsAsync()
@@ -946,6 +1239,28 @@ public class NotionSyncService : INotionSyncService
                 // 改过的名字（多为中文名）才是他真正想看的。未绑定则退回进程名、不写图标。
                 var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, gameNotionId);
 
+                // 🚨 铁律：历史日期（早于 7 天前）的时长与日期在 Notion 上是绝对权威，程序绝不能向远端回推改写单次时长！
+                // 只有近期（7 天内）由本地心跳累加的活跃会话，才允许更新 Notion 上的单次时长。
+                bool isHistorical = IsHistoricalDate(item.Date);
+
+                if (isHistorical && !string.IsNullOrEmpty(item.NotionPageId))
+                {
+                    // 历史记录远端已有页面，绝对不推回覆盖 Notion 权威数据，直接在本地置为已同步/未绑定
+                    await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
+                    continue;
+                }
+
+                // 查重：若本地尚未记录 notion_page_id，先在刚拉取的 Notion 记录中寻找同日同游戏的页面
+                if (string.IsNullOrEmpty(item.NotionPageId))
+                {
+                    var existingRemote = FindMatchingNotionDailyRecord(_lastPulledDailyRecords, item.GameName, gameNotionId, item.Date);
+                    if (existingRemote != null)
+                    {
+                        item.NotionPageId = existingRemote.PageId;
+                        await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped", existingRemote.PageId);
+                    }
+                }
+
                 if (string.IsNullOrEmpty(item.NotionPageId))
                 {
                     var newPageId = await _client.CreateDailyRecordAsync(
@@ -962,7 +1277,8 @@ public class NotionSyncService : INotionSyncService
                 else
                 {
                     await _client.UpdateDailyRecordAsync(
-                        item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl);
+                        item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl,
+                        writeDuration: !isHistorical);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
                     await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
                 }
@@ -1012,55 +1328,127 @@ public class NotionSyncService : INotionSyncService
         foreach (var item in unmapped)
         {
             var game = await _repo.GetGameByIdAsync(item.GameId);
-            if (game == null || string.IsNullOrEmpty(game.NotionPageId)) continue;
+            if (game == null) continue;
 
-            try
+            if (!string.IsNullOrEmpty(game.NotionPageId))
             {
-                // 与 SyncPendingDailyRecordsAsync 保持一致：改用总表名称 + 总表 page icon。
-                var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
+                try
+                {
+                    // 与 SyncPendingDailyRecordsAsync 保持一致：改用总表名称 + 总表 page icon。
+                    var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
 
-                if (string.IsNullOrEmpty(item.NotionPageId))
-                {
-                    var newPageId = await _client.CreateDailyRecordAsync(
-                        _config.DailyDatabaseId,
-                        item.Date,
-                        displayName,
-                        item.DurationMinutes,
-                        game.NotionPageId,
-                        iconUrl);
-
-                    await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
-                    await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
-                }
-                else
-                {
-                    await _client.UpdateDailyRecordAsync(
-                        item.NotionPageId, item.DurationMinutes, game.NotionPageId, displayName, iconUrl);
-                    await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
-                    await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
-                }
-                backfilled++;
-            }
-            catch (Exception ex)
-            {
-                // 页面在 Notion 已被删除（进回收站）→ 本地跟随删除语义清理，
-                // 否则这条记录会永远对着一个 archived 页面重试，卡死在 error。
-                if (ex.Message.Contains("archived"))
-                {
-                    await _repo.ArchiveDeletedAsync("daily", "notion",
-                        item.NotionPageId ?? item.Date,
-                        System.Text.Json.JsonSerializer.Serialize(new
+                    if (string.IsNullOrEmpty(item.NotionPageId))
+                    {
+                        var existingRemote = FindMatchingNotionDailyRecord(_lastPulledDailyRecords, item.GameName, game.NotionPageId, item.Date);
+                        if (existingRemote != null)
                         {
-                            item.Date,
-                            Game = item.GameName,
-                            item.DurationMinutes
-                        }));
-                    await _repo.DeleteDailySummariesAsync(new[] { item.Id });
-                    SyncStatusChanged?.Invoke(this, $"「{item.GameName} {item.Date}」在 Notion 已被删除，本地记录已跟随清理");
-                    continue;
-                }
+                            item.NotionPageId = existingRemote.PageId;
+                            await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", existingRemote.PageId);
+                        }
+                    }
 
-                await _repo.UpdateDailySyncStatusAsync(item.Id, "error", errorMessage: ex.Message);
+                    if (string.IsNullOrEmpty(item.NotionPageId))
+                    {
+                        var newPageId = await _client.CreateDailyRecordAsync(
+                            _config.DailyDatabaseId,
+                            item.Date,
+                            displayName,
+                            item.DurationMinutes,
+                            game.NotionPageId,
+                            iconUrl);
+
+                        await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", newPageId);
+                        await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
+                    }
+                    else
+                    {
+                        var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
+                        var expectedTitle = originalSuffix.Length > 0
+                            ? displayName + originalSuffix
+                            : DailyRecordTitle.Build(displayName, item.DurationMinutes);
+
+                        // writeDuration: false —— 回填 relation 与呈现，绝不修改远端时长数值
+                        await _client.UpdateDailyRecordAsync(
+                            item.NotionPageId, item.DurationMinutes, game.NotionPageId, displayName, iconUrl,
+                            writeDuration: false,
+                            titleOverride: expectedTitle);
+                        await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
+                        await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
+                    }
+                    backfilled++;
+                }
+                catch (Exception ex)
+                {
+                    // 页面在 Notion 已被删除（进回收站）→ 本地跟随删除语义清理，
+                    // 否则这条记录会永远对着一个 archived 页面重试，卡死在 error。
+                    if (ex.Message.Contains("archived"))
+                    {
+                        await _repo.ArchiveDeletedAsync("daily", "notion",
+                            item.NotionPageId ?? item.Date,
+                            System.Text.Json.JsonSerializer.Serialize(new
+                            {
+                                item.Date,
+                                Game = item.GameName,
+                                item.DurationMinutes
+                            }));
+                        await _repo.DeleteDailySummariesAsync(new[] { item.Id });
+                        SyncStatusChanged?.Invoke(this, $"「{item.GameName} {item.Date}」在 Notion 已被删除，本地记录已跟随清理");
+                        continue;
+                    }
+
+                    await _repo.UpdateDailySyncStatusAsync(item.Id, "error", errorMessage: ex.Message);
+                }
+            }
+            else if (!string.IsNullOrEmpty(item.NotionPageId))
+            {
+                // 该游戏尚未绑定总表，若 Notion 每日记录上的「绑定状态」尚未标明为「未绑定」，则写入「未绑定」
+                try
+                {
+                    var remote = _lastPulledDailyRecords?.FirstOrDefault(r => NormalizePageId(r.PageId) == NormalizePageId(item.NotionPageId));
+                    if (remote == null || remote.Status != "未绑定")
+                    {
+                        await _client.UpdateDailyBindingStatusAsync(item.NotionPageId, "未绑定");
+                        if (remote != null) remote.Status = "未绑定";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[BackfillRelationsAsync] 补全未绑定状态失败 ({item.NotionPageId}): {ex.Message}");
+                }
+            }
+        }
+
+        // 统一对齐远端每日记录的绑定状态（例如历史记录或直接在 Notion 中添加但尚未有绑定状态的行）
+        if (_lastPulledDailyRecords != null)
+        {
+            foreach (var r in _lastPulledDailyRecords)
+            {
+                if (string.IsNullOrEmpty(r.PageId)) continue;
+
+                if (string.IsNullOrEmpty(r.GameMasterPageId) && r.Status != "未绑定")
+                {
+                    try
+                    {
+                        await _client.UpdateDailyBindingStatusAsync(r.PageId, "未绑定");
+                        r.Status = "未绑定";
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"[BackfillRelationsAsync] 同步远端未绑定状态失败 ({r.PageId}): {ex.Message}");
+                    }
+                }
+                else if (!string.IsNullOrEmpty(r.GameMasterPageId) && r.Status != "已绑定")
+                {
+                    try
+                    {
+                        await _client.UpdateDailyBindingStatusAsync(r.PageId, "已绑定");
+                        r.Status = "已绑定";
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Warn($"[BackfillRelationsAsync] 同步远端已绑定状态失败 ({r.PageId}): {ex.Message}");
+                    }
+                }
             }
         }
 
@@ -1136,7 +1524,22 @@ public class NotionSyncService : INotionSyncService
 
                 var (displayName, iconUrl) = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
 
-                var expectedTitle = DailyRecordTitle.Build(displayName, item.DurationMinutes);
+                // ⚠️ 期望标题 = 总表的名字 + **原标题里原本的时长后缀**。
+                //
+                //    **绝不**用本地时长重新拼（DailyRecordTitle.Build）—— 那是在改 Notion 上的数据。
+                //    2026-09-19 就是这么把 QA 的 786 条历史记录改掉的：
+                //    「9/16 英灵神殿 2.2h」被写成了本地那份值（本地那份甚至可能是错的 ——
+                //    单位换算那次把 5 分钟读成 5 小时，本地一直带着错值）。
+                //
+                //    Notion 侧的历史数值是**权威**，本地只是缓存。回刷只负责"呈现"：
+                //    把游戏名换成总表的名字，时长文本原样保留。
+                var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
+                var expectedTitle = originalSuffix.Length > 0
+                    // 有原标题 → 只把"游戏名"那一段换成总表的名字，时长文本**原样保留**
+                    ? displayName + originalSuffix
+                    // 没有原标题可参考（老库升级）→ 只能按本地时长拼；
+                    // 但依然**不写**「单次时长」属性，数值属性始终以 Notion 上的为准。
+                    : DailyRecordTitle.Build(displayName, item.DurationMinutes);
 
                 // 标题与图标**都要**比对。只比标题的话，"总表设了图标"会让每一轮都判定
                 // 需要更新（因为 iconUrl 非空 ≠ 页面图标不对），于是所有历史记录被反复 PATCH，
@@ -1151,11 +1554,13 @@ public class NotionSyncService : INotionSyncService
                 // UpdateDailyRecordAsync 内部会自己调 DailyRecordTitle.Build 拼标题，
                 // 传完整标题进去会拼成「新名字 · 0.7 h · 0.7 h」——后缀重复。
                 // expectedTitle 只用于上面的比对。
-                await _client.UpdateDailyRecordAsync(
+                //
+                // ⚠️ 2026-09-19 起这里改用 **UpdateDailyRecordTitleAsync**：只写标题与图标，
+                //    不写「单次时长」。原先用 UpdateDailyRecordAsync 会把本地时长一并写进
+                //    Notion，等于拿缓存覆盖权威数据（毁灭性错误）。
+                await _client.UpdateDailyRecordTitleAsync(
                     item.NotionPageId,
-                    item.DurationMinutes,
-                    game.NotionPageId,
-                    displayName,
+                    expectedTitle,
                     iconUrl);
 
                 // 两个快照一起落库，否则下一轮还会认为"不一致"、又打一次 Notion。
@@ -1257,6 +1662,21 @@ public class NotionSyncService : INotionSyncService
 
             var candidates = _matcher.MatchGame(game.Name, usable, steamAppId);
 
+            // 老数据里不少游戏名是**直接从 Notion 标题搬过来的**，带着用户手写的时长后缀
+            // （「英灵神殿2.4h」「人鱼3h」「咖啡厅2h 白金」）—— 拿这种名字去匹配总表必然失败，
+            // 于是这些行就一直挂着"未绑定 / manual"，哪怕总表里明明有这个游戏。
+            // 没有确定性命中时，剥掉时长后缀再试一次（2026-09-19 QA 反馈）。
+            if (!candidates.Any(c => c.MatchType is "identifier_match" or "exact" or "normalized")
+                && !string.IsNullOrWhiteSpace(game.Name))
+            {
+                var stripped = DailyRecordTitle.StripSuffix(game.Name);
+                if (!string.IsNullOrWhiteSpace(stripped)
+                    && !string.Equals(stripped, game.Name, StringComparison.Ordinal))
+                {
+                    candidates = _matcher.MatchGame(stripped, usable, steamAppId);
+                }
+            }
+
             var deterministic = candidates
                 .Where(c => c.MatchType is "identifier_match" or "exact" or "normalized")
                 .ToList();
@@ -1312,6 +1732,16 @@ public class NotionSyncService : INotionSyncService
 
                     if (string.IsNullOrEmpty(item.NotionPageId))
                     {
+                        var existingRemote = FindMatchingNotionDailyRecord(_lastPulledDailyRecords, item.GameName, notionPageId, item.Date);
+                        if (existingRemote != null)
+                        {
+                            item.NotionPageId = existingRemote.PageId;
+                            await _repo.UpdateDailySyncStatusAsync(item.Id, "synced", existingRemote.PageId);
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(item.NotionPageId))
+                    {
                         var newPageId = await _client.CreateDailyRecordAsync(
                             _config.DailyDatabaseId,
                             item.Date,
@@ -1325,8 +1755,17 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
+                        var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
+                        var expectedTitle = originalSuffix.Length > 0
+                            ? displayName + originalSuffix
+                            : DailyRecordTitle.Build(displayName, item.DurationMinutes);
+
+                        // writeDuration: false —— 这里只是在补 relation 与改标题，
+                        // 时长以 Notion 上的为准，不能用本地缓存去覆盖（2026-09-19 事故的教训）。
                         await _client.UpdateDailyRecordAsync(
-                            item.NotionPageId, item.DurationMinutes, notionPageId, displayName, iconUrl);
+                            item.NotionPageId, item.DurationMinutes, notionPageId, displayName, iconUrl,
+                            writeDuration: false,
+                            titleOverride: expectedTitle);
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
                         await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
                     }
@@ -1553,12 +1992,30 @@ public class NotionSyncService : INotionSyncService
                     return result;
                 }
 
-                // 只处理「本地认为已同步」的行：pending / error 的行本来就可能还没进 Notion，
+                // 只处理「本地认为已同步」且有 NotionPageId 的行：pending / error 的行本来就可能还没进 Notion，
                 // 不在远端集合里属于正常，不能删。
-                var orphanRows = localSynced
-                    .Where(d => d.SyncStatus == "synced")
+                var candidateOrphanRows = localSynced
+                    .Where(d => d.SyncStatus == "synced" && !string.IsNullOrWhiteSpace(d.NotionPageId))
                     .Where(d => !remoteIds.Contains(NormalizePageId(d.NotionPageId)))
                     .ToList();
+
+                var orphanRows = new List<DailySummary>();
+                foreach (var row in candidateOrphanRows)
+                {
+                    // 🛡️ 关键保护（防 2026-09-19 误删事件重演）：
+                    // Notion 刚创建/修改的页面，其检索索引与只读从库存在数秒至数十秒的延迟（eventual consistency）。
+                    // 全量 Query 没查到的 page_id，必须向 Notion 主库 GET /pages/{id} 二次确权！
+                    // 只有 Notion 明确返回 404 或 archived=true / in_trash=true 时，才确认远端已删除。
+                    bool isDeleted = await _client.IsPageDeletedAsync(row.NotionPageId!);
+                    if (isDeleted)
+                    {
+                        orphanRows.Add(row);
+                    }
+                    else
+                    {
+                        AppLog.Warn($"[删除对账] 本地记录「{row.Date} {row.GameName}」在每日表列表查询中未出现，但二次确认 Notion 页面 ({row.NotionPageId}) 依然存在且未归档，保留本地记录，阻止误删！");
+                    }
+                }
 
                 foreach (var row in orphanRows)
                 {
@@ -1592,10 +2049,24 @@ public class NotionSyncService : INotionSyncService
             if (catalogIds.Count > 0)
             {
                 var games = await _repo.GetAllGamesAsync();
-                var orphanGames = games
+                var candidateOrphanGames = games
                     .Where(g => !string.IsNullOrWhiteSpace(g.NotionPageId))
                     .Where(g => !catalogIds.Contains(NormalizePageId(g.NotionPageId)))
                     .ToList();
+
+                var orphanGames = new List<GameRecord>();
+                foreach (var game in candidateOrphanGames)
+                {
+                    bool isDeleted = await _client.IsPageDeletedAsync(game.NotionPageId!);
+                    if (isDeleted)
+                    {
+                        orphanGames.Add(game);
+                    }
+                    else
+                    {
+                        AppLog.Warn($"[删除对账] 游戏「{game.Name}」在总表缓存中未出现，但二次确认 Notion 页面 ({game.NotionPageId}) 依然存在且未归档，保留本地游戏，阻止误删！");
+                    }
+                }
 
                 foreach (var game in orphanGames)
                 {

@@ -4,6 +4,8 @@ using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure.Database;
 using Xunit;
 
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
 namespace GameTimeTracker.Tests;
 
 public class GameMatcherTests
@@ -174,12 +176,15 @@ public class DailyAggregatorTests
     [Fact]
     public void FormatDuration_ShouldFormatCorrectly()
     {
-        // 时长单位已改为小时（1 位小数）：41m → 0.7h，135m → 2.3h
-        DailyAggregator.FormatDuration(380).Should().Be("6.3h");
-        DailyAggregator.FormatDuration(45).Should().Be("0.8h");
+        DailyAggregator.FormatDuration(380).Should().Be("6h 20m");
+        DailyAggregator.FormatDuration(125).Should().Be("2h 05m");
+        DailyAggregator.FormatDuration(132).Should().Be("2h 12m");
+        DailyAggregator.FormatDuration(45).Should().Be("0h 45m");
         DailyAggregator.FormatDuration(120).Should().Be("2h");
         DailyAggregator.FormatDuration(0).Should().Be("0h");
     }
+
+
 
 
     [Fact]
@@ -196,7 +201,7 @@ public class DailyAggregatorTests
 
         var stats = DailyAggregator.Aggregate(refDate, summaries);
         stats.TodayMinutes.Should().Be(440); // 380 + 60
-        stats.TodayDurationText.Should().Be("7.3h");
+        stats.TodayDurationText.Should().Be("7h 20m");
         stats.StreakDays.Should().Be(3); // 15th, 16th, 17th consecutive
         stats.HeatmapDays.Should().NotBeEmpty();
         stats.TodayTopGames.Should().HaveCount(2);
@@ -256,9 +261,10 @@ public class DailyAggregatorTests
         todayCell.DurationMinutes.Should().Be(440);
         todayCell.Level.Should().Be(5); // 100% of max -> Level 5
         todayCell.TooltipText.Should().Contain("9月17日");
-        todayCell.TooltipText.Should().Contain("7.3h");
-        todayCell.TooltipText.Should().Contain("Baldur's Gate 3  6.3h");
+        todayCell.TooltipText.Should().Contain("7h 20m");
+        todayCell.TooltipText.Should().Contain("Baldur's Gate 3  6h 20m");
         todayCell.TooltipText.Should().Contain("GTA 5  1h");
+
 
         // Verify Friday 2026-09-18 (Future day in current week)
         var futureCell = heatmap.Cells.FirstOrDefault(c => c.Date.ToString("yyyy-MM-dd") == "2026-09-18");
@@ -716,6 +722,33 @@ public class NotionTwoWaySyncTests
             var updatedSummaries = await repo.GetDailySummariesByDateAsync("2026-09-17");
             updatedSummaries[0].DurationMinutes.Should().Be(60);
             updatedSummaries[0].DurationSeconds.Should().Be(60 * 60);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { if (File.Exists(dbPath)) File.Delete(dbPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task GetPendingGames_ShouldFilterOutIgnored_ForPendingCount()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"test_pending_filter_{Guid.NewGuid():N}.db");
+        var repo = new SqliteRepository(dbPath);
+
+        try
+        {
+            var game1 = await repo.GetOrCreateGameAsync(new GameIdentity("steam", "1001", "SteamApp1", "test1.exe", @"C:\test1.exe"));
+            var game2 = await repo.GetOrCreateGameAsync(new GameIdentity("steam", "1002", "SteamApp2", "test2.exe", @"C:\test2.exe"));
+
+            // Mark game2 as ignored
+            await repo.UpdateGameStatusAsync(game2.Id, "ignored");
+
+            var pending = await repo.GetPendingGamesAsync();
+            pending.Should().HaveCount(2, "底库返回所有未绑定的游戏");
+
+            var unhandledCount = pending.Count(p => p.Status != "ignored");
+            unhandledCount.Should().Be(1, "托盘与角标显示的待处理数量必须剔除已忽略项");
         }
         finally
         {

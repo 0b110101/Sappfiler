@@ -57,14 +57,14 @@ public sealed class GameLibraryManager
             }
             catch (Exception ex)
             {
-                AppLog.Warn($"[游戏库] {detector.PlatformName} 检索失败: {ex.Message}");
+                AppLog.Warn($"[平台检索] {detector.PlatformName} 检索失败: {ex.Message}");
             }
         }
 
         _installedGames = games;
         _processCache.Clear();   // 刷新后清空缓存
 
-        AppLog.Info($"[游戏库] 共检索到 {_installedGames.Count} 个已安装游戏");
+        AppLog.Info($"[平台检索] 共检索到 {_installedGames.Count} 个已记录游戏");
     }
 
     /// <summary>
@@ -178,6 +178,14 @@ public sealed class GameLibraryManager
     /// </summary>
     public InstalledGame AddManualGame(string name, string exeOrDirectory)
     {
+        return RegisterKnownGame("manual", null, name, exeOrDirectory);
+    }
+
+    /// <summary>
+    /// 注册数据库中已记录的游戏（保留其真实平台与 platform_id，绝不篡改为 manual）
+    /// </summary>
+    public InstalledGame RegisterKnownGame(string platform, string? platformId, string name, string exeOrDirectory)
+    {
         string installDir;
         string? exePath = null;
 
@@ -192,22 +200,43 @@ public sealed class GameLibraryManager
         }
         else
         {
-            throw new ArgumentException($"路径不存在: {exeOrDirectory}");
+            // 路径可能在别处或未插盘，仍容错记录
+            installDir = Path.GetDirectoryName(exeOrDirectory) ?? "";
+            exePath    = exeOrDirectory;
         }
 
-        // 生成稳定的 platform_id
-        var platformId = ComputeSha256Short(exeOrDirectory);
+        var plat = string.IsNullOrWhiteSpace(platform) ? "manual" : platform.ToLowerInvariant();
+        var pid = string.IsNullOrWhiteSpace(platformId) ? ComputeSha256Short(exeOrDirectory) : platformId;
 
         var game = new InstalledGame(
-            Platform:   "manual",
-            PlatformId: platformId,
+            Platform:   plat,
+            PlatformId: pid,
             Name:       name,
             InstallDir: installDir.TrimEnd('\\', '/'),
             ExePath:    exePath
         );
 
-        // 添加到内存列表
-        _installedGames = [.._installedGames, game];
+        // 如果内存中已有完全相同 exePath 的项，优先保留非 manual 的权威项
+        var existingIdx = _installedGames.FindIndex(g =>
+            !string.IsNullOrWhiteSpace(g.ExePath) &&
+            string.Equals(g.ExePath, exePath, StringComparison.OrdinalIgnoreCase));
+
+        if (existingIdx >= 0)
+        {
+            var old = _installedGames[existingIdx];
+            // 若旧项是 manual 而新项是知名平台，或者新项信息更全，则替换
+            if (old.Platform == "manual" && plat != "manual")
+            {
+                var list = new List<InstalledGame>(_installedGames);
+                list[existingIdx] = game;
+                _installedGames = list;
+            }
+        }
+        else
+        {
+            _installedGames = [.._installedGames, game];
+        }
+
         _processCache.Clear();
         return game;
     }

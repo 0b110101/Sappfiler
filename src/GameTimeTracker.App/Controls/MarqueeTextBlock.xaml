@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="GameTimeTracker.App.Controls.MarqueeTextBlock"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootContainer"
+          Background="Transparent"
+          SizeChanged="OnRootContainerSizeChanged"
+          PointerEntered="OnPointerEntered"
+          PointerExited="OnPointerExited">
+
+        <!-- 默认与尺寸基准层：始终保持在 VisualTree 布局流中（不设 Collapsed），
+             确保容器高度、行高与网格尺寸恒定不变，杜绝因子元素尺寸变动引发的抽搐与抖动 -->
+        <TextBlock x:Name="NormalTextBlock"
+                   Text="{x:Bind Text, Mode=OneWay}"
+                   FontSize="{x:Bind FontSize, Mode=OneWay}"
+                   FontWeight="{x:Bind FontWeight, Mode=OneWay}"
+                   Foreground="{x:Bind Foreground, Mode=OneWay}"
+                   FontFamily="{x:Bind FontFamily, Mode=OneWay}"
+                   TextTrimming="CharacterEllipsis"
+                   TextWrapping="NoWrap"
+                   VerticalAlignment="Center"
+                   HorizontalAlignment="Stretch" />
+
+        <!-- 跑马灯滚动层：初始 Opacity=0，移入时直接对齐 NormalTextBlock 绝对坐标并淡入启动 -->
+        <Canvas x:Name="MarqueeCanvas"
+                Opacity="0"
+                IsHitTestVisible="False"
+                VerticalAlignment="Stretch"
+                HorizontalAlignment="Stretch">
+            <TextBlock x:Name="MarqueeTextBlockElement"
+                       Text="{x:Bind Text, Mode=OneWay}"
+                       FontSize="{x:Bind FontSize, Mode=OneWay}"
+                       FontWeight="{x:Bind FontWeight, Mode=OneWay}"
+                       Foreground="{x:Bind Foreground, Mode=OneWay}"
+                       FontFamily="{x:Bind FontFamily, Mode=OneWay}"
+                       TextTrimming="None"
+                       TextWrapping="NoWrap">
+                <TextBlock.RenderTransform>
+                    <TranslateTransform x:Name="TextTransform" X="0" Y="0" />
+                </TextBlock.RenderTransform>
+            </TextBlock>
+        </Canvas>
+    </Grid>
+</UserControl>

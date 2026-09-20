@@ -101,16 +101,25 @@ public partial class HomeViewModel : ObservableObject
     /// </summary>
     [ObservableProperty] public partial string? CurrentGameStoreUrl { get; set; }
 
+    /// <summary>鼠标悬停在 Hero 卡片上时暂停多游戏轮播</summary>
+    [ObservableProperty] public partial bool IsHeroCarouselPaused { get; set; }
+
     public bool HasCurrentGameCover => !string.IsNullOrEmpty(CurrentGameCoverPath);
 
     // Stats
-    [ObservableProperty] public partial string TodayDurationText { get; set; } = "0m";
+    [ObservableProperty] public partial string TodayDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string TodayDeltaText { get; set; } = "较昨日 0%";
-    [ObservableProperty] public partial string WeekDurationText { get; set; } = "0m";
+    [ObservableProperty] public partial string TodayDeltaPercentText { get; set; } = "↑ 0%";
+    [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush TodayDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
+
+    [ObservableProperty] public partial string WeekDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string WeekDeltaText { get; set; } = "较上周 0%";
+    [ObservableProperty] public partial string WeekDeltaPercentText { get; set; } = "↑ 0%";
+    [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush WeekDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
+
     [ObservableProperty] public partial int StreakDays { get; set; } = 3;
-    [ObservableProperty] public partial string StreakRankTitle { get; set; } = "Lv.1 愿望单收集家";
-    [ObservableProperty] public partial string NextMilestoneText { get; set; } = "下一个里程碑：6 天 (Lv.2)";
+    [ObservableProperty] public partial string StreakRankTitle { get; set; } = "🎮 Lv.1 愿望单收集家";
+    [ObservableProperty] public partial string NextMilestoneText { get; set; } = "下一个里程碑：6 天 (🌿 Lv.2)";
     [ObservableProperty] public partial double NextMilestoneTarget { get; set; } = 6;
     [ObservableProperty] public partial string HeatmapActiveDaysText { get; set; } = "游戏时长记录 0 天";
 
@@ -120,19 +129,92 @@ public partial class HomeViewModel : ObservableObject
     public ObservableCollection<HeatmapCellViewModel> HeatmapCells { get; } = new();
 
     // Lists
+    private List<GameListItemViewModel> _allTodayGamesCache = new();
+    [ObservableProperty] public partial bool IsTodayGamesExpanded { get; set; } = false;
+    [ObservableProperty] public partial bool HasMoreThanThreeTodayGames { get; set; } = false;
+    [ObservableProperty] public partial string TodayGamesToggleText { get; set; } = "查看全部 ∨";
+
     public ObservableCollection<GameListItemViewModel> TodayGames { get; } = new();
     public ObservableCollection<RecentRecordViewModel> RecentRecords { get; } = new();
 
     // Notion Status
     [ObservableProperty] public partial string NotionStatusText { get; set; } = "未绑定 Notion · 本地模式";
     [ObservableProperty] public partial string NotionLastSyncText { get; set; } = "在设置页填入 Token 与数据库 ID 后启用同步";
+    [ObservableProperty] public partial string NotionStatusBrushKey { get; set; } = "TextPrimaryBrush";
+
+    public Microsoft.UI.Xaml.Media.Brush NotionStatusBrush
+    {
+        get
+        {
+            var key = string.IsNullOrEmpty(NotionStatusBrushKey) ? "TextPrimaryBrush" : NotionStatusBrushKey;
+            if (Microsoft.UI.Xaml.Application.Current.Resources.TryGetValue(key, out var res) && res is Microsoft.UI.Xaml.Media.Brush b)
+            {
+                return b;
+            }
+            return key switch
+            {
+                "StatusGreenBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x34, 0xD3, 0x99)),
+                "StatusOrangeBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xFB, 0x92, 0x3C)),
+                "StatusRedBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xF8, 0x71, 0x71)),
+                _ => new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                    Microsoft.UI.Xaml.Application.Current?.RequestedTheme == Microsoft.UI.Xaml.ApplicationTheme.Dark
+                        ? Windows.UI.Color.FromArgb(255, 0xCC, 0xCC, 0xFF)
+                        : Windows.UI.Color.FromArgb(255, 0x0F, 0x17, 0x2A))
+            };
+        }
+    }
+
+    partial void OnNotionStatusBrushKeyChanged(string value)
+    {
+        OnPropertyChanged(nameof(NotionStatusBrush));
+    }
+
+    partial void OnNotionStatusTextChanged(string value)
+    {
+        UpdateNotionStatusBrush(value);
+    }
+
+    public void UpdateNotionStatusBrush(string? status = null)
+    {
+        var text = status ?? NotionStatusText;
+        if (!_syncService.IsNotionConfigured || text.Contains("未绑定") || text.Contains("本地模式"))
+        {
+            // 本地模式就黑色（其他小标题的颜色：TextPrimaryBrush）
+            NotionStatusBrushKey = "TextPrimaryBrush";
+        }
+        else if (text.Contains("异常") || text.Contains("失败") || text.Contains("错误"))
+        {
+            // 同步异常红色
+            NotionStatusBrushKey = "StatusRedBrush";
+        }
+        else if (text.Contains("待处理") || text.Contains("待同步") || text.Contains("进行中") || text.Contains("正在"))
+        {
+            // 待处理待同步黄色
+            NotionStatusBrushKey = "StatusOrangeBrush";
+        }
+        else if (text.Contains("已同步") || text.Contains("同步完成") || text.Contains("最新") || text.Contains("就绪") || text.Contains("已更新"))
+        {
+            // 成功绿色
+            NotionStatusBrushKey = "StatusGreenBrush";
+        }
+        else
+        {
+            NotionStatusBrushKey = "StatusOrangeBrush";
+        }
+    }
 
     // Navigation callbacks
     public Action<string>? RequestNavigate { get; set; }
+    public Func<Func<Task>, Task>? HeroTransitionHandler { get; set; }
 
     private readonly DispatcherTimer _secondTimer;
+    private readonly DispatcherTimer _dayBoundaryTimer;
+    private DateTime _loadedAccountingDate = DateTime.MinValue;
     private int _heroCarouselTick;   // 秒计数，用于多游戏轮播（每 5 秒切换）
     private int _heroCarouselIndex;  // 当前轮播到的会话下标
+    private bool _isHeroTransitioning; // 当前是否正在执行卡片淡入淡出动效
+    private int? _activeGameId;      // 当前 Hero 卡片所展示的游戏 ID
+    private int _currentElapsedSeconds; // 当前读秒单调累加秒数（防止多进程或异步心跳引起时间抽搐倒退）
     private string? _activeGamePlatform;
     private string? _activeGamePlatformId;
     private string? _activeGameExePath;
@@ -154,6 +236,18 @@ public partial class HomeViewModel : ObservableObject
         _secondTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _secondTimer.Tick += OnSecondTimerTick;
 
+        // 跨日检测定时器：每 10 秒轻量比对当前业务日期与上次加载日期，跨越 24 点（或自定义跨日结算点）时自动触发重算刷新
+        _dayBoundaryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        _dayBoundaryTimer.Tick += (s, e) =>
+        {
+            var currentAccountingDate = AccountingDateHelper.GetAccountingDate(DateTime.Now, _sessionManager.DailyCutoffHour);
+            if (_loadedAccountingDate != DateTime.MinValue && currentAccountingDate != _loadedAccountingDate)
+            {
+                _ = RefreshAllDataAsync();
+            }
+        };
+        _dayBoundaryTimer.Start();
+
         _sessionManager.SessionStarted += OnSessionStarted;
         _sessionManager.SessionHeartbeat += OnSessionHeartbeat;
         _sessionManager.SessionEnded += OnSessionEnded;
@@ -161,31 +255,120 @@ public partial class HomeViewModel : ObservableObject
         _coverCache.CoverDownloaded += OnCoverDownloaded;
     }
 
+    private bool _isWindowHidden;
+
+    /// <summary>
+    /// 暂停前台 UI 轮询定时器（窗口隐藏/收进托盘时调用，避免后台无谓的 UI 刷新消耗）。
+    /// </summary>
+    public void PauseTimers()
+    {
+        _isWindowHidden = true;
+        _secondTimer.Stop();
+        _dayBoundaryTimer.Stop();
+    }
+
+    /// <summary>
+    /// 恢复前台 UI 轮询定时器（窗口从托盘重新打开时调用）。
+    /// </summary>
+    public void ResumeTimers()
+    {
+        _isWindowHidden = false;
+        _dayBoundaryTimer.Start();
+        if (IsGameRunning && !_secondTimer.IsEnabled)
+        {
+            _secondTimer.Start();
+        }
+    }
+
+    private sealed record ActiveGameSummary(
+        int GameId,
+        GameSession EarliestSession,
+        DateTime EarliestStartTime,
+        int MaxDurationSeconds
+    );
+
+    private List<ActiveGameSummary> GetDistinctActiveGames()
+    {
+        var allSessions = _sessionManager.GetActiveSessions();
+        if (allSessions.Count == 0) return new List<ActiveGameSummary>();
+
+        // ⚠️ 关键去重与稳定排序：按 GameId 分组，并严格按 GameId 升序排列。
+        // 多进程游戏（启动器 launcher.exe + 游戏主进程 game.exe、崩溃收集器等）对应同一款游戏（相同 GameId）。
+        // 绝不能按 EarliestStartTime 排序，因为游戏启动时启动时间相近或子进程生灭会导致列表顺序随机翻转，
+        // 造成轮播下标与游戏映射混乱（连续两次显示同一款游戏）！
+        return allSessions
+            .GroupBy(s => s.GameId)
+            .Select(g => new ActiveGameSummary(
+                GameId: g.Key,
+                EarliestSession: g.OrderBy(s => s.StartTime).First(),
+                EarliestStartTime: g.Min(s => s.StartTime),
+                MaxDurationSeconds: g.Max(s => s.DurationSeconds)
+            ))
+            .OrderBy(g => g.GameId)
+            .ToList();
+    }
+
     private void OnSecondTimerTick(object? sender, object e)
     {
         if (!IsGameRunning) return;
 
-        var sessions = _sessionManager.GetActiveSessions()
-            .OrderByDescending(s => s.StartTime)
-            .ToList();
-        if (sessions.Count == 0) return;
+        var distinctGames = GetDistinctActiveGames();
+        if (distinctGames.Count == 0) return;
 
-        // 多游戏同时运行：每 5 秒轮播切换 Hero 卡到下一个正在运行的游戏。
-        // 会话列表可能已变化（游戏退出/新开），所以按 Pid 对齐当前 index。
-        if (sessions.Count > 1 && ++_heroCarouselTick % 5 == 0)
+        // 1. 多游戏轮播：
+        // 只有当真正运行了多款不同游戏、鼠标未悬停在卡片上、且当前未在动画过渡中时才推进 5 秒轮播
+        if (distinctGames.Count > 1 && !IsHeroCarouselPaused && !_isHeroTransitioning)
         {
-            _heroCarouselIndex = (_heroCarouselIndex + 1) % sessions.Count;
-            _ = RefreshHeroCardAsync(sessions[_heroCarouselIndex % sessions.Count]);
-            return;
+            _heroCarouselTick++;
+            if (_heroCarouselTick >= 5)
+            {
+                _heroCarouselTick = 0;
+                _heroCarouselIndex = (_heroCarouselIndex + 1) % distinctGames.Count;
+                var nextGroup = distinctGames[_heroCarouselIndex];
+                _ = TransitionHeroCardAsync(nextGroup);
+                return;
+            }
+        }
+        else if (distinctGames.Count <= 1)
+        {
+            _heroCarouselTick = 0;
         }
 
-        var active = sessions.Count > 1
-            ? sessions[_heroCarouselIndex % sessions.Count]
-            : sessions[0];
+        // 2. 如果正在进行卡片淡入淡出动画过渡，跳过本秒读秒更新，防止与过渡状态打架
+        if (_isHeroTransitioning) return;
+
+        // 3. 当前展示游戏的秒数更新：
+        // 根据当前活跃的游戏 ID 查找对应分组；找不到则回退到当前轮播下标
+        var activeGroup = (_activeGameId.HasValue
+            ? distinctGames.FirstOrDefault(g => g.GameId == _activeGameId.Value)
+            : null) ?? distinctGames[_heroCarouselIndex % distinctGames.Count];
+
+        var active = activeGroup.EarliestSession;
+
         if (active != null)
         {
-            var elapsed = Math.Max(active.DurationSeconds, (int)(DateTime.Now - active.StartTime).TotalSeconds);
-            CurrentGameTimer = DailyAggregator.FormatSeconds(elapsed);
+            if (_activeGameId != active.GameId)
+            {
+                // 切换到了不同的游戏，对齐该游戏的基准时间
+                _activeGameId = active.GameId;
+                _currentElapsedSeconds = Math.Max(activeGroup.MaxDurationSeconds, (int)(DateTime.Now - activeGroup.EarliestStartTime).TotalSeconds);
+            }
+            else
+            {
+                // 同一款游戏：平稳以 1 秒为周期单调递增。
+                // 仅当发生系统休眠、时间跳变等严重偏差（>3秒）时才做静默校准，平时杜绝任何跳秒与抽搐
+                var wallSeconds = Math.Max(activeGroup.MaxDurationSeconds, (int)(DateTime.Now - activeGroup.EarliestStartTime).TotalSeconds);
+                if (Math.Abs(wallSeconds - _currentElapsedSeconds) > 3)
+                {
+                    _currentElapsedSeconds = wallSeconds;
+                }
+                else
+                {
+                    _currentElapsedSeconds++;
+                }
+            }
+
+            CurrentGameTimer = DailyAggregator.FormatSeconds(_currentElapsedSeconds);
 
             if (CurrentGameCoverPath == null && _activeGamePlatform != null && _activeGamePlatformId != null)
             {
@@ -213,7 +396,8 @@ public partial class HomeViewModel : ObservableObject
     [RelayCommand]
     public async Task RefreshAllDataAsync()
     {
-        var today = DateTime.Today;
+        var today = AccountingDateHelper.GetAccountingDate(DateTime.Now, _sessionManager.DailyCutoffHour);
+        _loadedAccountingDate = today;
 
         // ⚠️ 读取窗口由 DailyAggregator 统一给出，**不要在这里另写天数**。
         //    2026-09-19 QA 反馈的"记录只显示到 6/11、更早的没拉到本地"就是这个数字造成的：
@@ -229,9 +413,9 @@ public partial class HomeViewModel : ObservableObject
         var stats = DailyAggregator.Aggregate(today, allSummaries);
         var recents = await _repo.GetRecentDailyRecordsAsync(5);
 
-        // Precompute today's games (Top 3 only)
+        // Precompute today's games (All games played today)
         var newTodayGames = new List<GameListItemViewModel>();
-        foreach (var g in stats.TodayTopGames.Take(3))
+        foreach (var g in stats.TodayTopGames)
         {
             var cover = _coverCache.GetCoverPath(g.Platform, g.PlatformId);
             if (!File.Exists(cover) || new FileInfo(cover).Length == 0)
@@ -290,41 +474,49 @@ public partial class HomeViewModel : ObservableObject
         // 2. Dispatch UI mutations safely to UI Thread
         _dispatcherQueue.TryEnqueue(() =>
         {
-            TodayDurationText = stats.TodayDurationText;
+            TodayDurationText = DailyAggregator.FormatHoursMinutes(stats.TodayMinutes);
             TodayDeltaText = stats.TodayDeltaText;
-            WeekDurationText = stats.WeekDurationText;
+            TodayDeltaPercentText = stats.TodayDeltaPercent >= 0 ? $"↑ {stats.TodayDeltaPercent}%" : $"↓ {Math.Abs(stats.TodayDeltaPercent)}%";
+
+            WeekDurationText = DailyAggregator.FormatHoursMinutes(stats.WeekMinutes);
             WeekDeltaText = stats.WeekDeltaText;
+            WeekDeltaPercentText = stats.WeekDeltaPercent >= 0 ? $"↑ {stats.WeekDeltaPercent}%" : $"↓ {Math.Abs(stats.WeekDeltaPercent)}%";
+
+            var greenBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
+            var redBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xF8, 0x71, 0x71));
+            TodayDeltaBrush = stats.TodayDeltaPercent >= 0 ? greenBrush : redBrush;
+            WeekDeltaBrush = stats.WeekDeltaPercent >= 0 ? greenBrush : redBrush;
 
             var streak = Math.Max(stats.StreakDays, 1);
             StreakDays = streak;
 
             if (streak <= 5)
             {
-                StreakRankTitle = "Lv.1 愿望单收集家";
-                NextMilestoneText = "下一个里程碑：6 天 (Lv.2)";
+                StreakRankTitle = "🎮 Lv.1 愿望单收集家";
+                NextMilestoneText = "下一个里程碑：6 天 (🌿 Lv.2)";
                 NextMilestoneTarget = 6;
             }
             else if (streak <= 15)
             {
-                StreakRankTitle = "Lv.2 背包塞满草药的玩家";
-                NextMilestoneText = "下一个里程碑：16 天 (Lv.3)";
+                StreakRankTitle = "🌿 Lv.2 背包塞满草药的玩家";
+                NextMilestoneText = "下一个里程碑：16 天 (⭐ Lv.3)";
                 NextMilestoneTarget = 16;
             }
             else if (streak <= 30)
             {
-                StreakRankTitle = "Lv.3 掌握彩蛋位置的知情人";
-                NextMilestoneText = "下一个里程碑：31 天 (Lv.4)";
+                StreakRankTitle = "⭐ Lv.3 掌握彩蛋位置的知情人";
+                NextMilestoneText = "下一个里程碑：31 天 (💎 Lv.4)";
                 NextMilestoneTarget = 31;
             }
             else if (streak <= 52)
             {
-                StreakRankTitle = "Lv.4 全成就全收集狂人";
-                NextMilestoneText = "下一个里程碑：53 天 (Lv.5)";
+                StreakRankTitle = "💎 Lv.4 全成就全收集狂人";
+                NextMilestoneText = "下一个里程碑：53 天 (🏆 Lv.5)";
                 NextMilestoneTarget = 53;
             }
             else
             {
-                StreakRankTitle = "Lv.5 传说的无伤通关者";
+                StreakRankTitle = "🏆 Lv.5 传说的无伤通关者";
                 NextMilestoneText = "已达成最高段位！传奇缔造中";
                 NextMilestoneTarget = streak;
             }
@@ -333,8 +525,12 @@ public partial class HomeViewModel : ObservableObject
             CurrentMonthHeader = today.ToString("yyyy年M月");
             ActivityHeatmap = stats.ActivityHeatmap;
 
+            _allTodayGamesCache = newTodayGames;
+            HasMoreThanThreeTodayGames = newTodayGames.Count > 3;
+
             TodayGames.Clear();
-            foreach (var item in newTodayGames)
+            var itemsToShow = IsTodayGamesExpanded ? newTodayGames : newTodayGames.Take(3);
+            foreach (var item in itemsToShow)
             {
                 TodayGames.Add(item);
             }
@@ -346,13 +542,113 @@ public partial class HomeViewModel : ObservableObject
             }
         });
 
-        // 3. Update Hero Card
+        // 3. Update Notion Status state
+        if (!_syncService.IsNotionConfigured)
+        {
+            _dispatcherQueue.TryEnqueue(() =>
+            {
+                NotionStatusText = "未绑定 Notion · 本地模式";
+                NotionLastSyncText = "在设置页填入 Token 与数据库 ID 后启用同步";
+                UpdateNotionStatusBrush();
+            });
+        }
+        else if (!_isSyncing)
+        {
+            var pendingGames = await _repo.GetPendingGamesAsync();
+            var unhandledGames = pendingGames.Count(p => p.Status != "ignored");
+            var pendingSummaries = await _repo.GetPendingDailySummariesAsync();
+
+            _dispatcherQueue.TryEnqueue(() =>
+            {
+                if (unhandledGames > 0)
+                {
+                    NotionStatusText = $"待处理 · {unhandledGames} 款游戏未绑定";
+                    UpdateNotionStatusBrush();
+                }
+                else if (pendingSummaries.Count > 0)
+                {
+                    NotionStatusText = $"待同步 · {pendingSummaries.Count} 条记录待推送";
+                    UpdateNotionStatusBrush();
+                }
+                else if (NotionStatusText.Contains("未绑定") || NotionStatusText.Contains("本地模式"))
+                {
+                    NotionStatusText = "已同步到 Notion";
+                    UpdateNotionStatusBrush();
+                }
+                else
+                {
+                    UpdateNotionStatusBrush();
+                }
+            });
+        }
+
+        // 4. Update Hero Card
         await RefreshHeroCardAsync();
+    }
+
+    private async Task TransitionHeroCardAsync(ActiveGameSummary nextGroup)
+    {
+        if (_isHeroTransitioning) return;
+        _isHeroTransitioning = true;
+
+        try
+        {
+            var nextSession = nextGroup.EarliestSession;
+            var nextGameId = nextSession.GameId;
+            var nextElapsed = Math.Max(nextGroup.MaxDurationSeconds, (int)(DateTime.Now - nextGroup.EarliestStartTime).TotalSeconds);
+
+            if (HeroTransitionHandler != null)
+            {
+                await HeroTransitionHandler(async () =>
+                {
+                    _activeGameId = nextGameId;
+                    _currentElapsedSeconds = nextElapsed;
+                    CurrentGameTimer = DailyAggregator.FormatSeconds(_currentElapsedSeconds);
+                    await RefreshHeroCardAsync(nextSession);
+                });
+            }
+            else
+            {
+                _activeGameId = nextGameId;
+                _currentElapsedSeconds = nextElapsed;
+                CurrentGameTimer = DailyAggregator.FormatSeconds(_currentElapsedSeconds);
+                await RefreshHeroCardAsync(nextSession);
+            }
+        }
+        finally
+        {
+            _isHeroTransitioning = false;
+        }
     }
 
     public async Task RefreshHeroCardAsync(GameSession? active = null)
     {
-        active ??= _sessionManager.GetActiveSessions().OrderByDescending(s => s.StartTime).FirstOrDefault();
+        if (active == null)
+        {
+            var distinctGames = GetDistinctActiveGames();
+            if (distinctGames.Count == 0)
+            {
+                active = null;
+            }
+            else
+            {
+                // 关键保护：如果当前正在展示的游戏仍然处于运行中，继续保持当前游戏，杜绝因刷新导致卡片被重置
+                var currentRunning = _activeGameId.HasValue
+                    ? distinctGames.FirstOrDefault(g => g.GameId == _activeGameId.Value)
+                    : null;
+
+                if (currentRunning != null)
+                {
+                    active = currentRunning.EarliestSession;
+                }
+                else
+                {
+                    _heroCarouselIndex = _heroCarouselIndex % distinctGames.Count;
+                    active = distinctGames[_heroCarouselIndex].EarliestSession;
+                }
+            }
+        }
+
         GameRecord? activeGame = null;
         string? activeCover = null;
         string? activeHeroBg = null;
@@ -419,7 +715,7 @@ public partial class HomeViewModel : ObservableObject
             }
         }
 
-        _dispatcherQueue.TryEnqueue(() =>
+        void ApplyToUi()
         {
             if (active != null && activeGame != null)
             {
@@ -434,8 +730,27 @@ public partial class HomeViewModel : ObservableObject
                 CurrentGamePlatform = string.IsNullOrWhiteSpace(activeGame.Platform) ? "MANUAL" : activeGame.Platform.ToUpper();
                 CurrentGameTag = string.IsNullOrWhiteSpace(activeGame.Platform) ? "MANUAL" : activeGame.Platform.ToUpper();
 
-                var elapsed = Math.Max(active.DurationSeconds, (int)(DateTime.Now - active.StartTime).TotalSeconds);
-                CurrentGameTimer = DailyAggregator.FormatSeconds(elapsed);
+                // 汇总该游戏所有子进程会话：取最早启动时间与最大时长
+                var gameSessions = _sessionManager.GetActiveSessions().Where(s => s.GameId == activeGame.Id).ToList();
+                var earliestStart = gameSessions.Count > 0 ? gameSessions.Min(s => s.StartTime) : active.StartTime;
+                var maxDuration = gameSessions.Count > 0 ? gameSessions.Max(s => s.DurationSeconds) : active.DurationSeconds;
+                var calculated = Math.Max(maxDuration, (int)(DateTime.Now - earliestStart).TotalSeconds);
+
+                if (_activeGameId != activeGame.Id)
+                {
+                    _activeGameId = activeGame.Id;
+                    _currentElapsedSeconds = calculated;
+                }
+                else
+                {
+                    // 同一游戏刷新时（如后台数据或网络同步），若当前秒数与实际时间偏差在 3 秒内，不强行覆写，保持界面秒表平滑
+                    if (Math.Abs(calculated - _currentElapsedSeconds) > 3)
+                    {
+                        _currentElapsedSeconds = calculated;
+                    }
+                }
+
+                CurrentGameTimer = DailyAggregator.FormatSeconds(_currentElapsedSeconds);
 
                 CurrentGameCoverPath = activeCover;
                 CurrentGameHeroBackgroundUrl = activeHeroBg;
@@ -446,13 +761,15 @@ public partial class HomeViewModel : ObservableObject
                     _ = _coverCache.EnsureCoverAsync(activeGame.Platform, activeGame.PlatformId, activeGame.ExecutablePath);
                 }
 
-                if (!_secondTimer.IsEnabled)
+                if (!_isWindowHidden && !_secondTimer.IsEnabled)
                 {
                     _secondTimer.Start();
                 }
             }
             else
             {
+                _activeGameId = null;
+                _currentElapsedSeconds = 0;
                 _activeGamePlatform = null;
                 _activeGamePlatformId = null;
                 _activeGameExePath = null;
@@ -473,7 +790,16 @@ public partial class HomeViewModel : ObservableObject
                     _secondTimer.Stop();
                 }
             }
-        });
+        }
+
+        if (_dispatcherQueue.HasThreadAccess)
+        {
+            ApplyToUi();
+        }
+        else
+        {
+            _dispatcherQueue.TryEnqueue(ApplyToUi);
+        }
     }
 
     /// <summary>
@@ -509,6 +835,19 @@ public partial class HomeViewModel : ObservableObject
     public void ManageMappings()
     {
         RequestNavigate?.Invoke("Mappings");
+    }
+
+    [RelayCommand]
+    public void ToggleTodayGames()
+    {
+        IsTodayGamesExpanded = !IsTodayGamesExpanded;
+        TodayGamesToggleText = IsTodayGamesExpanded ? "收起 ∧" : "查看全部 ∨";
+        TodayGames.Clear();
+        var itemsToShow = IsTodayGamesExpanded ? _allTodayGamesCache : _allTodayGamesCache.Take(3);
+        foreach (var item in itemsToShow)
+        {
+            TodayGames.Add(item);
+        }
     }
 
     [RelayCommand]
@@ -592,33 +931,77 @@ public partial class HomeViewModel : ObservableObject
 
     private void OnSessionStarted(object? sender, GameSession session)
     {
-        _dispatcherQueue.TryEnqueue(() =>
+        void HandleSessionStarted()
         {
+            var distinctGames = GetDistinctActiveGames();
+            if (distinctGames.Count > 0)
+            {
+                var targetIndex = distinctGames.FindIndex(g => g.GameId == session.GameId);
+                if (targetIndex >= 0)
+                {
+                    _heroCarouselIndex = targetIndex;
+                }
+                // 新游戏启动时重置轮播计时，保证新游戏完整展示满 5 秒，不会刚启动就被切走
+                _heroCarouselTick = 0;
+            }
+
             if (!_secondTimer.IsEnabled) _secondTimer.Start();
-        });
-        _ = RefreshHeroCardAsync(session);
+            _ = RefreshHeroCardAsync(session);
+        }
+
+        if (_dispatcherQueue.HasThreadAccess)
+        {
+            HandleSessionStarted();
+        }
+        else
+        {
+            _dispatcherQueue.TryEnqueue(HandleSessionStarted);
+        }
+
         _ = RefreshAllDataAsync();
     }
 
     private void OnSessionHeartbeat(object? sender, GameSession session)
     {
-        _dispatcherQueue.TryEnqueue(() =>
-        {
-            if (IsGameRunning)
-            {
-                var elapsed = Math.Max(session.DurationSeconds, (int)(DateTime.Now - session.StartTime).TotalSeconds);
-                CurrentGameTimer = DailyAggregator.FormatSeconds(elapsed);
-            }
-        });
+        // 5 秒心跳纯粹用于后台 GameSessionManager 进行数据库落库、时长增量聚合与 Notion 同步。
+        // 严禁在此处异步篡改 UI 的 _currentElapsedSeconds，彻底切断后台心跳到达时刻与 UI 定时器的相位差导致的秒数抽搐与双跳。
+        // 界面秒表由 UI 线程的 _secondTimer 独立平稳维护（精确每秒 +1）。
     }
 
     private void OnSessionEnded(object? sender, GameSession session)
     {
-        _dispatcherQueue.TryEnqueue(() =>
+        void HandleSessionEnded()
         {
-            _secondTimer.Stop();
-            CurrentGameTimer = "00:00:00";
-        });
+            var remaining = _sessionManager.GetActiveSessions();
+            if (remaining.Count == 0)
+            {
+                _secondTimer.Stop();
+                _activeGameId = null;
+                _currentElapsedSeconds = 0;
+                CurrentGameTimer = "00:00:00";
+                IsGameRunning = false;
+                _heroCarouselTick = 0;
+                _heroCarouselIndex = 0;
+            }
+            else
+            {
+                // 如果退出的游戏正好是当前展示的游戏，重置 tick 计时让下一个游戏展示满 5 秒
+                if (_activeGameId.HasValue && session.GameId == _activeGameId.Value)
+                {
+                    _heroCarouselTick = 0;
+                }
+            }
+        }
+
+        if (_dispatcherQueue.HasThreadAccess)
+        {
+            HandleSessionEnded();
+        }
+        else
+        {
+            _dispatcherQueue.TryEnqueue(HandleSessionEnded);
+        }
+
         _ = RefreshHeroCardAsync(null);
         _ = RefreshAllDataAsync();
     }

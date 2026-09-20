@@ -60,6 +60,7 @@ public interface IDatabaseRepository
     Task<NotionGameCatalogItem?> GetCatalogItemByPageIdAsync(string pageId);
     Task UpsertCatalogItemsAsync(IEnumerable<NotionGameCatalogItem> items);
     Task ClearCatalogCacheAsync();
+    Task<Dictionary<string, List<string>>> GetGameGenresMapAsync();
 
     // App Settings
     Task<string?> GetSettingAsync(string key);
@@ -107,13 +108,43 @@ public interface INotionClient
     /// 传完整标题进去会拼出「X · 0.7 h · 0.7 h」（后缀重复）。
     /// 该参数原名 gameTitle，这个歧义导致过真实 bug，故改名。
     /// </remarks>
-    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null);
+    /// <param name="writeDuration">
+    /// 是否写「单次时长」。**只有本地时长确实领先的推送路径才该写 true** ——
+    /// 历史记录在 Notion 上的数值是权威，拿本地缓存覆盖它属于毁灭性错误。
+    /// 只改"呈现"（标题 / 关系 / 图标）的调用必须传 false。
+    /// </param>
+    /// <param name="titleOverride">
+    /// 可选的完整标题。若传入则直接使用，不按 gameName + durationMinutes 重拼（用于回刷保留原有时长后缀）。
+    /// </param>
+    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null, bool writeDuration = false, string? titleOverride = null);
+
+    /// <summary>
+    /// **只**改每日记录的标题（以及可选图标）—— 绝不碰「单次时长」「日期」这类数据属性。
+    /// </summary>
+    /// <remarks>
+    /// 🚨 2026-09-19 事故：回刷标题原先走 <c>UpdateDailyRecordAsync</c>，而它**必然同时写
+    /// 「单次时长」**（当年设计如此，因为标题串里含时长）。于是回刷拿**本地**分钟数覆盖了
+    /// Notion 上原本的数值，一次运行改写 786 条，QA 表里的历史时长被篡改。
+    ///
+    /// 原则：Notion 侧的历史记录是**权威数据**，程序只允许改"呈现"（标题 / 图标），
+    /// 不允许改"数值"。要改数值只能走 <c>UpdateDailyRecordAsync</c>（推送路径），
+    /// 那条路径写的是本地确实领先的时长。
+    /// </remarks>
+    Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null);
+    /// <summary>更新每日记录的「绑定状态」属性（已绑定 / 未绑定），绝不修改时长、日期或标题。</summary>
+    Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status);
     Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle);
     /// <summary>把页面移入 Notion 回收站（archived）。这是 Notion API 唯一的"删除"方式，30 天内可恢复。</summary>
     Task<bool> ArchivePageAsync(string pageId);
 
     /// <summary>把总表页面的 page icon 设置为 external 图片链接（仅对未设图标的页面调用）。</summary>
     Task<bool> SetPageIconAsync(string pageId, string imageUrl);
+
+    /// <summary>
+    /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
+    /// 用于对账时二次确权，防止因为 Notion 索引延迟或查询过滤导致本地记录被误删。
+    /// </summary>
+    Task<bool> IsPageDeletedAsync(string pageId);
 }
 
 public interface INotionSyncService
