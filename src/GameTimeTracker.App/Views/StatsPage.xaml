@@ -468,7 +468,7 @@
                     <ColumnDefinition Width="1.0*" />
                 </Grid.ColumnDefinitions>
 
-                <!-- 1. Playtime Ranking (Top 5, compact height -60px) -->
+                <!-- 1. Playtime Ranking (Top 6) -->
                 <Border Grid.Column="0" CornerRadius="16" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="16,14">
                     <StackPanel Spacing="10">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -481,18 +481,26 @@
                             <TextBlock Text="游戏时长排行" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                         </StackPanel>
 
-                        <!-- Ranked Games List (Top 5: Cover + Name & Stats on top + Full-width Progress Bar below) -->
+                        <!-- Ranked Games List (Top 6: Rank Badge + Cover + Name & Stats on top + Full-width Progress Bar below) -->
                         <ItemsRepeater ItemsSource="{x:Bind ViewModel.GameRankings, Mode=OneWay}">
                             <ItemsRepeater.ItemTemplate>
                                 <DataTemplate x:DataType="coreServices:GameStatItem">
                                     <Grid Padding="0,4">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
 
+                                        <!-- Rank Badge (1=Gold, 2=Silver, 3=Bronze, 4+=Normal) -->
+                                        <Border Grid.Column="0" Width="20" Height="20" CornerRadius="6" Margin="0,0,8,0" VerticalAlignment="Center"
+                                                Background="{x:Bind Rank, Converter={StaticResource RankToBadgeBrushConverter}}">
+                                            <TextBlock Text="{x:Bind Rank}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                       Foreground="{x:Bind Rank, Converter={StaticResource RankToTextBrushConverter}}" />
+                                        </Border>
+
                                         <!-- Cover Thumbnail -->
-                                        <Border Grid.Column="0" Width="32" Height="32" CornerRadius="6" Margin="0,0,9,0" VerticalAlignment="Center" Background="#0C4F8FFF">
+                                        <Border Grid.Column="1" Width="32" Height="32" CornerRadius="6" Margin="0,0,9,0" VerticalAlignment="Center" Background="#0C4F8FFF">
                                             <Grid>
                                                 <Image Source="{x:Bind CoverPath, Converter={StaticResource StringToImageConverter}}" Stretch="UniformToFill"
                                                        Visibility="{x:Bind CoverPath, Converter={StaticResource NullToVisConverter}}" />
@@ -500,7 +508,7 @@
                                         </Border>
 
                                         <!-- Right Content: Top Row (Name + Duration + Pct), Bottom Row (Full-width Progress Bar) -->
-                                        <Grid Grid.Column="1" VerticalAlignment="Center">
+                                        <Grid Grid.Column="2" VerticalAlignment="Center">
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto" />
                                                 <RowDefinition Height="Auto" />

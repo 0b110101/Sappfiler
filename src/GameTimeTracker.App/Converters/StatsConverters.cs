@@ -103,9 +103,25 @@ public class RankToBadgeBrushConverter : IValueConverter
     private static readonly SolidColorBrush BronzeBadge = new(Windows.UI.Color.FromArgb(255, 0xFF, 0xED, 0xD5));
     private static readonly SolidColorBrush NormalBadge = new(Windows.UI.Color.FromArgb(255, 0xF1, 0xF5, 0xF9));
 
+    private static readonly SolidColorBrush GoldBadgeDark = new(Windows.UI.Color.FromArgb(50, 0xF5, 0x9E, 0x0B));
+    private static readonly SolidColorBrush SilverBadgeDark = new(Windows.UI.Color.FromArgb(50, 0x94, 0xA3, 0xB8));
+    private static readonly SolidColorBrush BronzeBadgeDark = new(Windows.UI.Color.FromArgb(50, 0xF9, 0x73, 0x16));
+    private static readonly SolidColorBrush NormalBadgeDark = new(Windows.UI.Color.FromArgb(25, 0x94, 0xA3, 0xB8));
+
     public object Convert(object value, Type targetType, object parameter, string language)
     {
         var rank = value is int r ? r : 0;
+        bool isDark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        if (isDark)
+        {
+            return rank switch
+            {
+                1 => GoldBadgeDark,
+                2 => SilverBadgeDark,
+                3 => BronzeBadgeDark,
+                _ => NormalBadgeDark
+            };
+        }
         return rank switch
         {
             1 => GoldBadge,
@@ -126,9 +142,25 @@ public class RankToTextBrushConverter : IValueConverter
     private static readonly SolidColorBrush BronzeText = new(Windows.UI.Color.FromArgb(255, 0xC2, 0x41, 0x0C));
     private static readonly SolidColorBrush NormalText = new(Windows.UI.Color.FromArgb(255, 0x94, 0xA3, 0xB8));
 
+    private static readonly SolidColorBrush GoldTextDark = new(Windows.UI.Color.FromArgb(255, 0xFB, 0xBF, 0x24));
+    private static readonly SolidColorBrush SilverTextDark = new(Windows.UI.Color.FromArgb(255, 0xCB, 0xD5, 0xE1));
+    private static readonly SolidColorBrush BronzeTextDark = new(Windows.UI.Color.FromArgb(255, 0xFB, 0x92, 0x3C));
+    private static readonly SolidColorBrush NormalTextDark = new(Windows.UI.Color.FromArgb(255, 0x94, 0xA3, 0xB8));
+
     public object Convert(object value, Type targetType, object parameter, string language)
     {
         var rank = value is int r ? r : 0;
+        bool isDark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
+        if (isDark)
+        {
+            return rank switch
+            {
+                1 => GoldTextDark,
+                2 => SilverTextDark,
+                3 => BronzeTextDark,
+                _ => NormalTextDark
+            };
+        }
         return rank switch
         {
             1 => GoldText,

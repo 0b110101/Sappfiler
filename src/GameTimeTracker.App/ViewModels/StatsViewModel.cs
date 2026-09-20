@@ -348,9 +348,9 @@ public partial class StatsViewModel : ObservableObject
         }
         RenderTrendChart(result.TrendPoints, result.MaxDailyMinutes, result.MaxDailySessions);
 
-        // 7. Update Rankings (Take top 5)
+        // 7. Update Rankings (Take top 6)
         GameRankings.Clear();
-        foreach (var item in result.GameRankings.Take(5))
+        foreach (var item in result.GameRankings.Take(6))
         {
             GameRankings.Add(item);
         }
