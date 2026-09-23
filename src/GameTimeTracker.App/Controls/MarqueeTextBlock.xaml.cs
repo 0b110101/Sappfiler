@@ -70,10 +70,17 @@ public sealed partial class MarqueeTextBlock : UserControl
         MarqueeTextBlockElement.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double fullTextWidth = MarqueeTextBlockElement.DesiredSize.Width;
         double availableWidth = RootContainer.ActualWidth;
-
-        // 如果文本未超出可用宽度，无需触发跑马灯
-        if (availableWidth <= 0 || fullTextWidth <= availableWidth + 4)
+        if (availableWidth <= 0)
         {
+            availableWidth = NormalTextBlock.ActualWidth;
+        }
+
+        bool isTrimmed = NormalTextBlock.IsTextTrimmed;
+
+        // 如果文本未被截断且未超出可用宽度，无需触发跑马灯（必须重置 _isHovered 避免后续悬停锁死）
+        if (!isTrimmed && (availableWidth <= 0 || fullTextWidth <= availableWidth + 2))
+        {
+            _isHovered = false;
             return;
         }
 
@@ -102,7 +109,7 @@ public sealed partial class MarqueeTextBlock : UserControl
         TextTransform.X = 0;
 
         // 计算滚过全部文字所需的总位移（确保末尾字符完全呈现并留有 24px 缓冲）
-        double distance = fullTextWidth - availableWidth + 24;
+        double distance = Math.Max(28.0, fullTextWidth - availableWidth + 24);
         double durationSeconds = Math.Max(2.0, distance / 40.0);
 
         _marqueeStoryboard?.Stop();
