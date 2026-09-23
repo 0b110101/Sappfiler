@@ -637,8 +637,8 @@
                                                 <TextBlock Text="{x:Bind TierName}" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
                                                            VerticalAlignment="Center" TextTrimming="None" Typography.NumeralAlignment="Tabular" />
                                             </StackPanel>
-                                            <!-- Percentage & Count on Right -->
-                                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                            <!-- Percentage & Count on Right (shifted left by 10px) -->
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0">
                                                 <TextBlock Text="{x:Bind Percentage}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Typography.NumeralAlignment="Tabular" />
                                                 <TextBlock Text="{x:Bind CountText}" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" Typography.NumeralAlignment="Tabular" />
                                             </StackPanel>
@@ -656,8 +656,8 @@
                                                 <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <!-- Dot + TierName on Left -->
-                                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <!-- Dot + TierName on Left (shifted right by 10px) -->
+                                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="10,0,0,0">
                                                 <Ellipse Width="7" Height="7" Fill="{x:Bind ColorBrush}" VerticalAlignment="Center" Margin="0,0,1,0" />
                                                 <TextBlock Text="{x:Bind TierName}" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
                                                            VerticalAlignment="Center" TextTrimming="None" Typography.NumeralAlignment="Tabular" />

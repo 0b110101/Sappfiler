@@ -166,6 +166,13 @@ foreach ($d in $docCopies) {
 }
 Write-Host "已随包附带 README.md 与 更新说明.md" -ForegroundColor DarkGray
 
+# 随包提供便捷启动脚本，便于用户解压后直接在顶部双击启动，避免在几百个运行时 DLL 中翻找
+$launcherCmd = "@echo off`r`ncd /d `"%~dp0`"`r`nstart `"`" `"%~dp0Sappfiler.exe`" %*`r`n"
+[System.IO.File]::WriteAllText((Join-Path $outDir '启动Sappfiler.cmd'), $launcherCmd, [System.Text.Encoding]::Default)
+
+# 清理非必需的 pdb 调试符号文件
+Get-ChildItem $outDir -Filter "*.pdb" | Remove-Item -Force
+
 # ---- 4a. 清理多余的语言资源目录 ----
 # WinUI 的 native 库自带 86 个语言的 .mui 卫星资源，默认全被复制进来，
 # 于是包根目录多出 86 个语言文件夹（约 3.7MB）。它们只影响 WinUI **内部**

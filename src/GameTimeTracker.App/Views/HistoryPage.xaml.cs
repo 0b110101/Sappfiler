@@ -67,7 +67,39 @@ public sealed partial class HistoryPage : Page
             };
         }).ToList();
 
-        HistoryRepeater.ItemsSource = viewModels;
+        _allRecords = viewModels;
+        FilterHistory(SearchBox?.Text ?? string.Empty);
+    }
+
+    private List<RecentRecordViewModel> _allRecords = new();
+
+    private void FilterHistory(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            HistoryRepeater.ItemsSource = _allRecords;
+        }
+        else
+        {
+            var clean = query.Trim().ToLowerInvariant();
+            HistoryRepeater.ItemsSource = _allRecords.Where(r =>
+                (r.GameName != null && r.GameName.ToLowerInvariant().Contains(clean)) ||
+                (r.DateText != null && r.DateText.ToLowerInvariant().Contains(clean)) ||
+                (r.Platform != null && r.Platform.ToLowerInvariant().Contains(clean))).ToList();
+        }
+    }
+
+    private void OnSearchTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason == AutoSuggestionBoxTextChangeReason.UserInput || string.IsNullOrEmpty(sender.Text))
+        {
+            FilterHistory(sender.Text);
+        }
+    }
+
+    private void OnSearchSubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+    {
+        FilterHistory(args.QueryText);
     }
 
     public async Task RefreshAsync()

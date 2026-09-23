@@ -10,11 +10,19 @@
 
     <ScrollViewer Padding="24" VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="18" HorizontalAlignment="Stretch">
-            <!-- Header -->
-            <StackPanel Spacing="4">
-                <TextBlock Text="游玩历史明细" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                <TextBlock Text="查看所有历史游戏记录及每日统计" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
-            </StackPanel>
+            <!-- Header & Search -->
+            <Grid>
+                <StackPanel Spacing="4">
+                    <TextBlock Text="游玩历史明细" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="查看所有历史游戏记录及每日统计" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                </StackPanel>
+
+                <AutoSuggestBox x:Name="SearchBox"
+                                TextChanged="OnSearchTextChanged"
+                                QuerySubmitted="OnSearchSubmitted"
+                                PlaceholderText="搜索游戏、日期或平台..."
+                                Width="260" HorizontalAlignment="Right" VerticalAlignment="Bottom" />
+            </Grid>
 
             <InfoBar x:Name="StatusInfoBar" IsOpen="False" IsClosable="True" />
 
