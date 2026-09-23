@@ -96,7 +96,12 @@ public record StatsOverviewResult(
     IReadOnlyList<DailyTrendPoint> TrendPoints,
     IReadOnlyList<GenreDistributionItem> GenreStats,
     int MaxDailyMinutes,
-    int MaxDailySessions
+    int MaxDailySessions,
+    GameExplorationResult? Exploration = null,
+    IReadOnlyList<DonutSlice>? ExplorationDonutSlices = null,
+    PlaytimeTierResult? PlaytimeTiers = null,
+    IReadOnlyList<DonutSlice>? PlaytimeTierDonutSlices = null,
+    IReadOnlyList<GameActivityItem>? GameActivities = null
 );
 
 public static class StatsAggregator
@@ -153,11 +158,19 @@ public static class StatsAggregator
         }
     }
 
+    public const string TierGrey = "#94A3B8";   // 0-2h
+    public const string TierGreen = "#10B981";  // 2-10h
+    public const string TierBlue = "#3B82F6";   // 10-50h
+    public const string TierYellow = "#F59E0B"; // 50-100h
+    public const string TierPurple = "#8B5CF6"; // 100-500h
+    public const string TierOrange = "#F97316"; // 500h+
+
     public static StatsOverviewResult AggregatePeriod(
         PeriodRange range,
         IReadOnlyList<DailySummary> allSummaries,
         IReadOnlyDictionary<string, List<string>>? gameGenresMap = null,
-        IReadOnlyDictionary<int, string?>? gameCoverMap = null)
+        IReadOnlyDictionary<int, string?>? gameCoverMap = null,
+        IReadOnlyDictionary<int, string>? earliestPlayDates = null)
     {
         string startStr = range.StartDate.ToString("yyyy-MM-dd");
         string endStr = range.EndDate.ToString("yyyy-MM-dd");
@@ -418,6 +431,16 @@ public static class StatsAggregator
         // 7. Genre Distribution (Vertical Bars)
         var genreStats = BuildGenreStats(curSummaries, gameGenresMap);
 
+        // 8. Exploration Stats & Donut Slices
+        var (exploration, explorationSlices) = BuildExploration(
+            range, curSummaries, prevSummaries, allSummaries, earliestPlayDates, gameCoverMap);
+
+        // 9. Playtime Tier Distribution & Donut Slices
+        var (playtimeTiers, playtimeTierSlices) = BuildPlaytimeTiers(curSummaries);
+
+        // 10. Game Activities (sorted by ActiveDays desc)
+        var gameActivities = BuildGameActivities(curSummaries, gameCoverMap);
+
         return new StatsOverviewResult(
             Range: range,
             TotalMinutes: curTotalMinutes,
@@ -441,8 +464,272 @@ public static class StatsAggregator
             TrendPoints: trendPoints,
             GenreStats: genreStats,
             MaxDailyMinutes: maxDailyMins,
-            MaxDailySessions: maxDailySessions
+            MaxDailySessions: maxDailySessions,
+            Exploration: exploration,
+            ExplorationDonutSlices: explorationSlices,
+            PlaytimeTiers: playtimeTiers,
+            PlaytimeTierDonutSlices: playtimeTierSlices,
+            GameActivities: gameActivities
         );
+    }
+
+    private static (GameExplorationResult Result, IReadOnlyList<DonutSlice> Slices) BuildExploration(
+        PeriodRange range,
+        IReadOnlyList<DailySummary> curSummaries,
+        IReadOnlyList<DailySummary> prevSummaries,
+        IReadOnlyList<DailySummary> allSummaries,
+        IReadOnlyDictionary<int, string>? earliestPlayDates,
+        IReadOnlyDictionary<int, string?>? gameCoverMap)
+    {
+        string startStr = range.StartDate.ToString("yyyy-MM-dd");
+        string prevStartStr = range.PrevStartDate.ToString("yyyy-MM-dd");
+
+        var curGames = curSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
+        {
+            Name = g.First().GameName,
+            Minutes = g.Sum(x => x.DurationMinutes)
+        });
+
+        var prevGames = prevSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
+        {
+            Name = g.First().GameName,
+            Minutes = g.Sum(x => x.DurationMinutes)
+        });
+
+        var earliestMap = earliestPlayDates != null
+            ? new Dictionary<int, string>(earliestPlayDates)
+            : allSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => g.Min(s => s.Date) ?? startStr);
+
+        var newGames = new List<(int Id, string Name)>();
+        var ongoingGames = new List<(int Id, string Name)>();
+        var returningGames = new List<(int Id, string Name)>();
+        var pausedGames = new List<(int Id, string Name)>();
+
+        foreach (var (gid, g) in curGames)
+        {
+            if (g.Minutes <= 0) continue;
+
+            string earliest = earliestMap.TryGetValue(gid, out var ed) ? ed : startStr;
+            bool isFirstPlayedInCur = string.CompareOrdinal(earliest, startStr) >= 0;
+
+            if (isFirstPlayedInCur)
+            {
+                newGames.Add((gid, g.Name));
+            }
+            else if (prevGames.ContainsKey(gid) && prevGames[gid].Minutes > 0)
+            {
+                ongoingGames.Add((gid, g.Name));
+            }
+            else
+            {
+                returningGames.Add((gid, g.Name));
+            }
+        }
+
+        foreach (var (gid, g) in prevGames)
+        {
+            if (g.Minutes <= 0) continue;
+            if (!curGames.ContainsKey(gid) || curGames[gid].Minutes <= 0)
+            {
+                pausedGames.Add((gid, g.Name));
+            }
+        }
+
+        int totalExploration = newGames.Count + ongoingGames.Count + returningGames.Count + pausedGames.Count;
+
+        string periodPrefix = range.PeriodComparisonLabel switch
+        {
+            "较上季" or "较上季度" => "本季",
+            "较上年" => "今年",
+            _ => "本月"
+        };
+        string prevPeriodPrefix = range.PeriodComparisonLabel switch
+        {
+            "较上季" or "较上季度" => "上季",
+            "较上年" => "去年",
+            _ => "上月"
+        };
+
+        var categories = new List<GameExplorationCategory>();
+
+        void AddCategory(string key, string title, string desc, string color, string icon, List<(int Id, string Name)> items)
+        {
+            double pct = totalExploration > 0 ? (double)items.Count / totalExploration : 0;
+            var covers = new List<string>();
+            var names = new List<string>();
+            foreach (var item in items)
+            {
+                names.Add(item.Name);
+                if (gameCoverMap != null && gameCoverMap.TryGetValue(item.Id, out var c) && !string.IsNullOrEmpty(c))
+                {
+                    covers.Add(c);
+                }
+            }
+
+            categories.Add(new GameExplorationCategory(
+                Key: key,
+                Title: title,
+                Description: desc,
+                Count: items.Count,
+                Percentage: pct,
+                PercentageText: $"{Math.Round(pct * 100.0, 0)}%",
+                ColorHex: color,
+                IconType: icon,
+                GameNames: names,
+                CoverPaths: covers
+            ));
+        }
+
+        AddCategory("new", "新游戏", $"{periodPrefix}首次游玩的游戏", "#3B82F6", "sparkle", newGames);
+        AddCategory("ongoing", "持续游玩", $"{periodPrefix}内在继续游玩的游戏", "#10B981", "repeat", ongoingGames);
+        AddCategory("returning", "回归游玩", "之前玩过，重新开始的游戏", "#8B5CF6", "history", returningGames);
+        AddCategory("paused", "暂停游玩", $"{prevPeriodPrefix}记录，{periodPrefix}未再游玩的游戏", "#F59E0B", "pause", pausedGames);
+
+        var slices = new List<DonutSlice>();
+        double currentAngle = 0;
+        foreach (var cat in categories)
+        {
+            if (cat.Count <= 0) continue;
+            double sweep = cat.Percentage * 360.0;
+            slices.Add(new DonutSlice(
+                Name: cat.Title,
+                Percentage: cat.Percentage,
+                PercentageText: cat.PercentageText,
+                DurationText: $"{cat.Count}款",
+                ColorHex: cat.ColorHex,
+                StartAngle: currentAngle,
+                SweepAngle: sweep
+            ));
+            currentAngle += sweep;
+        }
+
+        return (new GameExplorationResult(totalExploration, categories), slices);
+    }
+
+    private static (PlaytimeTierResult Result, IReadOnlyList<DonutSlice> Slices) BuildPlaytimeTiers(
+        IReadOnlyList<DailySummary> curSummaries)
+    {
+        var gamesGrouped = curSummaries
+            .GroupBy(s => s.GameId)
+            .Select(g => new { GameId = g.Key, Minutes = g.Sum(x => x.DurationMinutes) })
+            .Where(x => x.Minutes > 0)
+            .ToList();
+
+        int totalGames = gamesGrouped.Count;
+
+        var tierDefs = new (string Name, int Min, int Max, string Color)[]
+        {
+            ("0-2h", 0, 120, TierGrey),
+            ("2-10h", 120, 600, TierGreen),
+            ("10-50h", 600, 3000, TierBlue),
+            ("50-100h", 3000, 6000, TierYellow),
+            ("100-500h", 6000, 30000, TierPurple),
+            ("500h+", 30000, int.MaxValue, TierOrange)
+        };
+
+        var tierItems = new List<PlaytimeTierItem>();
+        var slices = new List<DonutSlice>();
+        double currentAngle = 0;
+
+        foreach (var def in tierDefs)
+        {
+            int count = gamesGrouped.Count(g => g.Minutes >= def.Min && (def.Max == int.MaxValue ? true : g.Minutes < def.Max));
+            double pct = totalGames > 0 ? (double)count / totalGames : 0;
+
+            tierItems.Add(new PlaytimeTierItem(
+                TierName: def.Name,
+                MinMinutes: def.Min,
+                MaxMinutes: def.Max,
+                GameCount: count,
+                Percentage: pct,
+                PercentageText: $"{Math.Round(pct * 100.0, 0)}%",
+                CountText: $"({count})",
+                ColorHex: def.Color
+            ));
+
+            if (count > 0)
+            {
+                double sweep = pct * 360.0;
+                slices.Add(new DonutSlice(
+                    Name: def.Name,
+                    Percentage: pct,
+                    PercentageText: $"{Math.Round(pct * 100.0, 0)}%",
+                    DurationText: $"{count}款",
+                    ColorHex: def.Color,
+                    StartAngle: currentAngle,
+                    SweepAngle: sweep
+                ));
+                currentAngle += sweep;
+            }
+        }
+
+        return (new PlaytimeTierResult(totalGames, tierItems), slices);
+    }
+
+    private static IReadOnlyList<GameActivityItem> BuildGameActivities(
+        IReadOnlyList<DailySummary> curSummaries,
+        IReadOnlyDictionary<int, string?>? gameCoverMap)
+    {
+        var grouped = curSummaries
+            .GroupBy(s => s.GameId)
+            .Select(g =>
+            {
+                var first = g.First();
+                int activeDays = g.Select(x => x.Date).Distinct().Count();
+                int totalMinutes = g.Sum(x => x.DurationMinutes);
+                string lastDate = g.Max(x => x.Date) ?? "";
+                string lastPlayedText = "最近";
+                if (DateTime.TryParse(lastDate, out var dt))
+                {
+                    var diff = (DateTime.Today - dt.Date).Days;
+                    if (diff <= 0) lastPlayedText += "今天";
+                    else if (diff == 1) lastPlayedText += "昨天";
+                    else lastPlayedText += $" {diff} 天前";
+                }
+                else
+                {
+                    lastPlayedText += lastDate;
+                }
+
+                string? cover = null;
+                if (gameCoverMap != null && gameCoverMap.TryGetValue(g.Key, out var c))
+                {
+                    cover = c;
+                }
+
+                string name = string.IsNullOrWhiteSpace(first.GameName) ? $"Game #{first.GameId}" : first.GameName;
+                return new
+                {
+                    GameId = g.Key,
+                    Name = name,
+                    first.Platform,
+                    first.PlatformId,
+                    ActiveDays = activeDays,
+                    TotalMinutes = totalMinutes,
+                    LastPlayedDate = lastDate,
+                    LastPlayedText = lastPlayedText,
+                    CoverPath = cover
+                };
+            })
+            .Where(x => x.TotalMinutes > 0)
+            .OrderByDescending(x => x.ActiveDays)
+            .ThenByDescending(x => x.TotalMinutes)
+            .ToList();
+
+        int maxActiveDays = grouped.FirstOrDefault()?.ActiveDays ?? 1;
+
+        return grouped.Select(x => new GameActivityItem(
+            GameId: x.GameId,
+            Name: x.Name,
+            Platform: x.Platform,
+            PlatformId: x.PlatformId,
+            ActiveDays: x.ActiveDays,
+            TotalMinutes: x.TotalMinutes,
+            LastPlayedDate: x.LastPlayedDate,
+            LastPlayedText: x.LastPlayedText,
+            RatioToMax: maxActiveDays > 0 ? (double)x.ActiveDays / maxActiveDays : 0,
+            CoverPath: x.CoverPath
+        )).ToList();
     }
 
     private static readonly string[] GenrePalette =

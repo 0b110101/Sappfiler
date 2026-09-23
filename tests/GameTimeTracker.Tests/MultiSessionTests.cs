@@ -101,29 +101,27 @@ public class MultiSessionTests : IDisposable
         await _manager.StartSessionAsync(gameB, new DetectedProcess(201, "b.exe", @"C://b.exe", "游戏B"), startB);
         await _manager.StartSessionAsync(gameA, new DetectedProcess(102, "a_game.exe", @"C://a_game.exe", "游戏A 主进程"), startA2);
 
+        // 多进程同一游戏（如启动器 + 子进程）合并为一个游戏会话，杜绝时长成倍虚增
         var sessions = _manager.GetActiveSessions();
-        sessions.Should().HaveCount(3);
+        sessions.Should().HaveCount(2, "同游戏的多个进程应合并为一个游戏会话，防止时长被重复计算");
 
-        // 分组按 GameId 升序，去重后应只有 2 款游戏，且顺序不受各子进程启动时间影响
-        var distinctGames = sessions
-            .GroupBy(s => s.GameId)
-            .Select(g => new
-            {
-                GameId = g.Key,
-                EarliestSession = g.OrderBy(s => s.StartTime).First(),
-                EarliestStartTime = g.Min(s => s.StartTime),
-                MaxDurationSeconds = g.Max(s => s.DurationSeconds)
-            })
-            .OrderBy(g => g.GameId)
-            .ToList();
+        _manager.GetTrackedPids().Should().BeEquivalentTo(new[] { 101, 102, 201 });
+        _manager.IsPidActive(101).Should().BeTrue();
+        _manager.IsPidActive(102).Should().BeTrue();
+        _manager.IsPidActive(201).Should().BeTrue();
 
-        distinctGames.Should().HaveCount(2);
-        distinctGames[0].GameId.Should().Be(Math.Min(gameA.Id, gameB.Id));
-        distinctGames[1].GameId.Should().Be(Math.Max(gameA.Id, gameB.Id));
+        var sessionA = sessions.First(s => s.GameId == gameA.Id);
+        sessionA.StartTime.Should().Be(startA1, "游戏A的启动时间应为最早拉起的启动器时间");
 
-        // 游戏 A 的最早启动时间应为启动器的启动时间
-        var summaryA = distinctGames.First(g => g.GameId == gameA.Id);
-        summaryA.EarliestStartTime.Should().Be(startA1);
-        summaryA.EarliestSession.Pid.Should().Be(101);
+        // 启动器 101 退出后，游戏 A 的主进程 102 还在跑，会话应保持活跃
+        await _manager.EndSessionAsync(101, startA2.AddMinutes(5));
+        _manager.IsPidActive(101).Should().BeFalse();
+        _manager.IsPidActive(102).Should().BeTrue();
+        _manager.IsGameActive(gameA.Id).Should().BeTrue();
+
+        // 当最后一个进程 102 也退出后，游戏 A 会话才真正结束
+        await _manager.EndSessionAsync(102, startA2.AddMinutes(30));
+        _manager.IsGameActive(gameA.Id).Should().BeFalse();
+        _manager.IsGameActive(gameB.Id).Should().BeTrue();
     }
 }

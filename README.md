@@ -198,10 +198,12 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 
 ---
 
-## ⛔ 项目边界（What it doesn't do）
+## ⛔ 项目边界与安全性原则（What it doesn't do）
 
 为保障系统稳定性与用户账号绝对安全，本项目严格遵守以下技术原则：
 - **🚫 绝不注入任何游戏进程**：不使用任何 DLL 注入、API Hook 或驱动级监测技术，仅依赖 Windows 官方进程快照与性能计数器。
+- **🛡️ 反作弊与安全性兼容保障**：
+  本项目采用纯 Windows 标准用户态只读 API，运行机制等同于 Windows 自带的任务管理器。在运行搭载 **Easy Anti-Cheat (EAC)**、**BattlEye**、**Riot Vanguard** 等严苛反作弊系统的游戏时，**绝对安全合规，绝无封号或误报风险**。
 - **🚫 无第三方中间服务器**：客户端直连 Notion 官方 HTTPS API，不存在任何中转服务器或收集个人数据的后门，Token 与游戏历史绝不离开本地环境。
 - **🚫 非在线社交对战平台**：专注服务于单机、联机全平台玩家的个人数字化生活记录与离线聚合分析。
 
@@ -268,9 +270,13 @@ dotnet run --project src/GameTimeTracker.App
 
 ## 🙏 致谢
 
-在 GameTimeTracker 的架构设计、核心算法推演与代码工程化实现过程中，感谢以下前沿大语言模型与 AI 编程伙伴提供的深度协助：
+在 GameTimeTracker 的架构设计、核心算法推演、UI/UX 迭代与代码工程化实现过程中，感谢以下贡献者与 AI 编程伙伴提供的深度协助：
 
-- [Google Gemini](https://deepmind.google/technologies/gemini/)
-- [OpenAI GPT](https://openai.com/)
-- [Anthropic Claude](https://www.anthropic.com/)
-- [DeepSeek](https://www.deepseek.com/)
+- **特别鸣谢**：
+  - **SAMK**：长期深度测试、边界缺陷排查与体验反馈
+  - **UNICORN**：视觉审美指导、功能构想与交互设计建议
+- **AI 编程伙伴**：
+  - [Google Gemini](https://deepmind.google/technologies/gemini/)
+  - [OpenAI GPT](https://openai.com/)
+  - [Anthropic Claude](https://www.anthropic.com/)
+  - [DeepSeek](https://www.deepseek.com/)

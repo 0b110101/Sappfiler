@@ -47,6 +47,8 @@ public interface IDatabaseRepository
     Task<DailySummary?> GetDailySummaryByIdAsync(int id);
     Task<int> SyncDailyRecordFromNotionAsync(NotionDailyRecordItem item);
     Task<IReadOnlyList<DailySummary>> GetTopGamesByDateAsync(string date, int limit = 5);
+    Task<int> GetConsecutiveStreakDaysAsync(DateTime referenceDate, int cutoffHour = 24);
+    Task<IReadOnlyDictionary<int, string>> GetEarliestPlayDatesAsync();
 
     /// <summary>
     /// 回写一条已同步每日记录在 Notion 侧的标题与图标快照。

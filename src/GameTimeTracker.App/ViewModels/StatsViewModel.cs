@@ -76,6 +76,41 @@ public partial class DonutSliceViewModel : ObservableObject
     public string PathData { get; set; } = string.Empty;
 }
 
+public class ExplorationAvatarItem
+{
+    public string? CoverPath { get; set; }
+    public Thickness Margin { get; set; } = new(0);
+}
+
+public partial class ExplorationCategoryViewModel : ObservableObject
+{
+    public string Key { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int Count { get; set; }
+    public string CountText { get; set; } = "0 款";
+    public string PercentageText { get; set; } = "0%";
+    public string ColorHex { get; set; } = "#3B82F6";
+    public SolidColorBrush ColorBrush { get; set; } = new(Colors.DodgerBlue);
+    public string IconGlyph { get; set; } = "\uE735";
+    public List<ExplorationAvatarItem> Avatars { get; set; } = new();
+    public bool HasOverflow { get; set; }
+    public string OverflowText { get; set; } = string.Empty;
+    public bool HasAnyCovers => Avatars.Count > 0;
+}
+
+public partial class PlaytimeTierViewModel : ObservableObject
+{
+    public string TierName { get; set; } = string.Empty;
+    public int GameCount { get; set; }
+    public string CountText { get; set; } = "(0)";
+    public string Percentage { get; set; } = "0%";
+    public string ColorHex { get; set; } = "#94A3B8";
+    public SolidColorBrush ColorBrush { get; set; } = new(Colors.Gray);
+    public string PathData { get; set; } = string.Empty;
+    public string TooltipText => $"{TierName}: {GameCount}款游戏 ({Percentage})";
+}
+
 public partial class StatsViewModel : ObservableObject
 {
     private readonly IDatabaseRepository _repo;
@@ -146,6 +181,18 @@ public partial class StatsViewModel : ObservableObject
     [ObservableProperty] public partial string DonutTrackPath { get; set; } = BuildFullDonut(80, 80, 72, 48);
     [ObservableProperty] public partial int GenreTotalGamesCount { get; set; } = 0;
 
+    // 【游戏探索】 (Game Exploration)
+    [ObservableProperty] public partial int ExplorationTotalGamesCount { get; set; } = 0;
+    [ObservableProperty] public partial string ExplorationSubtitle { get; set; } = "本月你在游戏库中的探索与尝试情况";
+    [ObservableProperty] public partial string ExplorationTrackPath { get; set; } = BuildFullDonut(75, 75, 66, 45);
+
+    // 【游戏时长分布】 (Playtime Tier Distribution)
+    [ObservableProperty] public partial int TierTotalGamesCount { get; set; } = 0;
+    [ObservableProperty] public partial string TierTrackPath { get; set; } = BuildFullDonut(75, 75, 66, 45);
+
+    // 【游戏活跃度】
+    [ObservableProperty] public partial string GameActivityCardTitle { get; set; } = "游戏活跃度";
+
     // Streak & Quote (Bottom Banner)
     [ObservableProperty] public partial int StreakDays { get; set; } = 0;
     [ObservableProperty] public partial string StreakTitleText { get; set; } = "保持热爱，继续前进！";
@@ -159,6 +206,13 @@ public partial class StatsViewModel : ObservableObject
     public ObservableCollection<GameStatItem> DonutLegend { get; } = new();
     public ObservableCollection<DailyTrendPoint> TrendPoints { get; } = new();
     public ObservableCollection<TrendPointItemViewModel> TrendPointItems { get; } = new();
+
+    // New Collections
+    public ObservableCollection<DonutSliceViewModel> ExplorationDonutSlices { get; } = new();
+    public ObservableCollection<ExplorationCategoryViewModel> ExplorationCategories { get; } = new();
+    public ObservableCollection<DonutSliceViewModel> PlaytimeTierDonutSlices { get; } = new();
+    public ObservableCollection<PlaytimeTierViewModel> PlaytimeTiers { get; } = new();
+    public ObservableCollection<GameActivityItem> GameActivities { get; } = new();
 
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private StatsOverviewResult? _lastResult;
@@ -283,6 +337,7 @@ public partial class StatsViewModel : ObservableObject
         var allSummaries = await _repo.GetDailySummariesRangeAsync(minDateStr, maxDateStr);
         var allGames = await _repo.GetAllGamesAsync();
         var genresMap = await _repo.GetGameGenresMapAsync();
+        var earliestPlayDates = await _repo.GetEarliestPlayDatesAsync();
 
         // 2. Build game cover map
         var coverMap = new Dictionary<int, string?>();
@@ -296,7 +351,7 @@ public partial class StatsViewModel : ObservableObject
         }
 
         // 3. Aggregate
-        var result = StatsAggregator.AggregatePeriod(range, allSummaries, genresMap, coverMap);
+        var result = StatsAggregator.AggregatePeriod(range, allSummaries, genresMap, coverMap, earliestPlayDates);
         _lastResult = result;
 
         // 4. Update Overview Cards
@@ -412,16 +467,105 @@ public partial class StatsViewModel : ObservableObject
             });
         }
 
-        // 9. Update Period Game Records (Take top 5)
+        // 9. Update 【游戏探索】 (Game Exploration)
+        ExplorationCategories.Clear();
+        if (result.Exploration != null)
+        {
+            ExplorationTotalGamesCount = result.Exploration.TotalGamesCount;
+            ExplorationSubtitle = PeriodMode switch
+            {
+                StatsPeriodMode.Month => "本月你在游戏库中的探索与尝试情况",
+                StatsPeriodMode.Quarter => "本季你在游戏库中的探索与尝试情况",
+                StatsPeriodMode.Year => "今年你在游戏库中的探索与尝试情况",
+                _ => "本期你在游戏库中的探索与尝试情况"
+            };
+
+            foreach (var cat in result.Exploration.Categories)
+            {
+                string iconGlyph = cat.IconType switch
+                {
+                    "sparkle" => "\uE735",
+                    "repeat" => "\uE72C",
+                    "history" => "\uE81C",
+                    "pause" => "\uE769",
+                    _ => "\uE734"
+                };
+
+                var avatars = new List<ExplorationAvatarItem>();
+                int maxAvatars = 2;
+                var covers = cat.CoverPaths.Take(maxAvatars).ToList();
+                for (int i = 0; i < covers.Count; i++)
+                {
+                    avatars.Add(new ExplorationAvatarItem
+                    {
+                        CoverPath = covers[i],
+                        Margin = new Thickness(i == 0 ? 0 : -8, 0, 0, 0)
+                    });
+                }
+
+                int overflow = cat.Count - covers.Count;
+
+                ExplorationCategories.Add(new ExplorationCategoryViewModel
+                {
+                    Key = cat.Key,
+                    Title = cat.Title,
+                    Description = cat.Description,
+                    Count = cat.Count,
+                    CountText = $"{cat.Count} 款",
+                    PercentageText = cat.PercentageText,
+                    ColorHex = cat.ColorHex,
+                    ColorBrush = new SolidColorBrush(ParseColor(cat.ColorHex)),
+                    IconGlyph = iconGlyph,
+                    Avatars = avatars,
+                    HasOverflow = overflow > 0,
+                    OverflowText = $"+{overflow}"
+                });
+            }
+
+            RenderDonutCollection(result.ExplorationDonutSlices ?? Array.Empty<DonutSlice>(), ExplorationDonutSlices, 75, 75, 66, 45, 2.5);
+        }
+
+        // 10. Update 【游戏时长分布】 (Playtime Tier Distribution)
+        PlaytimeTiers.Clear();
+        if (result.PlaytimeTiers != null)
+        {
+            TierTotalGamesCount = result.PlaytimeTiers.TotalGamesCount;
+
+            foreach (var t in result.PlaytimeTiers.Tiers)
+            {
+                PlaytimeTiers.Add(new PlaytimeTierViewModel
+                {
+                    TierName = t.TierName,
+                    GameCount = t.GameCount,
+                    CountText = t.CountText,
+                    Percentage = t.PercentageText,
+                    ColorHex = t.ColorHex,
+                    ColorBrush = new SolidColorBrush(ParseColor(t.ColorHex))
+                });
+            }
+
+            RenderDonutCollection(result.PlaytimeTierDonutSlices ?? Array.Empty<DonutSlice>(), PlaytimeTierDonutSlices, 75, 75, 66, 45, 2.5);
+        }
+
+        // 11. Update 【游戏活跃度】 (Game Activities)
+        GameActivities.Clear();
+        if (result.GameActivities != null)
+        {
+            foreach (var act in result.GameActivities.Take(6))
+            {
+                GameActivities.Add(act);
+            }
+        }
+
+        // 12. Period Game Records (Take top 5, kept for compatibility)
         PeriodGameRecords.Clear();
         foreach (var item in result.GameRankings.Take(5))
         {
             PeriodGameRecords.Add(item);
         }
 
-        // 10. Update Streak from DailyAggregator
-        var todayStats = DailyAggregator.Aggregate(DateTime.Today, allSummaries);
-        StreakDays = todayStats.StreakDays;
+        // 13. Update Streak using accurate database query
+        StreakDays = await _repo.GetConsecutiveStreakDaysAsync(DateTime.Today);
         StreakTitleText = StreakDays > 0
             ? $"你已连续游戏 {StreakDays} 天\n保持热爱，继续前进！"
             : "今天还没有开始游戏，去开启一场冒险吧！";
@@ -429,6 +573,59 @@ public partial class StatsViewModel : ObservableObject
         finally
         {
             _refreshLock.Release();
+        }
+    }
+
+    private static void RenderDonutCollection(
+        IReadOnlyList<DonutSlice> slices,
+        ObservableCollection<DonutSliceViewModel> targetCollection,
+        double cx = 75.0, double cy = 75.0, double R = 66.0, double r = 45.0, double gap = 2.5)
+    {
+        targetCollection.Clear();
+        if (slices.Count == 0 || slices.All(s => s.SweepAngle <= 0))
+        {
+            targetCollection.Add(new DonutSliceViewModel
+            {
+                Name = "无记录",
+                PercentageText = "0%",
+                DurationText = "0h",
+                ColorBrush = new SolidColorBrush(ColorHelper.FromArgb(40, 148, 163, 184)),
+                ColorHex = "#94A3B8",
+                PathData = BuildFullDonut(cx, cy, R, r)
+            });
+            return;
+        }
+
+        var validSlices = slices.Where(s => s.SweepAngle > 0.01).ToList();
+        double effectiveGap = validSlices.Count > 1 ? gap : 0;
+        double currentAngle = 0;
+
+        foreach (var s in validSlices)
+        {
+            double sweep = s.Percentage * 360.0;
+            string path;
+            if (sweep >= 359.5 || validSlices.Count == 1)
+            {
+                path = BuildFullDonut(cx, cy, R, r);
+            }
+            else
+            {
+                double effectiveSweep = Math.Max(0.5, sweep - effectiveGap);
+                double effectiveStart = currentAngle + effectiveGap / 2.0;
+                path = BuildDonutArc(cx, cy, R, r, effectiveStart, effectiveSweep);
+            }
+            currentAngle += sweep;
+
+            targetCollection.Add(new DonutSliceViewModel
+            {
+                Name = s.Name,
+                PercentageText = s.PercentageText,
+                DurationText = s.DurationText,
+                ColorHex = s.ColorHex,
+                ColorBrush = new SolidColorBrush(ParseColor(s.ColorHex)),
+                CoverPath = s.CoverPath,
+                PathData = path
+            });
         }
     }
 

@@ -224,4 +224,119 @@ public class StatsAggregatorTests
             .And.Contain("总游戏时长 5h")
             .And.Contain("游戏 1 款");
     }
+
+    [Fact]
+    public void AggregatePeriod_Exploration_ShouldCategorizeNewOngoingReturningAndPaused()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Month);
+
+        var summaries = new List<DailySummary>
+        {
+            // Game 1: New in 2026-09
+            new() { Date = "2026-09-05", GameId = 1, GameName = "黑神话：悟空", DurationMinutes = 100 },
+            // Game 2: Played in Aug and Sept -> Ongoing
+            new() { Date = "2026-08-10", GameId = 2, GameName = "博德之门3", DurationMinutes = 120 },
+            new() { Date = "2026-09-12", GameId = 2, GameName = "博德之门3", DurationMinutes = 200 },
+            // Game 3: Earliest played in July 2026, skipped Aug, played in Sept -> Returning
+            new() { Date = "2026-09-15", GameId = 3, GameName = "艾尔登法环", DurationMinutes = 60 },
+            // Game 4: Played in Aug, not played in Sept -> Paused
+            new() { Date = "2026-08-15", GameId = 4, GameName = "赛博朋克2077", DurationMinutes = 150 }
+        };
+
+        var earliestDates = new Dictionary<int, string>
+        {
+            { 1, "2026-09-05" },
+            { 2, "2026-08-10" },
+            { 3, "2026-07-01" },
+            { 4, "2026-08-15" }
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries, null, null, earliestDates);
+
+        result.Exploration.Should().NotBeNull();
+        result.Exploration!.TotalGamesCount.Should().Be(4);
+
+        var newCat = result.Exploration.Categories.First(c => c.Key == "new");
+        newCat.Count.Should().Be(1);
+        newCat.GameNames.Should().Contain("黑神话：悟空");
+
+        var ongoingCat = result.Exploration.Categories.First(c => c.Key == "ongoing");
+        ongoingCat.Count.Should().Be(1);
+        ongoingCat.GameNames.Should().Contain("博德之门3");
+
+        var returningCat = result.Exploration.Categories.First(c => c.Key == "returning");
+        returningCat.Count.Should().Be(1);
+        returningCat.GameNames.Should().Contain("艾尔登法环");
+
+        var pausedCat = result.Exploration.Categories.First(c => c.Key == "paused");
+        pausedCat.Count.Should().Be(1);
+        pausedCat.GameNames.Should().Contain("赛博朋克2077");
+
+        result.ExplorationDonutSlices.Should().HaveCount(4);
+    }
+
+    [Fact]
+    public void AggregatePeriod_PlaytimeTiers_ShouldCategorizeTiersWithStrictPalette()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Month);
+        var summaries = new List<DailySummary>
+        {
+            new() { Date = "2026-09-01", GameId = 1, GameName = "Game1", DurationMinutes = 60 },    // 0-2h (TierGrey)
+            new() { Date = "2026-09-02", GameId = 2, GameName = "Game2", DurationMinutes = 300 },   // 2-10h (TierGreen)
+            new() { Date = "2026-09-03", GameId = 3, GameName = "Game3", DurationMinutes = 1200 },  // 10-50h (TierBlue)
+            new() { Date = "2026-09-04", GameId = 4, GameName = "Game4", DurationMinutes = 4000 },  // 50-100h (TierYellow)
+            new() { Date = "2026-09-05", GameId = 5, GameName = "Game5", DurationMinutes = 15000 }, // 100-500h (TierPurple)
+            new() { Date = "2026-09-06", GameId = 6, GameName = "Game6", DurationMinutes = 35000 }  // 500h+ (TierOrange)
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries);
+
+        result.PlaytimeTiers.Should().NotBeNull();
+        result.PlaytimeTiers!.TotalGamesCount.Should().Be(6);
+        result.PlaytimeTiers.Tiers.Should().HaveCount(6);
+
+        result.PlaytimeTiers.Tiers[0].ColorHex.Should().Be(StatsAggregator.TierGrey);
+        result.PlaytimeTiers.Tiers[1].ColorHex.Should().Be(StatsAggregator.TierGreen);
+        result.PlaytimeTiers.Tiers[2].ColorHex.Should().Be(StatsAggregator.TierBlue);
+        result.PlaytimeTiers.Tiers[3].ColorHex.Should().Be(StatsAggregator.TierYellow);
+        result.PlaytimeTiers.Tiers[4].ColorHex.Should().Be(StatsAggregator.TierPurple);
+        result.PlaytimeTiers.Tiers[5].ColorHex.Should().Be(StatsAggregator.TierOrange);
+
+        result.PlaytimeTiers.Tiers.All(t => t.GameCount == 1).Should().BeTrue();
+    }
+
+    [Fact]
+    public void AggregatePeriod_GameActivities_ShouldComputeActiveDaysAndFormatLastPlayed()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Month);
+        var todayStr = DateTime.Today.ToString("yyyy-MM-dd");
+        var yesterdayStr = DateTime.Today.AddDays(-1).ToString("yyyy-MM-dd");
+        var threeDaysAgoStr = DateTime.Today.AddDays(-3).ToString("yyyy-MM-dd");
+
+        var summaries = new List<DailySummary>
+        {
+            // Game 1 played on 2 days, last played today
+            new() { Date = yesterdayStr, GameId = 1, GameName = "Baldur's Gate 3", DurationMinutes = 60 },
+            new() { Date = todayStr, GameId = 1, GameName = "Baldur's Gate 3", DurationMinutes = 120 },
+            // Game 2 played on 1 day, 3 days ago
+            new() { Date = threeDaysAgoStr, GameId = 2, GameName = "Monster Hunter", DurationMinutes = 180 }
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries);
+
+        result.GameActivities.Should().NotBeNull();
+        result.GameActivities!.Should().HaveCount(2);
+
+        var top = result.GameActivities[0];
+        top.Name.Should().Be("Baldur's Gate 3");
+        top.ActiveDays.Should().Be(2);
+        top.RatioToMax.Should().Be(1.0);
+        top.LastPlayedText.Should().Be("最近今天");
+
+        var second = result.GameActivities[1];
+        second.Name.Should().Be("Monster Hunter");
+        second.ActiveDays.Should().Be(1);
+        second.RatioToMax.Should().Be(0.5);
+        second.LastPlayedText.Should().Be("最近 3 天前");
+    }
 }

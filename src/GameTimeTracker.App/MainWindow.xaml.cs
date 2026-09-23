@@ -661,12 +661,16 @@ public sealed partial class MainWindow : Window
                         _ = _coverCache.EnsureCoverAsync(identity.Platform, identity.PlatformId, identity.ExecutablePath);
 
                         // Start or heartbeat session
-                        var activeSessions = _sessionManager.GetActiveSessions();
-                        if (!activeSessions.Any(s => s.Pid == proc.Pid))
+                        if (!_sessionManager.IsPidActive(proc.Pid))
                         {
-                            // 只在**开始计时**时记一条。这个循环 5 秒跑一次，
-                            // 心跳不能记，否则日志会被刷爆。
-                            AppLog.Info($"[计时] 开始记录「{game.Name}」({identity.Platform}/{identity.PlatformId}) pid={proc.Pid}");
+                            if (!_sessionManager.IsGameActive(game.Id))
+                            {
+                                AppLog.Info($"[计时] 开始记录「{game.Name}」({identity.Platform}/{identity.PlatformId}) pid={proc.Pid}");
+                            }
+                            else
+                            {
+                                AppLog.Info($"[计时] 附加关联子进程「{game.Name}」pid={proc.Pid}");
+                            }
                             await _sessionManager.StartSessionAsync(game, proc);
                         }
                         else
@@ -677,13 +681,12 @@ public sealed partial class MainWindow : Window
                 }
 
                 // 3. Check ended sessions
-                var currentActive = _sessionManager.GetActiveSessions();
-                foreach (var s in currentActive)
+                foreach (var pid in _sessionManager.GetTrackedPids())
                 {
-                    if (!activePids.Contains(s.Pid))
+                    if (!activePids.Contains(pid))
                     {
-                        AppLog.Info($"[计时] 结束记录 pid={s.Pid}");
-                        await _sessionManager.EndSessionAsync(s.Pid);
+                        AppLog.Info($"[计时] 结束记录 pid={pid}");
+                        await _sessionManager.EndSessionAsync(pid);
                     }
                 }
 

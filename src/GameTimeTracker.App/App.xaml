@@ -67,6 +67,15 @@
                     <SolidColorBrush x:Key="StatusOrangeBrush" Color="#FB923C" />
                     <SolidColorBrush x:Key="StatusRedBrush" Color="#F87171" />
 
+                    <!-- Font Families: Geist for English/Digits, OPPO Sans for Chinese, fallback to Segoe UI Variable & Microsoft YaHei -->
+                    <FontFamily x:Key="AppFontFamily">Geist, OPPO Sans, Segoe UI Variable Text, Microsoft YaHei, Segoe UI</FontFamily>
+                    <FontFamily x:Key="AppHeadingFontFamily">Geist, OPPO Sans, Segoe UI Variable Display, Microsoft YaHei, Segoe UI</FontFamily>
+                    <FontFamily x:Key="AppNumberFontFamily">Geist, Segoe UI Variable Text, Consolas, monospace</FontFamily>
+
+                    <Style TargetType="TextBlock">
+                        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+                    </Style>
+
                     <!-- Converters -->
                     <converters:HeatmapLevelToBrushConverter x:Key="LevelToBrushConverter" />
                     <converters:StringToImageSourceConverter x:Key="StringToImageConverter" />

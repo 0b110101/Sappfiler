@@ -283,7 +283,7 @@ Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐�
 # 用体积而不是翻 PE 头，是因为它足够稳、且失败时能直接看出原因。
 $r2rChecks = @(
     @{ Name = 'GameTimeTracker.dll';     MaxKB = 600 },
-    @{ Name = 'GameTimeTracker.Core.dll'; MaxKB = 120 }
+    @{ Name = 'GameTimeTracker.Core.dll'; MaxKB = 200 }
 )
 $r2rHit = @()
 foreach ($c in $r2rChecks) {

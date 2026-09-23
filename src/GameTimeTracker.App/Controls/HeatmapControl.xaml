@@ -42,8 +42,8 @@
                     <!-- Month Header Row -->
                     <Grid x:Name="MonthHeaderGrid" Height="18" />
 
-                    <!-- 7 x 52 Heatmap Matrix Grid -->
-                    <Grid x:Name="MatrixGrid" />
+                    <!-- 7 x 52 Heatmap Matrix Grid (Margin-bottom prevents horizontal scrollbar from blocking hover on bottom row) -->
+                    <Grid x:Name="MatrixGrid" Margin="0,0,0,12" />
                 </StackPanel>
             </ScrollViewer>
         </Grid>

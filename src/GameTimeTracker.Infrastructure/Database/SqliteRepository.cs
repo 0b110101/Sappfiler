@@ -3,6 +3,7 @@ using System.Text.Json;
 using Dapper;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
+using GameTimeTracker.Core.Services;
 using Microsoft.Data.Sqlite;
 
 namespace GameTimeTracker.Infrastructure.Database;
@@ -872,6 +873,67 @@ public class SqliteRepository : IDatabaseRepository
         return rows.Select(MapDailySummary).ToList();
     }
 
+    public async Task<int> GetConsecutiveStreakDaysAsync(DateTime referenceDate, int cutoffHour = 24)
+    {
+        using var conn = CreateConnection();
+        var dates = (await conn.QueryAsync<string>(
+            """
+            SELECT date
+            FROM daily_summary
+            WHERE duration_minutes > 0
+            GROUP BY date
+            ORDER BY date DESC;
+            """)).ToHashSet();
+
+        if (dates.Count == 0) return 0;
+
+        var today = AccountingDateHelper.GetAccountingDate(referenceDate, cutoffHour);
+        int streak = 0;
+        var checkDate = today;
+
+        if (dates.Contains(checkDate.ToString("yyyy-MM-dd")))
+        {
+            while (dates.Contains(checkDate.ToString("yyyy-MM-dd")))
+            {
+                streak++;
+                checkDate = checkDate.AddDays(-1);
+            }
+        }
+        else
+        {
+            checkDate = checkDate.AddDays(-1);
+            while (dates.Contains(checkDate.ToString("yyyy-MM-dd")))
+            {
+                streak++;
+                checkDate = checkDate.AddDays(-1);
+            }
+        }
+
+        return streak;
+    }
+
+    public async Task<IReadOnlyDictionary<int, string>> GetEarliestPlayDatesAsync()
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<dynamic>(
+            """
+            SELECT game_id, MIN(date) AS first_date
+            FROM daily_summary
+            WHERE duration_minutes > 0
+            GROUP BY game_id;
+            """);
+
+        var result = new Dictionary<int, string>();
+        foreach (var r in rows)
+        {
+            if (r.game_id != null && r.first_date != null)
+            {
+                result[(int)r.game_id] = (string)r.first_date;
+            }
+        }
+        return result;
+    }
+
     /// <summary>
     /// 待上传的每日汇总（推送到 Notion 的候选）。
     /// </summary>
@@ -1181,10 +1243,13 @@ public class SqliteRepository : IDatabaseRepository
                 new { date = item.Date, targetGameId });
 
             // 计算权威时长与同步状态
-            bool isBound = !string.IsNullOrEmpty(game.NotionPageId) || !string.IsNullOrEmpty(item.GameMasterPageId);
+            // 🚨 关键修复：必须检查 Notion 页面端是否真正建立了关联 (item.GameMasterPageId)。
+            // 如果 Notion 端未关联（虽然本地根据游戏名识别出了 game），状态必须设为 "unmapped"，
+            // 这样 BackfillRelationsAsync 才能检测到并向 Notion 回写关联属性并标记为"已绑定"。
+            bool isBoundOnNotion = !string.IsNullOrEmpty(item.GameMasterPageId);
             int finalMinutes = item.DurationMinutes;
             int finalSeconds = item.DurationMinutes * 60;
-            string newStatus = isBound ? "synced" : "unmapped";
+            string newStatus = isBoundOnNotion ? "synced" : "unmapped";
 
             DailySummaryRow? existing = rowByPage ?? rowByDateAndGame;
             if (existing != null)
@@ -1202,7 +1267,7 @@ public class SqliteRepository : IDatabaseRepository
                 {
                     finalMinutes = item.DurationMinutes;
                     finalSeconds = item.DurationMinutes * 60;
-                    newStatus = isBound ? "synced" : "unmapped";
+                    newStatus = isBoundOnNotion ? "synced" : "unmapped";
                     AppLog.Warn(
                         $"[同步] 修正历史时长膨胀：「{item.GameTitle}」{item.Date} " +
                         $"本地 {existingMinutes} 分钟 → {finalMinutes} 分钟（旧版把分钟当成了小时）");
@@ -1212,13 +1277,13 @@ public class SqliteRepository : IDatabaseRepository
                     // 🚨 历史日期：Notion 上的时长为唯一权威！
                     finalMinutes = item.DurationMinutes;
                     finalSeconds = item.DurationMinutes * 60;
-                    newStatus = isBound ? "synced" : "unmapped";
+                    newStatus = isBoundOnNotion ? "synced" : "unmapped";
                 }
                 else
                 {
                     finalMinutes = Math.Max(existingMinutes, item.DurationMinutes);
                     finalSeconds = Math.Max(existingSeconds, item.DurationMinutes * 60);
-                    newStatus = (existingMinutes > item.DurationMinutes) ? "pending" : (isBound ? "synced" : "unmapped");
+                    newStatus = (existingMinutes > item.DurationMinutes) ? "pending" : (isBoundOnNotion ? "synced" : "unmapped");
                 }
             }
 

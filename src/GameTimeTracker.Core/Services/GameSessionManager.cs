@@ -7,7 +7,15 @@ public class GameSessionManager
 {
     private readonly IDatabaseRepository _repo;
     private readonly SemaphoreSlim _lock = new(1, 1);
-    private readonly Dictionary<int, (GameSession Session, DateTime LastDailyFlushTime)> _activeSessions = new();
+    private class GameSessionState
+    {
+        public GameSession Session { get; set; } = null!;
+        public DateTime LastDailyFlushTime { get; set; }
+        public HashSet<int> ActivePids { get; } = new();
+    }
+
+    private readonly Dictionary<int, GameSessionState> _gameSessions = new(); // Key: GameId
+    private readonly Dictionary<int, int> _pidToGameId = new(); // Key: PID -> GameId
 
     public event EventHandler<GameSession>? SessionStarted;
     public event EventHandler<GameSession>? SessionEnded;
@@ -35,7 +43,17 @@ public class GameSessionManager
             var existing = await _repo.GetActiveSessionsAsync();
             foreach (var session in existing)
             {
-                _activeSessions[session.Pid] = (session, session.LastHeartbeat);
+                if (!_gameSessions.TryGetValue(session.GameId, out var state))
+                {
+                    state = new GameSessionState
+                    {
+                        Session = session,
+                        LastDailyFlushTime = session.LastHeartbeat
+                    };
+                    _gameSessions[session.GameId] = state;
+                }
+                state.ActivePids.Add(session.Pid);
+                _pidToGameId[session.Pid] = session.GameId;
             }
         }
         finally
@@ -46,9 +64,33 @@ public class GameSessionManager
 
     public IReadOnlyList<GameSession> GetActiveSessions()
     {
-        lock (_activeSessions)
+        lock (_gameSessions)
         {
-            return _activeSessions.Values.Select(v => v.Session).ToList();
+            return _gameSessions.Values.Select(v => v.Session).ToList();
+        }
+    }
+
+    public IReadOnlyCollection<int> GetTrackedPids()
+    {
+        lock (_pidToGameId)
+        {
+            return _pidToGameId.Keys.ToList();
+        }
+    }
+
+    public bool IsPidActive(int pid)
+    {
+        lock (_pidToGameId)
+        {
+            return _pidToGameId.ContainsKey(pid);
+        }
+    }
+
+    public bool IsGameActive(int gameId)
+    {
+        lock (_gameSessions)
+        {
+            return _gameSessions.ContainsKey(gameId);
         }
     }
 
@@ -57,14 +99,26 @@ public class GameSessionManager
         await _lock.WaitAsync();
         try
         {
-            if (_activeSessions.TryGetValue(process.Pid, out var existing))
+            if (_gameSessions.TryGetValue(game.Id, out var existingState))
             {
-                return existing.Session;
+                // 该游戏已有活跃会话！将该子进程 PID 关联加入同一会话，不再重复建立独立会话，
+                // 彻底杜绝多进程（如《蝴蝶收藏家》4个子进程）导致的 N 倍时长暴增问题
+                existingState.ActivePids.Add(process.Pid);
+                _pidToGameId[process.Pid] = game.Id;
+                return existingState.Session;
             }
 
             var start = startTime ?? DateTime.Now;
             var session = await _repo.CreateSessionAsync(game.Id, process.Pid, process.ProcessName, start);
-            _activeSessions[process.Pid] = (session, start);
+            var state = new GameSessionState
+            {
+                Session = session,
+                LastDailyFlushTime = start
+            };
+            state.ActivePids.Add(process.Pid);
+
+            _gameSessions[game.Id] = state;
+            _pidToGameId[process.Pid] = game.Id;
 
             SessionStarted?.Invoke(this, session);
             return session;
@@ -80,7 +134,7 @@ public class GameSessionManager
         await _lock.WaitAsync();
         try
         {
-            if (!_activeSessions.TryGetValue(pid, out var state))
+            if (!_pidToGameId.TryGetValue(pid, out var gameId) || !_gameSessions.TryGetValue(gameId, out var state))
             {
                 return;
             }
@@ -98,7 +152,7 @@ public class GameSessionManager
 
                 session.DurationSeconds = totalDuration;
                 session.LastHeartbeat = now;
-                _activeSessions[pid] = (session, now);
+                state.LastDailyFlushTime = now;
 
                 await _repo.UpdateSessionHeartbeatAsync(session.Id, now, totalDuration);
                 SessionHeartbeat?.Invoke(this, session);
@@ -115,7 +169,16 @@ public class GameSessionManager
         await _lock.WaitAsync();
         try
         {
-            if (!_activeSessions.TryGetValue(pid, out var state))
+            if (!_pidToGameId.TryGetValue(pid, out var gameId) || !_gameSessions.TryGetValue(gameId, out var state))
+            {
+                return;
+            }
+
+            state.ActivePids.Remove(pid);
+            _pidToGameId.Remove(pid);
+
+            // ⚠️ 只要该游戏还有其他进程在运行（例如主进程仍在、只是启动器/子进程退出），就不要终止会话！
+            if (state.ActivePids.Count > 0)
             {
                 return;
             }
@@ -137,7 +200,7 @@ public class GameSessionManager
             session.IsActive = false;
 
             await _repo.EndSessionAsync(session.Id, end, totalDuration);
-            _activeSessions.Remove(pid);
+            _gameSessions.Remove(gameId);
 
             SessionEnded?.Invoke(this, session);
         }
@@ -150,22 +213,22 @@ public class GameSessionManager
     public async Task CleanupZombieSessionsAsync()
     {
         List<int> zombiePids = new();
-        lock (_activeSessions)
+        lock (_pidToGameId)
         {
-            foreach (var kvp in _activeSessions)
+            foreach (var pid in _pidToGameId.Keys)
             {
                 try
                 {
-                    var proc = System.Diagnostics.Process.GetProcessById(kvp.Key);
+                    var proc = System.Diagnostics.Process.GetProcessById(pid);
                     if (proc.HasExited)
                     {
-                        zombiePids.Add(kvp.Key);
+                        zombiePids.Add(pid);
                     }
                 }
                 catch (ArgumentException)
                 {
                     // Process does not exist
-                    zombiePids.Add(kvp.Key);
+                    zombiePids.Add(pid);
                 }
                 catch
                 {

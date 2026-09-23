@@ -270,3 +270,51 @@ public class TrackerConfig
         !string.IsNullOrWhiteSpace(DailyDatabaseId) &&
         !DailyDatabaseId.StartsWith("your_");
 }
+
+public record GameExplorationCategory(
+    string Key,             // "new", "ongoing", "returning", "paused"
+    string Title,           // "新游戏", "持续游玩", "回归游玩", "暂停游玩"
+    string Description,     // e.g. "本月首次游玩的游戏"
+    int Count,              // 游戏款数
+    double Percentage,      // 0.0 ~ 1.0
+    string PercentageText,  // "35%"
+    string ColorHex,        // 颜色代码
+    string IconType,        // "sparkle", "repeat", "history", "pause"
+    IReadOnlyList<string> GameNames,
+    IReadOnlyList<string> CoverPaths
+);
+
+public record GameExplorationResult(
+    int TotalGamesCount,
+    IReadOnlyList<GameExplorationCategory> Categories
+);
+
+public record PlaytimeTierItem(
+    string TierName,        // "0-2h", "2-10h", "10-50h", "50-100h", "100-500h", "500h+"
+    int MinMinutes,
+    int MaxMinutes,
+    int GameCount,
+    double Percentage,      // 0.0 ~ 1.0
+    string PercentageText,  // "25%"
+    string CountText,       // "(9)"
+    string ColorHex
+);
+
+public record PlaytimeTierResult(
+    int TotalGamesCount,
+    IReadOnlyList<PlaytimeTierItem> Tiers
+);
+
+public record GameActivityItem(
+    int GameId,
+    string Name,
+    string Platform,
+    string PlatformId,
+    int ActiveDays,
+    int TotalMinutes,
+    string LastPlayedDate,
+    string LastPlayedText,  // "最近今天", "最近昨天", "最近 6 天前"
+    double RatioToMax,      // 0.0 ~ 1.0
+    string? CoverPath = null
+);
+

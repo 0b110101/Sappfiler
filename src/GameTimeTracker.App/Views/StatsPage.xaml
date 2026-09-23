@@ -230,31 +230,27 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <!-- Left: Playtime Distribution Card -->
+                <!-- Left: 【游戏探索】 (Game Exploration) matching user mockup -->
                 <Border Grid.Column="0" CornerRadius="16" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="18,14">
                     <StackPanel Spacing="10">
-                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                            <Viewbox Width="18" Height="18">
-                                <Canvas Width="24" Height="24">
-                                    <Path Stroke="{ThemeResource TextPrimaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                          Data="M 10 3.2 a 9 9 0 0 0 -7 8.8 a 9 9 0 0 0 9 9 a 9 9 0 0 0 8.8 -7 h -10.8 z M 14 3.5 v 6.5 h 6.5 a 7 7 0 0 0 -6.5 -6.5 z" />
-                                </Canvas>
-                            </Viewbox>
-                            <TextBlock Text="游戏时长分布" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE735;" FontSize="16" Foreground="{ThemeResource AccentBlueBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="游戏探索" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="|" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" Opacity="0.5" VerticalAlignment="Center" Margin="2,0" />
+                            <TextBlock Text="{x:Bind ViewModel.ExplorationSubtitle, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
                         </StackPanel>
 
-                        <!-- Donut + Legend Layout -->
+                        <!-- Donut + Category List Layout -->
                         <Grid>
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="150" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
 
-                            <!-- Donut Chart (Grid ItemsPanel so all slices overlay in the center) -->
-                            <Grid Grid.Column="0" Width="160" Height="160" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                <!-- Background Track -->
-                                <Path Fill="{ThemeResource CardBorderBrush}" Opacity="0.3" Data="{x:Bind ViewModel.DonutTrackPath, Mode=OneWay}" />
-                                <ItemsControl ItemsSource="{x:Bind ViewModel.DonutSlices, Mode=OneWay}">
+                            <!-- Donut Chart 150x150 -->
+                            <Grid Grid.Column="0" Width="150" Height="150" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Path Fill="{ThemeResource CardBorderBrush}" Opacity="0.3" Data="{x:Bind ViewModel.ExplorationTrackPath, Mode=OneWay}" />
+                                <ItemsControl ItemsSource="{x:Bind ViewModel.ExplorationDonutSlices, Mode=OneWay}">
                                     <ItemsControl.ItemsPanel>
                                         <ItemsPanelTemplate>
                                             <Grid />
@@ -267,50 +263,66 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
 
-                                <!-- Center Duration Display -->
-                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="2">
-                                    <TextBlock Text="{x:Bind ViewModel.DonutCenterDurationText, Mode=OneWay}" FontSize="16" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" HorizontalAlignment="Center" />
-                                    <TextBlock Text="总时长" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" />
+                                <!-- Center Total Games Display -->
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="0">
+                                    <TextBlock Text="{x:Bind ViewModel.ExplorationTotalGamesCount, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" HorizontalAlignment="Center" Typography.NumeralAlignment="Tabular" />
+                                    <TextBlock Text="款游戏" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" Margin="0,2,0,0" />
                                 </StackPanel>
                             </Grid>
 
-                            <!-- Legend List (1:1 with Donut Slices, including Other Games) -->
-                            <ItemsRepeater Grid.Column="1" ItemsSource="{x:Bind ViewModel.DonutSlices, Mode=OneWay}" VerticalAlignment="Center">
+                            <!-- Categories List -->
+                            <ItemsRepeater Grid.Column="1" ItemsSource="{x:Bind ViewModel.ExplorationCategories, Mode=OneWay}" VerticalAlignment="Center" Margin="12,0,0,0">
                                 <ItemsRepeater.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:DonutSliceViewModel">
-                                        <Grid Padding="6,5">
+                                    <DataTemplate x:DataType="vm:ExplorationCategoryViewModel">
+                                        <Grid Padding="0,5">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="48" />
-                                                <ColumnDefinition Width="62" />
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <!-- Color Dot -->
-                                            <Ellipse Grid.Column="0" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{x:Bind ColorBrush}" />
 
-                                            <!-- Thumbnail -->
-                                            <Border Grid.Column="1" Width="24" Height="24" CornerRadius="5" Margin="0,0,8,0" VerticalAlignment="Center" Background="#0C4F8FFF">
-                                                <Grid>
-                                                    <Image Source="{x:Bind CoverPath, Converter={StaticResource StringToImageConverter}}" Stretch="UniformToFill"
-                                                           Visibility="{x:Bind CoverPath, Converter={StaticResource NullToVisConverter}}" />
-                                                    <Viewbox Width="12" Height="12" Visibility="{x:Bind CoverPath, Converter={StaticResource InverseNullToVisConverter}}">
-                                                        <Canvas Width="24" Height="24">
-                                                            <Path Stroke="{ThemeResource TextSecondaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                                                  Data="M 12 12 m -9 0 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0" />
-                                                        </Canvas>
-                                                    </Viewbox>
-                                                </Grid>
-                                            </Border>
+                                            <!-- Category Icon -->
+                                            <FontIcon Grid.Column="0" Glyph="{x:Bind IconGlyph}" FontSize="15" Foreground="{x:Bind ColorBrush}" VerticalAlignment="Center" Margin="0,0,8,0" />
 
-                                            <!-- Marquee Title -->
-                                            <controls:MarqueeTextBlock Grid.Column="2" Text="{x:Bind Name}" FontSize="12" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                            <!-- Title & Description -->
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                                                <TextBlock Text="{x:Bind Title}" FontSize="12.5" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                                <TextBlock Text="{x:Bind Description}" FontSize="10.5" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            </StackPanel>
 
-                                            <!-- Percentage (Fixed 48px, Right-aligned, Bold matching Image 1) -->
-                                            <TextBlock Grid.Column="3" Text="{x:Bind PercentageText}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" HorizontalAlignment="Right" TextAlignment="Right" />
+                                            <!-- Count & Percentage -->
+                                            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="8,0,10,0">
+                                                <TextBlock Text="{x:Bind CountText}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" HorizontalAlignment="Right" Typography.NumeralAlignment="Tabular" />
+                                                <TextBlock Text="{x:Bind PercentageText}" FontSize="10.5" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Right" Typography.NumeralAlignment="Tabular" />
+                                            </StackPanel>
 
-                                            <!-- Duration (Fixed 62px, Left-aligned with 10px margin matching Image 1) -->
-                                            <TextBlock Grid.Column="4" Text="{x:Bind DurationText}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" HorizontalAlignment="Left" TextAlignment="Left" Margin="10,0,0,0" />
+                                            <!-- Avatar Stack -->
+                                            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <ItemsControl ItemsSource="{x:Bind Avatars}">
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <StackPanel Orientation="Horizontal" />
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate x:DataType="vm:ExplorationAvatarItem">
+                                                            <Border Width="22" Height="22" CornerRadius="11" Margin="{x:Bind Margin}" BorderBrush="{ThemeResource CardBackgroundBrush}" BorderThickness="1.5" Background="#154F8FFF">
+                                                                <Grid>
+                                                                    <Image Source="{x:Bind CoverPath, Converter={StaticResource StringToImageConverter}}" Stretch="UniformToFill"
+                                                                           Visibility="{x:Bind CoverPath, Converter={StaticResource NullToVisConverter}}" />
+                                                                </Grid>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+
+                                                <!-- Overflow badge -->
+                                                <Border Width="22" Height="22" CornerRadius="11" Background="{ThemeResource CardBorderBrush}" Margin="-6,0,0,0" VerticalAlignment="Center"
+                                                        Visibility="{x:Bind HasOverflow, Converter={StaticResource BoolToVisConverter}}">
+                                                    <TextBlock Text="{x:Bind OverflowText}" FontSize="9.5" FontWeight="Bold" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
+                                                </Border>
+                                            </StackPanel>
                                         </Grid>
                                     </DataTemplate>
                                 </ItemsRepeater.ItemTemplate>
@@ -542,48 +554,49 @@
                     </StackPanel>
                 </Border>
 
-                <!-- 2. 【游戏类型分布】 (Donut Chart 150x150 on top, 2 cols x 3 rows legend below) -->
+                <!-- 2. 【游戏时长分布】 (Playtime Tier Distribution) -->
                 <Border Grid.Column="1" CornerRadius="16" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="16,14">
                     <StackPanel Spacing="8">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <Viewbox Width="20" Height="20">
                                 <Canvas Width="24" Height="24">
                                     <Path Stroke="{ThemeResource TextPrimaryBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                          Data="M 12 12 m -9 0 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0 M 12 12 m -4 0 a 4 4 0 1 0 8 0 a 4 4 0 1 0 -8 0" />
+                                          Data="M 12 12 m -9 0 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0 M 12 7 v 5 l 3 3" />
                                 </Canvas>
                             </Viewbox>
-                            <TextBlock Text="游戏类型分布" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="游戏时长分布" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                         </StackPanel>
 
                         <!-- Top: Donut Chart (150x150px) -->
                         <Grid Width="150" Height="150" HorizontalAlignment="Center" Margin="0,2,0,4">
-                            <ItemsControl ItemsSource="{x:Bind ViewModel.GenreStats, Mode=OneWay}">
+                            <Path Fill="{ThemeResource CardBorderBrush}" Opacity="0.3" Data="{x:Bind ViewModel.TierTrackPath, Mode=OneWay}" />
+                            <ItemsControl ItemsSource="{x:Bind ViewModel.PlaytimeTierDonutSlices, Mode=OneWay}">
                                 <ItemsControl.ItemsPanel>
                                     <ItemsPanelTemplate>
                                         <Grid />
                                     </ItemsPanelTemplate>
                                 </ItemsControl.ItemsPanel>
                                 <ItemsControl.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:GenreStatViewModel">
-                                        <Path Fill="{x:Bind ColorBrush}" Data="{x:Bind PathData}" ToolTipService.ToolTip="{x:Bind TooltipText}" />
+                                    <DataTemplate x:DataType="vm:DonutSliceViewModel">
+                                        <Path Fill="{x:Bind ColorBrush}" Data="{x:Bind PathData}" ToolTipService.ToolTip="{x:Bind Name}" />
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
 
                             <!-- Center Total Games Display -->
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="0">
-                                <TextBlock Text="{x:Bind ViewModel.GenreTotalGamesCount, Mode=OneWay}" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="{x:Bind ViewModel.TierTotalGamesCount, Mode=OneWay}" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" HorizontalAlignment="Center" Typography.NumeralAlignment="Tabular" />
                                 <TextBlock Text="总游戏数" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" Margin="0,2,0,0" />
                             </StackPanel>
                         </Grid>
 
-                        <!-- Bottom: Legend (2 Columns x 3 Rows, Top 5 + 其他, hovering on 其他 shows all other tags) -->
-                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.GenreStats, Mode=OneWay}" Margin="2,2,2,0">
+                        <!-- Bottom: Legend (2 Columns x 3 Rows, 6 Tiers) -->
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.PlaytimeTiers, Mode=OneWay}" Margin="2,2,2,0">
                             <ItemsRepeater.Layout>
                                 <UniformGridLayout Orientation="Horizontal" MaximumRowsOrColumns="2" MinRowSpacing="3" MinColumnSpacing="12" ItemsStretch="Fill" />
                             </ItemsRepeater.Layout>
                             <ItemsRepeater.ItemTemplate>
-                                <DataTemplate x:DataType="vm:GenreStatViewModel">
+                                <DataTemplate x:DataType="vm:PlaytimeTierViewModel">
                                     <Grid Padding="0,2" ToolTipService.ToolTip="{x:Bind TooltipText}">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -594,14 +607,14 @@
                                         <!-- Color Dot -->
                                         <Ellipse Grid.Column="0" Width="7" Height="7" Fill="{x:Bind ColorBrush}" VerticalAlignment="Center" Margin="0,0,6,0" />
 
-                                        <!-- Genre Name -->
-                                        <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
-                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        <!-- Tier Name -->
+                                        <TextBlock Grid.Column="1" Text="{x:Bind TierName}" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
+                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Typography.NumeralAlignment="Tabular" />
 
                                         <!-- Percentage & Count (e.g. 32% (9)) -->
                                         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" Margin="3,0,0,0">
-                                            <TextBlock Text="{x:Bind Percentage}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                                            <TextBlock Text="{x:Bind CountText}" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                            <TextBlock Text="{x:Bind Percentage}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Typography.NumeralAlignment="Tabular" />
+                                            <TextBlock Text="{x:Bind CountText}" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" Typography.NumeralAlignment="Tabular" />
                                         </StackPanel>
                                     </Grid>
                                 </DataTemplate>
@@ -610,7 +623,7 @@
                     </StackPanel>
                 </Border>
 
-                <!-- 3. Period Game Records (Top 5, compact height -60px) -->
+                <!-- 3. 【游戏活跃度】 (Game Activity) -->
                 <Border Grid.Column="2" CornerRadius="16" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="16,14">
                     <StackPanel Spacing="10">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -620,13 +633,13 @@
                                           Data="M 4 7 a 2 2 0 0 1 2 -2 h 12 a 2 2 0 0 1 2 2 v 12 a 2 2 0 0 1 -2 2 h -12 a 2 2 0 0 1 -2 -2 v -12 z M 16 3 v 4 M 8 3 v 4 M 4 11 h 16" />
                                 </Canvas>
                             </Viewbox>
-                            <TextBlock Text="{x:Bind ViewModel.PeriodRecordCardTitle, Mode=OneWay}" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                            <TextBlock Text="{x:Bind ViewModel.GameActivityCardTitle, Mode=OneWay}" FontSize="15" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                         </StackPanel>
 
-                        <!-- Games List (Top 5: Cover + Name & Pct on Row 0 + Duration on Row 1 + Full-width Progress Bar on Row 2) -->
-                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.PeriodGameRecords, Mode=OneWay}">
+                        <!-- Games Activity List: Cover + Name on Row 0 + Full-width Progress Bar on Row 1 + Subtitle on Row 2 (No rank medals) -->
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.GameActivities, Mode=OneWay}">
                             <ItemsRepeater.ItemTemplate>
-                                <DataTemplate x:DataType="coreServices:GameStatItem">
+                                <DataTemplate x:DataType="coreModels:GameActivityItem">
                                     <Grid Padding="0,3.5">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -641,7 +654,7 @@
                                             </Grid>
                                         </Border>
 
-                                        <!-- Right Content: Row 0 Name & Pct, Row 1 Duration, Row 2 Full-width Progress Bar -->
+                                        <!-- Right Content: Row 0 Name, Row 1 Full-width Progress Bar, Row 2 Active days + Last played -->
                                         <Grid Grid.Column="1" VerticalAlignment="Center">
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto" />
@@ -649,26 +662,21 @@
                                                 <RowDefinition Height="Auto" />
                                             </Grid.RowDefinitions>
 
-                                            <!-- Top Row: Game Name (Marquee) on left, Percentage on right -->
-                                            <Grid Grid.Row="0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="Auto" />
-                                                </Grid.ColumnDefinitions>
+                                            <!-- Row 0: Game Name (Marquee) -->
+                                            <controls:MarqueeTextBlock Grid.Row="0" Text="{x:Bind Name}" FontSize="12.5" FontWeight="SemiBold"
+                                                                       Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0" />
 
-                                                <controls:MarqueeTextBlock Grid.Column="0" Text="{x:Bind Name}" FontSize="12.5" FontWeight="Medium"
-                                                                           Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,8,0" />
-
-                                                <TextBlock Grid.Column="1" Text="{x:Bind PercentageText}" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
-                                            </Grid>
-
-                                            <!-- Middle Row: Duration Text on left -->
-                                            <TextBlock Grid.Row="1" Text="{x:Bind DurationText}" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" Margin="0,1,0,0" />
-
-                                            <!-- Bottom Row: Full-width Progress Bar stretching all the way across -->
-                                            <controls:RoundedProgressBar Grid.Row="2" Value="{x:Bind RatioToMax}" Maximum="1.0" Height="4" CornerRadius="2" Margin="0,3.5,0,0"
+                                            <!-- Row 1: Full-width Progress Bar stretching all the way across -->
+                                            <controls:RoundedProgressBar Grid.Row="1" Value="{x:Bind RatioToMax}" Maximum="1.0" Height="4" CornerRadius="2" Margin="0,4,0,3"
                                                                          Foreground="{ThemeResource AccentBlueBrush}"
                                                                          Background="{ThemeResource CardBorderBrush}" HorizontalAlignment="Stretch" />
+
+                                            <!-- Row 2: Subtitle e.g. "12 个游玩日 · 最近今天" -->
+                                            <TextBlock Grid.Row="2" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" Margin="0,0,0,0">
+                                                <Run Text="{x:Bind ActiveDays}" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" />
+                                                <Run Text=" 个游玩日 · " />
+                                                <Run Text="{x:Bind LastPlayedText}" />
+                                            </TextBlock>
                                         </Grid>
                                     </Grid>
                                 </DataTemplate>
