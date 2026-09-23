@@ -229,7 +229,7 @@ public sealed partial class MainWindow : Window
 
         if (_appWindow != null)
         {
-            _appWindow.Title = "GameTime Tracker";
+            _appWindow.Title = "Sappfiler";
 
             // ── 初始窗口尺寸随显示器自适应（2026-09-19 QA 的 2K 反馈）──────────────
             // 原先是写死的 1200x780 —— 那是按 1080p 定的。

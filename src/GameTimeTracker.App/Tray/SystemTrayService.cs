@@ -139,7 +139,7 @@ public class SystemTrayService : IDisposable
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _currentIconHandle,
-            szTip = "GameTime Tracker - 后台正在运行"
+            szTip = "Sappfiler - 后台正在运行"
         };
 
         Shell_NotifyIcon(NIM_ADD, ref _nid);
@@ -206,10 +206,10 @@ public class SystemTrayService : IDisposable
         _nid.hIcon = _currentIconHandle;
         _nid.szTip = state switch
         {
-            "gaming" => "GameTime Tracker - 游戏中",
-            "pending" => "GameTime Tracker - 等待绑定",
-            "error" => "GameTime Tracker - 同步异常",
-            _ => "GameTime Tracker - 空闲中"
+            "gaming" => "Sappfiler - 游戏中",
+            "pending" => "Sappfiler - 等待绑定",
+            "error" => "Sappfiler - 同步异常",
+            _ => "Sappfiler - 空闲中"
         };
         Shell_NotifyIcon(NIM_MODIFY, ref _nid);
 

@@ -37,14 +37,14 @@
   <PropertyGroup>
     <VersionPrefix>0.3.1</VersionPrefix>
     <!-- 预发布序号：调试中用 alpha.N；测试确认后留空并把 VersionPrefix 定为该版本 -->
-    <VersionSuffix>alpha.1</VersionSuffix>
+    <VersionSuffix>alpha.2</VersionSuffix>
 
     <!-- FileVersion 只能是四段纯数字：MAJOR.MINOR.PATCH.<预发布序号>（无预发布时为 0） -->
-    <FileVersion>0.3.1.1</FileVersion>
+    <FileVersion>0.3.1.2</FileVersion>
     <AssemblyVersion>0.3.1.0</AssemblyVersion>
 
-    <Product>GameTimeTracker</Product>
-    <Company>GameTimeTracker</Company>
+    <Product>Sappfiler</Product>
+    <Company>Sappfiler</Company>
     <Copyright>CC BY-NC-SA 4.0</Copyright>
   </PropertyGroup>
 

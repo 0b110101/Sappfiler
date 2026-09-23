@@ -94,6 +94,9 @@ public partial class ExplorationCategoryViewModel : ObservableObject
     public SolidColorBrush ColorBrush { get; set; } = new(Colors.DodgerBlue);
     public string IconGlyph { get; set; } = "\uE735";
     public List<ExplorationAvatarItem> Avatars { get; set; } = new();
+    public int Delta { get; set; }
+    public string DeltaText { get; set; } = string.Empty;
+    public bool HasDelta => Delta != 0;
     public bool HasOverflow { get; set; }
     public string OverflowText { get; set; } = string.Empty;
     public bool HasAnyCovers => Avatars.Count > 0;
@@ -330,9 +333,21 @@ public partial class StatsViewModel : ObservableObject
                 StatsPeriodMode.Year => "本年游戏记录",
                 _ => "本期游戏记录"
             };
+            ExplorationSubtitle = PeriodMode switch
+            {
+                StatsPeriodMode.Quarter => "本季你在游戏库中的探索与尝试情况",
+                StatsPeriodMode.Year => "本年你在游戏库中的探索与尝试情况",
+                _ => "本月你在游戏库中的探索与尝试情况"
+            };
 
-        // 1. Fetch raw summaries for previous + current period
-        var minDateStr = range.PrevStartDate.ToString("yyyy-MM-dd");
+        // 1. Fetch raw summaries for previous-previous + previous + current period
+        var prevPrevStartDate = PeriodMode switch
+        {
+            StatsPeriodMode.Year => range.PrevStartDate.AddYears(-1),
+            StatsPeriodMode.Quarter => range.PrevStartDate.AddMonths(-3),
+            _ => range.PrevStartDate.AddMonths(-1)
+        };
+        var minDateStr = prevPrevStartDate.ToString("yyyy-MM-dd");
         var maxDateStr = range.EndDate.ToString("yyyy-MM-dd");
         var allSummaries = await _repo.GetDailySummariesRangeAsync(minDateStr, maxDateStr);
         var allGames = await _repo.GetAllGamesAsync();
@@ -517,6 +532,8 @@ public partial class StatsViewModel : ObservableObject
                     ColorBrush = new SolidColorBrush(ParseColor(cat.ColorHex)),
                     IconGlyph = iconGlyph,
                     Avatars = avatars,
+                    Delta = cat.Delta,
+                    DeltaText = cat.DeltaText,
                     HasOverflow = overflow > 0,
                     OverflowText = $"+{overflow}"
                 });

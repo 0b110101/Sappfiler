@@ -281,8 +281,13 @@ public record GameExplorationCategory(
     string ColorHex,        // 颜色代码
     string IconType,        // "sparkle", "repeat", "history", "pause"
     IReadOnlyList<string> GameNames,
-    IReadOnlyList<string> CoverPaths
-);
+    IReadOnlyList<string> CoverPaths,
+    int Delta = 0,
+    string DeltaText = ""
+)
+{
+    public bool HasDelta => Delta != 0;
+}
 
 public record GameExplorationResult(
     int TotalGamesCount,
@@ -315,6 +320,7 @@ public record GameActivityItem(
     string LastPlayedDate,
     string LastPlayedText,  // "最近今天", "最近昨天", "最近 6 天前"
     double RatioToMax,      // 0.0 ~ 1.0
-    string? CoverPath = null
+    string? CoverPath = null,
+    string ColorHex = "#3B82F6"
 );
 

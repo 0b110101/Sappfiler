@@ -68,9 +68,9 @@
                     <SolidColorBrush x:Key="StatusRedBrush" Color="#F87171" />
 
                     <!-- Font Families: Geist for English/Digits, OPPO Sans for Chinese, fallback to Segoe UI Variable & Microsoft YaHei -->
-                    <FontFamily x:Key="AppFontFamily">Geist, OPPO Sans, Segoe UI Variable Text, Microsoft YaHei, Segoe UI</FontFamily>
-                    <FontFamily x:Key="AppHeadingFontFamily">Geist, OPPO Sans, Segoe UI Variable Display, Microsoft YaHei, Segoe UI</FontFamily>
-                    <FontFamily x:Key="AppNumberFontFamily">Geist, Segoe UI Variable Text, Consolas, monospace</FontFamily>
+                    <FontFamily x:Key="AppFontFamily">ms-appx:///Assets/Fonts/Geist.ttf#Geist, ms-appx:///Assets/Fonts/OPPOSans.ttf#OPPO Sans 4.0, Geist, OPPO Sans 4.0, Segoe UI Variable Text, Microsoft YaHei, Segoe UI</FontFamily>
+                    <FontFamily x:Key="AppHeadingFontFamily">ms-appx:///Assets/Fonts/Geist.ttf#Geist, ms-appx:///Assets/Fonts/OPPOSans.ttf#OPPO Sans 4.0, Geist, OPPO Sans 4.0, Segoe UI Variable Display, Microsoft YaHei, Segoe UI</FontFamily>
+                    <FontFamily x:Key="AppNumberFontFamily">ms-appx:///Assets/Fonts/Geist.ttf#Geist, Geist, Segoe UI Variable Text, Consolas, monospace</FontFamily>
 
                     <Style TargetType="TextBlock">
                         <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />

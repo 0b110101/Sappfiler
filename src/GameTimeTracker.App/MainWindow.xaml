@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="GameTime Tracker"
+    Title="Sappfiler"
     mc:Ignorable="d">
 
     <Window.SystemBackdrop>
@@ -37,7 +37,7 @@
                 <Border Width="26" Height="26" CornerRadius="6" Background="Transparent">
                     <Image Width="26" Height="26" Source="ms-appx:///Assets/logo.png" />
                 </Border>
-                <TextBlock Text="GameTime Tracker" FontSize="14" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                <TextBlock Text="Sappfiler" FontSize="14" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
             </StackPanel>
         </Grid>
 

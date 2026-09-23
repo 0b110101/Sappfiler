@@ -317,10 +317,10 @@
                                                     </ItemsControl.ItemTemplate>
                                                 </ItemsControl>
 
-                                                <!-- Overflow badge -->
-                                                <Border Width="22" Height="22" CornerRadius="11" Background="{ThemeResource CardBorderBrush}" Margin="-6,0,0,0" VerticalAlignment="Center"
-                                                        Visibility="{x:Bind HasOverflow, Converter={StaticResource BoolToVisConverter}}">
-                                                    <TextBlock Text="{x:Bind OverflowText}" FontSize="9.5" FontWeight="Bold" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
+                                                <!-- Period Delta badge (+2, -1, hidden when 0) -->
+                                                <Border MinWidth="22" Height="18" Padding="5,0" CornerRadius="9" Background="{ThemeResource CardBorderBrush}" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                        Visibility="{x:Bind HasDelta, Converter={StaticResource BoolToVisConverter}}">
+                                                    <TextBlock Text="{x:Bind DeltaText}" FontSize="10" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
                                                 </Border>
                                             </StackPanel>
                                         </Grid>
@@ -668,7 +668,7 @@
 
                                             <!-- Row 1: Full-width Progress Bar stretching all the way across -->
                                             <controls:RoundedProgressBar Grid.Row="1" Value="{x:Bind RatioToMax}" Maximum="1.0" Height="4" CornerRadius="2" Margin="0,4,0,3"
-                                                                         Foreground="{ThemeResource AccentBlueBrush}"
+                                                                         Foreground="{x:Bind ColorHex, Converter={StaticResource HexToBrushConverter}}"
                                                                          Background="{ThemeResource CardBorderBrush}" HorizontalAlignment="Stretch" />
 
                                             <!-- Row 2: Subtitle e.g. "12 个游玩日 · 最近今天" -->

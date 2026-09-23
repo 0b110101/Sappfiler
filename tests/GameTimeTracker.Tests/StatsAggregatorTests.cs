@@ -339,4 +339,93 @@ public class StatsAggregatorTests
         second.RatioToMax.Should().Be(0.5);
         second.LastPlayedText.Should().Be("最近 3 天前");
     }
+
+    [Fact]
+    public void ProgressBarRankColors_ShouldStrictlyFollowLeastToMostTiers()
+    {
+        // 最少 (灰 #94A3B8) → (绿 #10B981) → (蓝 #3B82F6) → (黄 #F59E0B) → (紫 #8B5CF6) → (橙 #F97316) 最多
+        StatsAggregator.TierGrey.Should().Be("#94A3B8");
+        StatsAggregator.TierGreen.Should().Be("#10B981");
+        StatsAggregator.TierBlue.Should().Be("#3B82F6");
+        StatsAggregator.TierYellow.Should().Be("#F59E0B");
+        StatsAggregator.TierPurple.Should().Be("#8B5CF6");
+        StatsAggregator.TierOrange.Should().Be("#F97316");
+
+        // When ranked descending (Most to Least: Rank 1 down to Rank 6)
+        StatsAggregator.ProgressBarRankColors.Should().Equal(new[]
+        {
+            "#F97316", // 1st (最多) - 橙
+            "#8B5CF6", // 2nd - 紫
+            "#F59E0B", // 3rd - 黄
+            "#3B82F6", // 4th - 蓝
+            "#10B981", // 5th - 绿
+            "#94A3B8"  // 6th (最少) - 灰
+        });
+    }
+
+    [Fact]
+    public void AggregatePeriod_Exploration_ShouldCalculateAccurateDeltasComparedToPreviousPeriod()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Month);
+
+        var summaries = new List<DailySummary>
+        {
+            // Pre-previous period (2026-07)
+            new() { Date = "2026-07-10", GameId = 10, GameName = "Game Older 1", DurationMinutes = 60 },
+            new() { Date = "2026-07-12", GameId = 11, GameName = "Game Older 2", DurationMinutes = 60 },
+
+            // Previous period (2026-08)
+            // - Game 10 continues (ongoing in 08)
+            new() { Date = "2026-08-05", GameId = 10, GameName = "Game Older 1", DurationMinutes = 80 },
+            // - Game 20 first played in 08 (new in 08)
+            new() { Date = "2026-08-10", GameId = 20, GameName = "Game Aug New", DurationMinutes = 90 },
+
+            // Current period (2026-09)
+            // - Game 10 continues (ongoing in 09)
+            new() { Date = "2026-09-02", GameId = 10, GameName = "Game Older 1", DurationMinutes = 100 },
+            // - Game 20 continues (ongoing in 09)
+            new() { Date = "2026-09-03", GameId = 20, GameName = "Game Aug New", DurationMinutes = 120 },
+            // - Game 31 first played in 09 (new in 09)
+            new() { Date = "2026-09-05", GameId = 31, GameName = "Game Sep New 1", DurationMinutes = 70 },
+            // - Game 32 first played in 09 (new in 09)
+            new() { Date = "2026-09-08", GameId = 32, GameName = "Game Sep New 2", DurationMinutes = 50 },
+            // - Game 33 first played in 09 (new in 09)
+            new() { Date = "2026-09-09", GameId = 33, GameName = "Game Sep New 3", DurationMinutes = 40 }
+        };
+
+        var earliestDates = new Dictionary<int, string>
+        {
+            { 10, "2026-07-10" },
+            { 11, "2026-07-12" },
+            { 20, "2026-08-10" },
+            { 31, "2026-09-05" },
+            { 32, "2026-09-08" },
+            { 33, "2026-09-09" }
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries, earliestPlayDates: earliestDates);
+
+        result.Exploration.Should().NotBeNull();
+        var newCat = result.Exploration!.Categories.First(c => c.Key == "new");
+        var ongoingCat = result.Exploration!.Categories.First(c => c.Key == "ongoing");
+
+        // Cur new = 3 (Game 31, 32, 33). Prev new = 1 (Game 20).
+        // Delta = 3 - 1 = +2
+        newCat.Count.Should().Be(3);
+        newCat.Delta.Should().Be(2);
+        newCat.DeltaText.Should().Be("+2");
+        newCat.HasDelta.Should().BeTrue();
+
+        // Cur ongoing = 2 (Game 10, 20). Prev ongoing = 1 (Game 10).
+        // Delta = 2 - 1 = +1
+        ongoingCat.Count.Should().Be(2);
+        ongoingCat.Delta.Should().Be(1);
+        ongoingCat.DeltaText.Should().Be("+1");
+        ongoingCat.HasDelta.Should().BeTrue();
+
+        // GameRankings progress bar color checks:
+        // Rank 1: #F97316 (橙), Rank 2: #8B5CF6 (紫)
+        result.GameRankings[0].ColorHex.Should().Be("#F97316");
+        result.GameRankings[1].ColorHex.Should().Be("#8B5CF6");
+    }
 }

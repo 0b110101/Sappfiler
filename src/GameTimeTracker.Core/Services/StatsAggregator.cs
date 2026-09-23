@@ -158,12 +158,25 @@ public static class StatsAggregator
         }
     }
 
-    public const string TierGrey = "#94A3B8";   // 0-2h
+    public const string TierGrey = "#94A3B8";   // 0-2h (最少)
     public const string TierGreen = "#10B981";  // 2-10h
     public const string TierBlue = "#3B82F6";   // 10-50h
     public const string TierYellow = "#F59E0B"; // 50-100h
     public const string TierPurple = "#8B5CF6"; // 100-500h
-    public const string TierOrange = "#F97316"; // 500h+
+    public const string TierOrange = "#F97316"; // 500h+ (最多)
+
+    /// <summary>
+    /// 进度条阶梯色：从最多到最少（1st 橙 → 2nd 紫 → 3rd 黄 → 4th 蓝 → 5th 绿 → 6th 灰）。
+    /// </summary>
+    public static readonly string[] ProgressBarRankColors =
+    {
+        TierOrange, // #F97316 (最多)
+        TierPurple, // #8B5CF6
+        TierYellow, // #F59E0B
+        TierBlue,   // #3B82F6
+        TierGreen,  // #10B981
+        TierGrey    // #94A3B8 (最少)
+    };
 
     public static StatsOverviewResult AggregatePeriod(
         PeriodRange range,
@@ -183,6 +196,20 @@ public static class StatsAggregator
 
         var prevSummaries = allSummaries
             .Where(s => string.CompareOrdinal(s.Date, prevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevEndStr) <= 0)
+            .ToList();
+
+        DateTime prevPrevStartDate = range.PeriodComparisonLabel switch
+        {
+            "较上年" => range.PrevStartDate.AddYears(-1),
+            "较上季" or "较上季度" => range.PrevStartDate.AddMonths(-3),
+            _ => range.PrevStartDate.AddMonths(-1)
+        };
+        DateTime prevPrevEndDate = range.PrevStartDate.AddDays(-1);
+        string prevPrevStartStr = prevPrevStartDate.ToString("yyyy-MM-dd");
+        string prevPrevEndStr = prevPrevEndDate.ToString("yyyy-MM-dd");
+
+        var prevPrevSummaries = allSummaries
+            .Where(s => string.CompareOrdinal(s.Date, prevPrevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevPrevEndStr) <= 0)
             .ToList();
 
         // 1. Current period metrics
@@ -254,7 +281,7 @@ public static class StatsAggregator
                 PercentageText: $"{Math.Round(pct * 100.0, 1)}%",
                 RatioToMax: ratioToMax,
                 Rank: i + 1,
-                ColorHex: Palette[i % Palette.Length],
+                ColorHex: i < ProgressBarRankColors.Length ? ProgressBarRankColors[i] : TierGrey,
                 CoverPath: cover
             ));
         }
@@ -433,7 +460,7 @@ public static class StatsAggregator
 
         // 8. Exploration Stats & Donut Slices
         var (exploration, explorationSlices) = BuildExploration(
-            range, curSummaries, prevSummaries, allSummaries, earliestPlayDates, gameCoverMap);
+            range, curSummaries, prevSummaries, prevPrevSummaries, allSummaries, earliestPlayDates, gameCoverMap);
 
         // 9. Playtime Tier Distribution & Donut Slices
         var (playtimeTiers, playtimeTierSlices) = BuildPlaytimeTiers(curSummaries);
@@ -477,12 +504,14 @@ public static class StatsAggregator
         PeriodRange range,
         IReadOnlyList<DailySummary> curSummaries,
         IReadOnlyList<DailySummary> prevSummaries,
+        IReadOnlyList<DailySummary> prevPrevSummaries,
         IReadOnlyList<DailySummary> allSummaries,
         IReadOnlyDictionary<int, string>? earliestPlayDates,
         IReadOnlyDictionary<int, string?>? gameCoverMap)
     {
         string startStr = range.StartDate.ToString("yyyy-MM-dd");
         string prevStartStr = range.PrevStartDate.ToString("yyyy-MM-dd");
+        string prevEndStr = range.PrevEndDate.ToString("yyyy-MM-dd");
 
         var curGames = curSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
         {
@@ -491,6 +520,12 @@ public static class StatsAggregator
         });
 
         var prevGames = prevSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
+        {
+            Name = g.First().GameName,
+            Minutes = g.Sum(x => x.DurationMinutes)
+        });
+
+        var prevPrevGames = prevPrevSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
         {
             Name = g.First().GameName,
             Minutes = g.Sum(x => x.DurationMinutes)
@@ -535,6 +570,46 @@ public static class StatsAggregator
             }
         }
 
+        // Calculate previous period's category counts for delta calculation
+        int prevNewCount = 0;
+        int prevOngoingCount = 0;
+        int prevReturningCount = 0;
+        int prevPausedCount = 0;
+
+        foreach (var (gid, g) in prevGames)
+        {
+            if (g.Minutes <= 0) continue;
+            string earliest = earliestMap.TryGetValue(gid, out var ed) ? ed : prevStartStr;
+            bool isFirstPlayedInPrev = string.CompareOrdinal(earliest, prevStartStr) >= 0;
+
+            if (isFirstPlayedInPrev)
+            {
+                prevNewCount++;
+            }
+            else if (prevPrevGames.ContainsKey(gid) && prevPrevGames[gid].Minutes > 0)
+            {
+                prevOngoingCount++;
+            }
+            else
+            {
+                prevReturningCount++;
+            }
+        }
+
+        foreach (var (gid, g) in prevPrevGames)
+        {
+            if (g.Minutes <= 0) continue;
+            if (!prevGames.ContainsKey(gid) || prevGames[gid].Minutes <= 0)
+            {
+                prevPausedCount++;
+            }
+        }
+
+        int deltaNew = newGames.Count - prevNewCount;
+        int deltaOngoing = ongoingGames.Count - prevOngoingCount;
+        int deltaReturning = returningGames.Count - prevReturningCount;
+        int deltaPaused = pausedGames.Count - prevPausedCount;
+
         int totalExploration = newGames.Count + ongoingGames.Count + returningGames.Count + pausedGames.Count;
 
         string periodPrefix = range.PeriodComparisonLabel switch
@@ -552,7 +627,7 @@ public static class StatsAggregator
 
         var categories = new List<GameExplorationCategory>();
 
-        void AddCategory(string key, string title, string desc, string color, string icon, List<(int Id, string Name)> items)
+        void AddCategory(string key, string title, string desc, string color, string icon, List<(int Id, string Name)> items, int delta)
         {
             double pct = totalExploration > 0 ? (double)items.Count / totalExploration : 0;
             var covers = new List<string>();
@@ -566,6 +641,8 @@ public static class StatsAggregator
                 }
             }
 
+            string deltaText = delta > 0 ? $"+{delta}" : (delta < 0 ? $"{delta}" : "");
+
             categories.Add(new GameExplorationCategory(
                 Key: key,
                 Title: title,
@@ -576,14 +653,16 @@ public static class StatsAggregator
                 ColorHex: color,
                 IconType: icon,
                 GameNames: names,
-                CoverPaths: covers
+                CoverPaths: covers,
+                Delta: delta,
+                DeltaText: deltaText
             ));
         }
 
-        AddCategory("new", "新游戏", $"{periodPrefix}首次游玩的游戏", "#3B82F6", "sparkle", newGames);
-        AddCategory("ongoing", "持续游玩", $"{periodPrefix}内在继续游玩的游戏", "#10B981", "repeat", ongoingGames);
-        AddCategory("returning", "回归游玩", "之前玩过，重新开始的游戏", "#8B5CF6", "history", returningGames);
-        AddCategory("paused", "暂停游玩", $"{prevPeriodPrefix}记录，{periodPrefix}未再游玩的游戏", "#F59E0B", "pause", pausedGames);
+        AddCategory("new", "新游戏", $"{periodPrefix}首次游玩的游戏", "#3B82F6", "sparkle", newGames, deltaNew);
+        AddCategory("ongoing", "持续游玩", $"{periodPrefix}内在继续游玩的游戏", "#10B981", "repeat", ongoingGames, deltaOngoing);
+        AddCategory("returning", "回归游玩", "之前玩过，重新开始的游戏", "#8B5CF6", "history", returningGames, deltaReturning);
+        AddCategory("paused", "暂停游玩", $"{prevPeriodPrefix}记录，{periodPrefix}未再游玩的游戏", "#F59E0B", "pause", pausedGames, deltaPaused);
 
         var slices = new List<DonutSlice>();
         double currentAngle = 0;
@@ -718,7 +797,7 @@ public static class StatsAggregator
 
         int maxActiveDays = grouped.FirstOrDefault()?.ActiveDays ?? 1;
 
-        return grouped.Select(x => new GameActivityItem(
+        return grouped.Select((x, idx) => new GameActivityItem(
             GameId: x.GameId,
             Name: x.Name,
             Platform: x.Platform,
@@ -728,7 +807,8 @@ public static class StatsAggregator
             LastPlayedDate: x.LastPlayedDate,
             LastPlayedText: x.LastPlayedText,
             RatioToMax: maxActiveDays > 0 ? (double)x.ActiveDays / maxActiveDays : 0,
-            CoverPath: x.CoverPath
+            CoverPath: x.CoverPath,
+            ColorHex: idx < ProgressBarRankColors.Length ? ProgressBarRankColors[idx] : TierGrey
         )).ToList();
     }
 
