@@ -106,15 +106,21 @@ public partial class HomeViewModel : ObservableObject
 
     public bool HasCurrentGameCover => !string.IsNullOrEmpty(CurrentGameCoverPath);
 
+    public const string TablerArrowUpPath = "M 12 4 l 0 16 M 16 8 l -4 -4 l -4 4";
+    public const string TablerArrowDownPath = "M 12 20 l 0 -16 M 16 16 l -4 4 l -4 -4";
+    public const string TablerDashPath = "M 6 12 l 12 0";
+
     // Stats
     [ObservableProperty] public partial string TodayDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string TodayDeltaText { get; set; } = "较昨日 0%";
-    [ObservableProperty] public partial string TodayDeltaPercentText { get; set; } = "↑ 0%";
+    [ObservableProperty] public partial string TodayDeltaPercentText { get; set; } = "0%";
+    [ObservableProperty] public partial string TodayDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush TodayDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
 
     [ObservableProperty] public partial string WeekDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string WeekDeltaText { get; set; } = "较上周 0%";
-    [ObservableProperty] public partial string WeekDeltaPercentText { get; set; } = "↑ 0%";
+    [ObservableProperty] public partial string WeekDeltaPercentText { get; set; } = "0%";
+    [ObservableProperty] public partial string WeekDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush WeekDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
 
     [ObservableProperty] public partial int StreakDays { get; set; } = 3;
@@ -476,16 +482,19 @@ public partial class HomeViewModel : ObservableObject
         {
             TodayDurationText = DailyAggregator.FormatHoursMinutes(stats.TodayMinutes);
             TodayDeltaText = stats.TodayDeltaText;
-            TodayDeltaPercentText = stats.TodayDeltaPercent >= 0 ? $"↑ {stats.TodayDeltaPercent}%" : $"↓ {Math.Abs(stats.TodayDeltaPercent)}%";
+            TodayDeltaPercentText = $"{Math.Abs(stats.TodayDeltaPercent)}%";
+            TodayDeltaIconData = stats.TodayDeltaPercent > 0 ? TablerArrowUpPath : (stats.TodayDeltaPercent < 0 ? TablerArrowDownPath : TablerDashPath);
 
             WeekDurationText = DailyAggregator.FormatHoursMinutes(stats.WeekMinutes);
             WeekDeltaText = stats.WeekDeltaText;
-            WeekDeltaPercentText = stats.WeekDeltaPercent >= 0 ? $"↑ {stats.WeekDeltaPercent}%" : $"↓ {Math.Abs(stats.WeekDeltaPercent)}%";
+            WeekDeltaPercentText = $"{Math.Abs(stats.WeekDeltaPercent)}%";
+            WeekDeltaIconData = stats.WeekDeltaPercent > 0 ? TablerArrowUpPath : (stats.WeekDeltaPercent < 0 ? TablerArrowDownPath : TablerDashPath);
 
             var greenBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
             var redBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xF8, 0x71, 0x71));
-            TodayDeltaBrush = stats.TodayDeltaPercent >= 0 ? greenBrush : redBrush;
-            WeekDeltaBrush = stats.WeekDeltaPercent >= 0 ? greenBrush : redBrush;
+            var grayBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x94, 0xA3, 0xB8));
+            TodayDeltaBrush = stats.TodayDeltaPercent > 0 ? greenBrush : (stats.TodayDeltaPercent < 0 ? redBrush : grayBrush);
+            WeekDeltaBrush = stats.WeekDeltaPercent > 0 ? greenBrush : (stats.WeekDeltaPercent < 0 ? redBrush : grayBrush);
 
             var streak = Math.Max(stats.StreakDays, 1);
             StreakDays = streak;

@@ -121,7 +121,15 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.TotalDurationText, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-                                <TextBlock Text="{x:Bind ViewModel.TotalDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.TotalDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                                <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
+                                    <Viewbox Width="12" Height="12" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{x:Bind ViewModel.TotalDeltaBrush, Mode=OneWay}" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="{x:Bind ViewModel.TotalDeltaIconData, Mode=OneWay}" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="{x:Bind ViewModel.TotalDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.TotalDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" />
+                                </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.PeriodComparisonLabel, Mode=OneWay}" Foreground="{ThemeResource TextSecondaryBrush}" FontSize="11" HorizontalAlignment="Right" Margin="0,2,0,0" />
                             </StackPanel>
                         </Grid>
@@ -147,7 +155,15 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.TotalSessionsText, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-                                <TextBlock Text="{x:Bind ViewModel.SessionsDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.SessionsDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                                <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
+                                    <Viewbox Width="12" Height="12" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{x:Bind ViewModel.SessionsDeltaBrush, Mode=OneWay}" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="{x:Bind ViewModel.SessionsDeltaIconData, Mode=OneWay}" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="{x:Bind ViewModel.SessionsDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.SessionsDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" />
+                                </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.PeriodComparisonLabel, Mode=OneWay}" Foreground="{ThemeResource TextSecondaryBrush}" FontSize="11" HorizontalAlignment="Right" Margin="0,2,0,0" />
                             </StackPanel>
                         </Grid>
@@ -173,7 +189,15 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.DailyAvgDurationText, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-                                <TextBlock Text="{x:Bind ViewModel.DailyAvgDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.DailyAvgDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                                <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
+                                    <Viewbox Width="12" Height="12" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{x:Bind ViewModel.DailyAvgDeltaBrush, Mode=OneWay}" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="{x:Bind ViewModel.DailyAvgDeltaIconData, Mode=OneWay}" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="{x:Bind ViewModel.DailyAvgDeltaPercentText, Mode=OneWay}" Foreground="{x:Bind ViewModel.DailyAvgDeltaBrush, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Typography.NumeralAlignment="Tabular" />
+                                </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.PeriodComparisonLabel, Mode=OneWay}" Foreground="{ThemeResource TextSecondaryBrush}" FontSize="11" HorizontalAlignment="Right" Margin="0,2,0,0" />
                             </StackPanel>
                         </Grid>
@@ -274,7 +298,7 @@
                             <ItemsRepeater Grid.Column="1" ItemsSource="{x:Bind ViewModel.ExplorationCategories, Mode=OneWay}" VerticalAlignment="Center" Margin="4,0,0,0">
                                 <ItemsRepeater.ItemTemplate>
                                     <DataTemplate x:DataType="vm:ExplorationCategoryViewModel">
-                                        <Grid Padding="0,5">
+                                        <Grid Padding="0,5" Background="Transparent" ToolTipService.ToolTip="{x:Bind TooltipText}">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
@@ -592,26 +616,26 @@
                         </Grid>
 
                         <!-- Bottom: Legend (2 Columns x 3 Rows, 6 Tiers) -->
-                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.PlaytimeTiers, Mode=OneWay}" Margin="2,4,2,0">
+                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.PlaytimeTiers, Mode=OneWay}" HorizontalAlignment="Center" Margin="2,4,2,0">
                             <ItemsRepeater.Layout>
-                                <UniformGridLayout Orientation="Horizontal" MaximumRowsOrColumns="2" MinRowSpacing="3" MinColumnSpacing="16" ItemsStretch="None" />
+                                <UniformGridLayout Orientation="Horizontal" MaximumRowsOrColumns="2" MinRowSpacing="3" MinColumnSpacing="20" ItemsStretch="None" />
                             </ItemsRepeater.Layout>
                             <ItemsRepeater.ItemTemplate>
                                 <DataTemplate x:DataType="vm:PlaytimeTierViewModel">
-                                    <StackPanel Orientation="Horizontal" Spacing="5" Padding="0,2" ToolTipService.ToolTip="{x:Bind TooltipText}" VerticalAlignment="Center">
-                                        <!-- Color Dot -->
-                                        <Ellipse Width="7" Height="7" Fill="{x:Bind ColorBrush}" VerticalAlignment="Center" Margin="0,0,1,0" />
+                                    <Grid Width="128" Padding="0,2" ToolTipService.ToolTip="{x:Bind TooltipText}">
+                                        <!-- Left: Dot + TierName (TextTrimming="None" so 100-500h is never truncated) -->
+                                        <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                            <Ellipse Width="7" Height="7" Fill="{x:Bind ColorBrush}" VerticalAlignment="Center" Margin="0,0,1,0" />
+                                            <TextBlock Text="{x:Bind TierName}" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
+                                                       VerticalAlignment="Center" TextTrimming="None" Typography.NumeralAlignment="Tabular" />
+                                        </StackPanel>
 
-                                        <!-- Tier Name (Fixed Width for uniform alignment) -->
-                                        <TextBlock Text="{x:Bind TierName}" Width="48" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}"
-                                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Typography.NumeralAlignment="Tabular" />
-
-                                        <!-- Percentage & Count closely following the tier name -->
-                                        <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                        <!-- Right: Percentage & Count (Right-aligned) -->
+                                        <StackPanel Orientation="Horizontal" Spacing="2" HorizontalAlignment="Right" VerticalAlignment="Center">
                                             <TextBlock Text="{x:Bind Percentage}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Typography.NumeralAlignment="Tabular" />
                                             <TextBlock Text="{x:Bind CountText}" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" Typography.NumeralAlignment="Tabular" />
                                         </StackPanel>
-                                    </StackPanel>
+                                    </Grid>
                                 </DataTemplate>
                             </ItemsRepeater.ItemTemplate>
                         </ItemsRepeater>

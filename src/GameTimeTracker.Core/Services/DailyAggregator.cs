@@ -296,7 +296,7 @@ public static class DailyAggregator
             todayDelta = 100.0;
         }
 
-        var todayDeltaText = todayDelta >= 0 ? $"↑ {todayDelta}% 较昨日" : $"↓ {Math.Abs(todayDelta)}% 较昨日";
+        var todayDeltaText = todayDelta >= 0 ? $"{todayDelta}% 较昨日" : $"{Math.Abs(todayDelta)}% 较昨日";
 
         // 2. Week calculation (Monday as start of week)
         int diff = (7 + (referenceDate.DayOfWeek - DayOfWeek.Monday)) % 7;
@@ -328,7 +328,7 @@ public static class DailyAggregator
             weekDelta = 100.0;
         }
 
-        var weekDeltaText = weekDelta >= 0 ? $"↑ {weekDelta}% 较上周" : $"↓ {Math.Abs(weekDelta)}% 较上周";
+        var weekDeltaText = weekDelta >= 0 ? $"{weekDelta}% 较上周" : $"{Math.Abs(weekDelta)}% 较上周";
 
         // 3. Consecutive Streak Calculation
         int streak = 0;

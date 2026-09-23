@@ -283,7 +283,8 @@ public record GameExplorationCategory(
     IReadOnlyList<string> GameNames,
     IReadOnlyList<string> CoverPaths,
     int Delta = 0,
-    string DeltaText = ""
+    string DeltaText = "",
+    string TooltipText = ""
 )
 {
     public bool HasDelta => Delta != 0;

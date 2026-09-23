@@ -101,18 +101,18 @@ if (-not $SkipTests) {
 }
 
 # ---- 4. 发布 ----
-$outName = "GameTimeTracker-v$version-$RuntimeIdentifier"
+$outName = "Sappfiler-v$version-$RuntimeIdentifier"
 $outDir = Join-Path $repoRoot "dist/$outName"
 
 Write-Host ""
 Write-Host "发布到 $outDir ..." -ForegroundColor Cyan
 
-# 检查是否有正在运行的 GameTimeTracker 进程占用输出目录中的文件
-$targetExe = Join-Path $outDir 'GameTimeTracker.exe'
-$targetExeApp = Join-Path $outDir 'GameTimeTracker.App.exe'
-$runningProcs = Get-Process -Name "GameTimeTracker*", "GameTimeTracker.App*" -ErrorAction SilentlyContinue |
+# 检查是否有正在运行的 Sappfiler / GameTimeTracker 进程占用输出目录中的文件
+$targetExe = Join-Path $outDir 'Sappfiler.exe'
+$targetExeLegacy = Join-Path $outDir 'GameTimeTracker.exe'
+$runningProcs = Get-Process -Name "Sappfiler*", "GameTimeTracker*", "GameTimeTracker.App*" -ErrorAction SilentlyContinue |
     Where-Object { 
-        try { $_.Path -eq $targetExe -or $_.Path -eq $targetExeApp } catch { $true }
+        try { $_.Path -eq $targetExe -or $_.Path -eq $targetExeLegacy } catch { $true }
     }
 
 if ($runningProcs) {
@@ -211,10 +211,10 @@ $requiredFiles = @(
     'Microsoft.WindowsAppRuntime.dll',    # 运行时本体（改依赖集后补入，防止漏引）
     'CoreMessagingXP.dll',
     'DWriteCore.dll',
-    'GameTimeTracker.dll',
+    'Sappfiler.dll',
     'hostpolicy.dll',
     'coreclr.dll',
-    'GameTimeTracker.pri',            # 应用资源（界面文案/资源），删了界面会出问题
+    'Sappfiler.pri',            # 应用资源（界面文案/资源），删了界面会出问题
     'Microsoft.UI.Xaml.Controls.pri',
     'Microsoft.WindowsAppRuntime.pri'
 )
@@ -245,14 +245,14 @@ $fileCount = (Get-ChildItem $outDir -File -Recurse | Measure-Object).Count
 # 更阴险的是它被增量构建掩盖了 —— 旧的合并版 PRI 一直留在 bin/ 里被沿用，
 # 直到某次全新编译才暴露，于是"上一版还好好的，这一版突然起不来"。
 #
-# 判据：合并后 GameTimeTracker.pri ≈ 2.2MB；未合并只有 ~43KB。
+# 判据：合并后 Sappfiler.pri ≈ 2.2MB；未合并只有 ~43KB。
 # 阈值取 1MB，两侧都留足余量。
-$priPath = Join-Path $outDir 'GameTimeTracker.pri'
+$priPath = Join-Path $outDir 'Sappfiler.pri'
 if (Test-Path $priPath) {
     $priKB = [math]::Round((Get-Item $priPath).Length / 1KB)
     if ($priKB -lt 1024) {
         Write-Host ""
-        Write-Host "产物校验失败：GameTimeTracker.pri 只有 ${priKB}KB，框架资源没被合并进去" -ForegroundColor Red
+        Write-Host "产物校验失败：Sappfiler.pri 只有 ${priKB}KB，框架资源没被合并进去" -ForegroundColor Red
         Fail @"
 正常应在 2MB 量级（里面合并了 WinUI 的 Themes/themeresources.xaml）。
 只有几十 KB 时程序会**一启动就崩**，报：
@@ -282,7 +282,7 @@ Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐�
 #   Core.dll：R2R ~168KB ／ 非 R2R ~71KB
 # 用体积而不是翻 PE 头，是因为它足够稳、且失败时能直接看出原因。
 $r2rChecks = @(
-    @{ Name = 'GameTimeTracker.dll';     MaxKB = 600 },
+    @{ Name = 'Sappfiler.dll';     MaxKB = 600 },
     @{ Name = 'GameTimeTracker.Core.dll'; MaxKB = 200 }
 )
 $r2rHit = @()
@@ -312,7 +312,7 @@ $versionFile = Join-Path $outDir 'VERSION.txt'
 # Windows PowerShell 5.1 的词法分析器会报"缺少右括号"。先算好再插值。
 $dirtyNote = if ($gitDirty) { '  (工作树有未提交改动)' } else { '' }
 @"
-GameTimeTracker $version
+Sappfiler $version
 FileVersion    : $fileVersion
 Commit         : $gitCommit$dirtyNote
 Configuration  : $Configuration

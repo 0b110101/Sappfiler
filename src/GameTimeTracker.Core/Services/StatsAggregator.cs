@@ -535,10 +535,10 @@ public static class StatsAggregator
             ? new Dictionary<int, string>(earliestPlayDates)
             : allSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => g.Min(s => s.Date) ?? startStr);
 
-        var newGames = new List<(int Id, string Name)>();
-        var ongoingGames = new List<(int Id, string Name)>();
-        var returningGames = new List<(int Id, string Name)>();
-        var pausedGames = new List<(int Id, string Name)>();
+        var newGames = new List<(int Id, string Name, int Minutes)>();
+        var ongoingGames = new List<(int Id, string Name, int Minutes)>();
+        var returningGames = new List<(int Id, string Name, int Minutes)>();
+        var pausedGames = new List<(int Id, string Name, int Minutes)>();
 
         foreach (var (gid, g) in curGames)
         {
@@ -549,15 +549,15 @@ public static class StatsAggregator
 
             if (isFirstPlayedInCur)
             {
-                newGames.Add((gid, g.Name));
+                newGames.Add((gid, g.Name, g.Minutes));
             }
             else if (prevGames.ContainsKey(gid) && prevGames[gid].Minutes > 0)
             {
-                ongoingGames.Add((gid, g.Name));
+                ongoingGames.Add((gid, g.Name, g.Minutes));
             }
             else
             {
-                returningGames.Add((gid, g.Name));
+                returningGames.Add((gid, g.Name, g.Minutes));
             }
         }
 
@@ -566,7 +566,7 @@ public static class StatsAggregator
             if (g.Minutes <= 0) continue;
             if (!curGames.ContainsKey(gid) || curGames[gid].Minutes <= 0)
             {
-                pausedGames.Add((gid, g.Name));
+                pausedGames.Add((gid, g.Name, g.Minutes));
             }
         }
 
@@ -627,12 +627,16 @@ public static class StatsAggregator
 
         var categories = new List<GameExplorationCategory>();
 
-        void AddCategory(string key, string title, string desc, string color, string icon, List<(int Id, string Name)> items, int delta)
+        void AddCategory(string key, string title, string desc, string color, string icon, List<(int Id, string Name, int Minutes)> items, int delta)
         {
             double pct = totalExploration > 0 ? (double)items.Count / totalExploration : 0;
             var covers = new List<string>();
             var names = new List<string>();
-            foreach (var item in items)
+
+            // 按游玩时长从大到小排序，高时长游戏置顶
+            var sortedItems = items.OrderByDescending(x => x.Minutes).ToList();
+
+            foreach (var item in sortedItems)
             {
                 names.Add(item.Name);
                 if (gameCoverMap != null && gameCoverMap.TryGetValue(item.Id, out var c) && !string.IsNullOrEmpty(c))
@@ -642,6 +646,30 @@ public static class StatsAggregator
             }
 
             string deltaText = delta > 0 ? $"+{delta}" : (delta < 0 ? $"{delta}" : "");
+
+            // 悬停提示：展示前 8 款游戏及精确时长，超出时优雅省略
+            string tooltipText;
+            if (sortedItems.Count == 0)
+            {
+                tooltipText = $"{title}：暂无游戏";
+            }
+            else
+            {
+                const int maxTooltipItems = 8;
+                var lines = new List<string> { $"{title} ({sortedItems.Count}款)：" };
+                int displayCount = Math.Min(sortedItems.Count, maxTooltipItems);
+                for (int i = 0; i < displayCount; i++)
+                {
+                    var it = sortedItems[i];
+                    string dur = DailyAggregator.FormatHoursMinutes(it.Minutes);
+                    lines.Add($"{it.Name} · {dur}");
+                }
+                if (sortedItems.Count > maxTooltipItems)
+                {
+                    lines.Add($"… 等共 {sortedItems.Count} 款游戏");
+                }
+                tooltipText = string.Join("\n", lines);
+            }
 
             categories.Add(new GameExplorationCategory(
                 Key: key,
@@ -655,7 +683,8 @@ public static class StatsAggregator
                 GameNames: names,
                 CoverPaths: covers,
                 Delta: delta,
-                DeltaText: deltaText
+                DeltaText: deltaText,
+                TooltipText: tooltipText
             ));
         }
 
@@ -945,15 +974,14 @@ public static class StatsAggregator
     {
         if (deltaPercent >= 0)
         {
-            return $"↑ {deltaPercent}% {comparisonLabel}";
+            return $"{deltaPercent}% {comparisonLabel}";
         }
-        return $"↓ {Math.Abs(deltaPercent)}% {comparisonLabel}";
+        return $"{Math.Abs(deltaPercent)}% {comparisonLabel}";
     }
 
     public static string FormatDeltaPercentOnly(double deltaPercent)
     {
-        if (deltaPercent > 0) return $"↑ {deltaPercent}%";
-        if (deltaPercent < 0) return $"↓ {Math.Abs(deltaPercent)}%";
-        return "— 0%";
+        if (deltaPercent != 0) return $"{Math.Abs(deltaPercent)}%";
+        return "0%";
     }
 }

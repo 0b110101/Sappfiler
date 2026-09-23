@@ -24,8 +24,8 @@ namespace GameTimeTracker.App;
 /// </summary>
 public partial class App : Application
 {
-    public const string SingleInstanceMutexName = @"Global\GameTimeTracker_SingleInstance_Mutex_DDD89790";
-    public const string SingleInstanceMsgName = "GameTimeTracker_ActivateInstance_DDD89790";
+    public const string SingleInstanceMutexName = @"Global\Sappfiler_SingleInstance_Mutex_DDD89790";
+    public const string SingleInstanceMsgName = "Sappfiler_ActivateInstance_DDD89790";
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern uint RegisterWindowMessage(string lpString);

@@ -100,6 +100,7 @@ public partial class ExplorationCategoryViewModel : ObservableObject
     public bool HasOverflow { get; set; }
     public string OverflowText { get; set; } = string.Empty;
     public bool HasAnyCovers => Avatars.Count > 0;
+    public string TooltipText { get; set; } = string.Empty;
 }
 
 public partial class PlaytimeTierViewModel : ObservableObject
@@ -154,20 +155,27 @@ public partial class StatsViewModel : ObservableObject
     [ObservableProperty] public partial double TodayDotY { get; set; } = 0;
     [ObservableProperty] public partial double ChartBaselineY { get; set; } = 120;
 
+    public const string TablerArrowUpPath = "M 12 4 l 0 16 M 16 8 l -4 -4 l -4 4";
+    public const string TablerArrowDownPath = "M 12 20 l 0 -16 M 16 16 l -4 4 l -4 -4";
+    public const string TablerDashPath = "M 6 12 l 12 0";
+
     // Overview Metric Cards
     [ObservableProperty] public partial string TotalDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string TotalDeltaText { get; set; } = "0% 较上月";
-    [ObservableProperty] public partial string TotalDeltaPercentText { get; set; } = "— 0%";
+    [ObservableProperty] public partial string TotalDeltaPercentText { get; set; } = "0%";
+    [ObservableProperty] public partial string TotalDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Brush TotalDeltaBrush { get; set; } = new SolidColorBrush(Colors.Gray);
 
     [ObservableProperty] public partial string TotalSessionsText { get; set; } = "0 次";
     [ObservableProperty] public partial string SessionsDeltaText { get; set; } = "0% 较上月";
-    [ObservableProperty] public partial string SessionsDeltaPercentText { get; set; } = "— 0%";
+    [ObservableProperty] public partial string SessionsDeltaPercentText { get; set; } = "0%";
+    [ObservableProperty] public partial string SessionsDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Brush SessionsDeltaBrush { get; set; } = new SolidColorBrush(Colors.Gray);
 
     [ObservableProperty] public partial string DailyAvgDurationText { get; set; } = "0h";
     [ObservableProperty] public partial string DailyAvgDeltaText { get; set; } = "0% 较上月";
-    [ObservableProperty] public partial string DailyAvgDeltaPercentText { get; set; } = "— 0%";
+    [ObservableProperty] public partial string DailyAvgDeltaPercentText { get; set; } = "0%";
+    [ObservableProperty] public partial string DailyAvgDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Brush DailyAvgDeltaBrush { get; set; } = new SolidColorBrush(Colors.Gray);
 
     [ObservableProperty] public partial string PeriodComparisonLabel { get; set; } = "较上月";
@@ -374,16 +382,19 @@ public partial class StatsViewModel : ObservableObject
         TotalDeltaText = result.TotalDeltaText;
         TotalDeltaPercentText = result.TotalDeltaPercentText;
         TotalDeltaBrush = GetDeltaBrush(result.TotalDeltaPercent);
+        TotalDeltaIconData = GetDeltaIconData(result.TotalDeltaPercent);
 
         TotalSessionsText = $"{result.TotalSessions} 次";
         SessionsDeltaText = result.SessionsDeltaText;
         SessionsDeltaPercentText = result.SessionsDeltaPercentText;
         SessionsDeltaBrush = GetDeltaBrush(result.SessionsDeltaPercent);
+        SessionsDeltaIconData = GetDeltaIconData(result.SessionsDeltaPercent);
 
         DailyAvgDurationText = result.DailyAvgDurationText;
         DailyAvgDeltaText = result.DailyAvgDeltaText;
         DailyAvgDeltaPercentText = result.DailyAvgDeltaPercentText;
         DailyAvgDeltaBrush = GetDeltaBrush(result.DailyAvgDeltaPercent);
+        DailyAvgDeltaIconData = GetDeltaIconData(result.DailyAvgDeltaPercent);
 
         PeriodComparisonLabel = result.PeriodComparisonLabel;
 
@@ -535,7 +546,8 @@ public partial class StatsViewModel : ObservableObject
                     Delta = cat.Delta,
                     DeltaText = cat.DeltaText,
                     HasOverflow = overflow > 0,
-                    OverflowText = $"+{overflow}"
+                    OverflowText = $"+{overflow}",
+                    TooltipText = cat.TooltipText
                 });
             }
 
@@ -860,6 +872,13 @@ public partial class StatsViewModel : ObservableObject
             return new SolidColorBrush(ColorHelper.FromArgb(255, 248, 113, 113)); // Red
         }
         return new SolidColorBrush(ColorHelper.FromArgb(255, 148, 163, 184)); // Gray
+    }
+
+    private static string GetDeltaIconData(double deltaPercent)
+    {
+        if (deltaPercent > 0) return TablerArrowUpPath;
+        if (deltaPercent < 0) return TablerArrowDownPath;
+        return TablerDashPath;
     }
 
     private static Windows.UI.Color ParseColor(string hex)

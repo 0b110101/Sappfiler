@@ -191,7 +191,15 @@
 
                             <!-- Right: Percent & Delta Comparison -->
                             <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2">
-                                <TextBlock Text="{x:Bind ViewModel.TodayDeltaPercentText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind ViewModel.TodayDeltaBrush, Mode=OneWay}" HorizontalAlignment="Right" />
+                                <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
+                                    <Viewbox Width="12" Height="12" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{x:Bind ViewModel.TodayDeltaBrush, Mode=OneWay}" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="{x:Bind ViewModel.TodayDeltaIconData, Mode=OneWay}" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="{x:Bind ViewModel.TodayDeltaPercentText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind ViewModel.TodayDeltaBrush, Mode=OneWay}" Typography.NumeralAlignment="Tabular" />
+                                </StackPanel>
                                 <TextBlock Text="较昨日" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Right" />
                             </StackPanel>
                         </Grid>
@@ -228,7 +236,15 @@
 
                             <!-- Right: Percent & Delta Comparison -->
                             <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2">
-                                <TextBlock Text="{x:Bind ViewModel.WeekDeltaPercentText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind ViewModel.WeekDeltaBrush, Mode=OneWay}" HorizontalAlignment="Right" />
+                                <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
+                                    <Viewbox Width="12" Height="12" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <Path Stroke="{x:Bind ViewModel.WeekDeltaBrush, Mode=OneWay}" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                  Data="{x:Bind ViewModel.WeekDeltaIconData, Mode=OneWay}" />
+                                        </Canvas>
+                                    </Viewbox>
+                                    <TextBlock Text="{x:Bind ViewModel.WeekDeltaPercentText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind ViewModel.WeekDeltaBrush, Mode=OneWay}" Typography.NumeralAlignment="Tabular" />
+                                </StackPanel>
                                 <TextBlock Text="较上周" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Right" />
                             </StackPanel>
                         </Grid>
