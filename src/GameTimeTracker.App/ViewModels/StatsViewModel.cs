@@ -223,6 +223,8 @@ public partial class StatsViewModel : ObservableObject
     public ObservableCollection<ExplorationCategoryViewModel> ExplorationCategories { get; } = new();
     public ObservableCollection<DonutSliceViewModel> PlaytimeTierDonutSlices { get; } = new();
     public ObservableCollection<PlaytimeTierViewModel> PlaytimeTiers { get; } = new();
+    public ObservableCollection<PlaytimeTierViewModel> LeftPlaytimeTiers { get; } = new();
+    public ObservableCollection<PlaytimeTierViewModel> RightPlaytimeTiers { get; } = new();
     public ObservableCollection<GameActivityItem> GameActivities { get; } = new();
 
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -556,13 +558,16 @@ public partial class StatsViewModel : ObservableObject
 
         // 10. Update 【游戏时长分布】 (Playtime Tier Distribution)
         PlaytimeTiers.Clear();
+        LeftPlaytimeTiers.Clear();
+        RightPlaytimeTiers.Clear();
         if (result.PlaytimeTiers != null)
         {
             TierTotalGamesCount = result.PlaytimeTiers.TotalGamesCount;
 
-            foreach (var t in result.PlaytimeTiers.Tiers)
+            for (int i = 0; i < result.PlaytimeTiers.Tiers.Count; i++)
             {
-                PlaytimeTiers.Add(new PlaytimeTierViewModel
+                var t = result.PlaytimeTiers.Tiers[i];
+                var vm = new PlaytimeTierViewModel
                 {
                     TierName = t.TierName,
                     GameCount = t.GameCount,
@@ -570,7 +575,16 @@ public partial class StatsViewModel : ObservableObject
                     Percentage = t.PercentageText,
                     ColorHex = t.ColorHex,
                     ColorBrush = new SolidColorBrush(ParseColor(t.ColorHex))
-                });
+                };
+                PlaytimeTiers.Add(vm);
+                if (i % 2 == 0)
+                {
+                    LeftPlaytimeTiers.Add(vm);
+                }
+                else
+                {
+                    RightPlaytimeTiers.Add(vm);
+                }
             }
 
             RenderDonutCollection(result.PlaytimeTierDonutSlices ?? Array.Empty<DonutSlice>(), PlaytimeTierDonutSlices, 75, 75, 66, 45, 2.5);

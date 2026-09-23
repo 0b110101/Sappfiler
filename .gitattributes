@@ -1,0 +1,9 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Language recognition
+*.cs text diff=csharp
+*.xaml text
+*.csproj text
+*.slnx text
+*.md text
