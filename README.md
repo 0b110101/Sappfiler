@@ -235,10 +235,10 @@ git clone https://github.com/0b110101/Sappfiler.git
 cd Sappfiler
 
 # 还原并编译
-dotnet build GameTimeTracker.slnx
+dotnet build Sappfiler.slnx
 
 # 启动应用程序
-dotnet run --project src/GameTimeTracker.App
+dotnet run --project src/Sappfiler.App
 ```
 
 ### 本地发布打包

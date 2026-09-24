@@ -118,8 +118,8 @@
     <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\GameTimeTracker.Core\GameTimeTracker.Core.csproj" />
-    <ProjectReference Include="..\GameTimeTracker.Infrastructure\GameTimeTracker.Infrastructure.csproj" />
+    <ProjectReference Include="..\Sappfiler.Core\Sappfiler.Core.csproj" />
+    <ProjectReference Include="..\Sappfiler.Infrastructure\Sappfiler.Infrastructure.csproj" />
   </ItemGroup>
 
   <!--

@@ -8,9 +8,9 @@
     包名叫 alpha17"这类不一致。
 
     产物：
-      dist\GameTimeTracker-v<version>-win-x64\       解压后的可运行目录
-      dist\GameTimeTracker-v<version>-win-x64.zip   交给 QA 的压缩包
-      dist\GameTimeTracker-v<version>-win-x64\VERSION.txt  版本 + commit + 工作树状态
+      dist\Sappfiler-v<version>-win-x64\       解压后的可运行目录
+      dist\Sappfiler-v<version>-win-x64.zip   交给 QA 的压缩包
+      dist\Sappfiler-v<version>-win-x64\VERSION.txt  版本 + commit + 工作树状态
 
 .EXAMPLE
     .\publish.ps1
@@ -56,7 +56,7 @@ Write-Host "版本号: $version  (FileVersion=$fileVersion)" -ForegroundColor Cy
 
 # ---- 2. 一致性自检：三处版本号必须对齐 ----
 # 这几处历史上漂移过，导致 exe 属性显示旧版本、QA 分不清手里的包。
-$manifestPath = Join-Path $repoRoot 'src/GameTimeTracker.App/Package.appxmanifest'
+$manifestPath = Join-Path $repoRoot 'src/Sappfiler.App/Package.appxmanifest'
 if (Test-Path $manifestPath) {
     [xml]$manifest = Get-Content $manifestPath -Raw
     $manifestVersion = $manifest.Package.Identity.Version
@@ -93,7 +93,7 @@ if ($gitDirty) {
 
 # ---- 3. 测试 ----
 if (-not $SkipTests) {
-    $testsPath = Join-Path $repoRoot 'tests/GameTimeTracker.Tests'
+    $testsPath = Join-Path $repoRoot 'tests/Sappfiler.Tests'
     if (Test-Path $testsPath) {
         Write-Host ""
         Write-Host "运行测试..." -ForegroundColor Cyan
@@ -140,7 +140,7 @@ if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
 #   WindowsAppSDKSelfContained   把 WinUI 的 native 实现打进包里，
 #                                否则依赖机器上装没装 WindowsAppRuntime
 #   SelfContained                自带 .NET 运行时，QA 机器无需预装
-dotnet publish (Join-Path $repoRoot 'src/GameTimeTracker.App') `
+dotnet publish (Join-Path $repoRoot 'src/Sappfiler.App') `
     -c $Configuration `
     -r $RuntimeIdentifier `
     -p:PublishTrimmed=false `
@@ -237,7 +237,7 @@ if ($missing.Count -gt 0) {
 缺文件通常意味着 PublishTrimmed 被打开了（WinUI 3 不支持裁剪），
 或 WindowsAppSDKSelfContained / SelfContained 没生效。
 这样的包能生成但一启动就崩，不要交给 QA。
-请检查 GameTimeTracker.App.csproj 的 Publish Properties 段。
+请检查 Sappfiler.App.csproj 的 Publish Properties 段。
 "@
 }
 
@@ -265,7 +265,7 @@ if (Test-Path $priPath) {
   XamlParseException: Cannot locate resource from
   'ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml'
 
-常见原因：GameTimeTracker.App.csproj 里没有引用 Microsoft.WindowsAppSDK
+常见原因：Sappfiler.App.csproj 里没有引用 Microsoft.WindowsAppSDK
 元包（改成子包引用会让 PRI 不合并）。
 请把该依赖改回元包后重新打包。
 "@
@@ -307,7 +307,7 @@ if ($r2rHit.Count -gt 0) {
     Fail @"
 ReadyToRun 会让「关掉界面再从托盘打开」稳定崩溃（原生层，日志空白），
 不要交给 QA。请确认：
-  · GameTimeTracker.App.csproj 里 PublishReadyToRun 是恒定 False
+  · Sappfiler.App.csproj 里 PublishReadyToRun 是恒定 False
   · publish.ps1 的 dotnet publish 带了 -p:PublishReadyToRun=false
 "@
 }

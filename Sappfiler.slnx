@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Sappfiler.App/Sappfiler.App.csproj" />
+    <Project Path="src/Sappfiler.Core/Sappfiler.Core.csproj" />
+    <Project Path="src/Sappfiler.Infrastructure/Sappfiler.Infrastructure.csproj" />
+  </Folder>
+</Solution>
