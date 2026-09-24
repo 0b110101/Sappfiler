@@ -1,7 +1,7 @@
 # Sappfiler
 
-[![Release](https://img.shields.io/github/v/release/0b110101/GameTimeTracker?style=flat-square&color=blue)](https://github.com/0b110101/GameTimeTracker/releases)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/0b110101/GameTimeTracker)
+[![Release](https://img.shields.io/github/v/release/0b110101/Sappfiler?style=flat-square&color=blue)](https://github.com/0b110101/Sappfiler/releases)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/0b110101/Sappfiler)
 [![Framework](https://img.shields.io/badge/.NET-10.0-purple?style=flat-square)](https://dotnet.microsoft.com/)
 [![UI Framework](https://img.shields.io/badge/UI-WinUI%203-0078D7?style=flat-square)](https://learn.microsoft.com/windows/apps/winui/winui3/)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-orange.svg?style=flat-square)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -56,7 +56,7 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
 
 ## 🚀 快速开始
 
-1. 前往 [Releases](https://github.com/0b110101/GameTimeTracker/releases) 下载最新发行包 `Sappfiler-vX.X.X-win-x64.zip`。
+1. 前往 [Releases](https://github.com/0b110101/Sappfiler/releases) 下载最新发行包 `Sappfiler-vX.X.X-win-x64.zip`。
 2. **解压至任意可写目录**（例如 `D:\Tools\Sappfiler`，请勿置于 `C:\Program Files` 以免受 UAC 写入权限限制）。
 3. 双击运行 `Sappfiler.exe`，程序将常驻于系统托盘。
 4. 打开程序「设置」界面，按照下方指南配置 Notion，保存后即可开启全自动同步。
@@ -231,14 +231,11 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 ### 构建与运行
 ```powershell
 # 克隆仓库
-git clone https://github.com/0b110101/GameTimeTracker.git Sappfiler
+git clone https://github.com/0b110101/Sappfiler.git
 cd Sappfiler
 
 # 还原并编译
 dotnet build GameTimeTracker.slnx
-
-# 运行单元测试 (171 项自动化测试)
-dotnet test tests/GameTimeTracker.Tests/GameTimeTracker.Tests.csproj
 
 # 启动应用程序
 dotnet run --project src/GameTimeTracker.App

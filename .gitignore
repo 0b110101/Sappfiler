@@ -45,3 +45,22 @@ icon.txt
 *.zip
 /OPPO_Sans_4.0/
 /geist.ttf
+
+# Tests & benchmarks (不上载至开源库)
+tests/
+
+# 内部报告与交接文档
+/HANDOVER.md
+/CHANGELOG-QA.md
+/CLEANUP-REPORT.md
+/项目接管报告.md
+.workbuddy/
+.ai/
+
+# 本地封面缓存与根目录临时图片
+/cache/
+/*.png
+/*.jpg
+/*.jpeg
+/*.svg
+

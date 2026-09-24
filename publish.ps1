@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     按当前版本号构建并打包发布产物，供交给 QA 调试。
 
@@ -93,11 +93,14 @@ if ($gitDirty) {
 
 # ---- 3. 测试 ----
 if (-not $SkipTests) {
-    Write-Host ""
-    Write-Host "运行测试..." -ForegroundColor Cyan
-    dotnet test (Join-Path $repoRoot 'tests/GameTimeTracker.Tests') -c $Configuration --nologo
-    if ($LASTEXITCODE -ne 0) { Fail '测试未通过，不打包。（确实要跳过请用 -SkipTests）' }
-    Write-Host "测试通过" -ForegroundColor Green
+    $testsPath = Join-Path $repoRoot 'tests/GameTimeTracker.Tests'
+    if (Test-Path $testsPath) {
+        Write-Host ""
+        Write-Host "运行测试..." -ForegroundColor Cyan
+        dotnet test $testsPath -c $Configuration --nologo
+        if ($LASTEXITCODE -ne 0) { Fail '测试未通过，不打包。（确实要跳过请用 -SkipTests）' }
+        Write-Host "测试通过" -ForegroundColor Green
+    }
 }
 
 # ---- 4. 发布 ----
