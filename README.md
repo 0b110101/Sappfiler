@@ -1,7 +1,7 @@
 # Sappfiler
 
-[![Release](https://img.shields.io/github/v/release/bbbab/GameTimeTracker?style=flat-square&color=blue)](https://github.com/bbbab/GameTimeTracker/releases)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/bbbab/GameTimeTracker)
+[![Release](https://img.shields.io/github/v/release/0b110101/GameTimeTracker?style=flat-square&color=blue)](https://github.com/0b110101/GameTimeTracker/releases)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/0b110101/GameTimeTracker)
 [![Framework](https://img.shields.io/badge/.NET-10.0-purple?style=flat-square)](https://dotnet.microsoft.com/)
 [![UI Framework](https://img.shields.io/badge/UI-WinUI%203-0078D7?style=flat-square)](https://learn.microsoft.com/windows/apps/winui/winui3/)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-orange.svg?style=flat-square)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -56,7 +56,7 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
 
 ## 🚀 快速开始
 
-1. 前往 [Releases](https://github.com/bbbab/GameTimeTracker/releases) 下载最新发行包 `Sappfiler-vX.X.X-win-x64.zip`。
+1. 前往 [Releases](https://github.com/0b110101/GameTimeTracker/releases) 下载最新发行包 `Sappfiler-vX.X.X-win-x64.zip`。
 2. **解压至任意可写目录**（例如 `D:\Tools\Sappfiler`，请勿置于 `C:\Program Files` 以免受 UAC 写入权限限制）。
 3. 双击运行 `Sappfiler.exe`，程序将常驻于系统托盘。
 4. 打开程序「设置」界面，按照下方指南配置 Notion，保存后即可开启全自动同步。
@@ -124,14 +124,16 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 请确保 Notion 数据库中创建的属性名称与数据类型严格符合下表（名称不匹配会导致 Notion API 报 400 错误）：
 
 #### A. 游戏总表（Game Catalog Database）
-用于程序识别游戏名称、封面和别名：
+用于程序识别游戏名称与平台别名：
 
 | 属性名 | 字段类型 (Type) | 必需 | 说明 |
 |---|---|---|---|
 | `游戏名称` | **Title** | ✅ | 游戏主标题，每日打卡与历史回刷将引用此名称 |
-| `封面` | Files & media 或 URL | 可选 | 用于客户端展示背景与海报（亦可直接使用 Notion 页面 Cover 或页面 Icon，在本地未运行时用作展示游戏封面） |
 | `别名` | Multi-select 或 Text | 可选 | 辅助匹配别名（如带括号的发布年 `Valheim (2020)`） |
 | `游戏标识` | Multi-select 或 Text | 可选 | 填入 `steam:appid`（例如 `steam:3112010`）实现 100% 精确映射 |
+
+> 💡 **页面封面与图标说明**：
+> 客户端中展示的游戏封面与图标直接读取自总表对应游戏页面的 **Cover（页面封面）** 与 **Page Icon（页面图标）**，**无需在数据库中额外新建「封面」属性**（本地游戏未运行时亦可正常展示游戏封面）。
 
 #### B. 每日时长表（Daily Records Database）
 用于程序写入每天的游戏打卡数据：
@@ -187,7 +189,7 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 
 - **数据与程序分离架构**：
   - 本地 SQLite 核心数据、自定义别名及封面缓存均存储于系统目录：
-    `%LocalAppData%\GameTimeTracker\` (或在客户端设置中自定义位置)
+    `%LocalAppData%\Sappfiler\` (或在客户端设置中自定义位置)
   - 运行日志存放于 `<程序安装目录>\data\logs\app.log`，具备 2MB 自动滚卷轮转机制。
 - **平滑升级（零丢失风险）**：
   1. 右键系统托盘图标，选择 **退出**（务必完全退出程序以释放文件锁定）。
@@ -201,7 +203,8 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 为保障系统稳定性与用户账号安全，本项目严格遵守以下技术原则：
 - **🚫 绝不注入任何游戏进程**：不使用任何 DLL 注入、API Hook 或驱动级监测技术，仅依赖 Windows 官方进程快照与性能计数器。
 - **🛡️ 反作弊与安全性兼容说明**：
-  本项目采用纯 Windows 标准用户态只读 API，运行机制等同于 Windows 自带的任务管理器。[注意：这不等于跟所有第三方反作弊都能兼容；如果你对某款游戏的反作弊环境要求特别严，建议自己评估过再用。]
+  本项目采用纯 Windows 标准用户态只读 API，运行机制等同于 Windows 自带的任务管理器。
+  > ⚠️ **注意**：这不等于跟所有第三方反作弊都能兼容；如果你对某款游戏的反作弊环境要求特别严，建议自己评估过再用。
 - **🚫 无第三方中间服务器**：客户端直连 Notion 官方 HTTPS API，不存在任何中转服务器或收集个人数据的后门，Token 与游戏历史绝不离开本地环境。
 - **🚫 非在线社交对战平台**：专注服务于单机、联机全平台玩家的个人数字化生活记录与离线聚合分析。
 
@@ -228,13 +231,13 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 ### 构建与运行
 ```powershell
 # 克隆仓库
-git clone https://github.com/bbbab/GameTimeTracker.git
-cd GameTimeTracker
+git clone https://github.com/0b110101/GameTimeTracker.git Sappfiler
+cd Sappfiler
 
 # 还原并编译
 dotnet build GameTimeTracker.slnx
 
-# 运行单元测试 (166 项自动化测试)
+# 运行单元测试 (171 项自动化测试)
 dotnet test tests/GameTimeTracker.Tests/GameTimeTracker.Tests.csproj
 
 # 启动应用程序
@@ -270,3 +273,7 @@ dotnet run --project src/GameTimeTracker.App
 
 - SAMK
 - UNICORN
+- [Google Gemini](https://deepmind.google/technologies/gemini/)
+- [OpenAI ChatGPT](https://openai.com/)
+- [Anthropic Claude](https://www.anthropic.com/)
+- [DeepSeek](https://www.deepseek.com/)
