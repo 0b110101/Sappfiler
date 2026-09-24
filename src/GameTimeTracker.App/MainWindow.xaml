@@ -30,14 +30,15 @@
                 CornerRadius="0,10,0,0" />
 
         <!-- Custom TitleBar (Full-width for window dragging & caption buttons) -->
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Grid.ColumnSpan="2" Height="40" Background="Transparent">
-            <!-- Brand: Larger 26x26 Logo + Bold 14px Text (Over white sidebar background) -->
-            <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center" Margin="6,0,0,0"
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Grid.ColumnSpan="2" Height="48" Background="Transparent">
+            <!-- Brand: Larger 35x35 Logo + Black 16px SAPPFILER Text (Over sidebar background) -->
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" Margin="10,0,0,0"
                         HorizontalAlignment="Left" IsHitTestVisible="False">
-                <Border Width="26" Height="26" CornerRadius="6" Background="Transparent">
-                    <Image Width="26" Height="26" Source="ms-appx:///Assets/logo.png" />
+                <Border Width="35" Height="35" CornerRadius="8" Background="Transparent">
+                    <Image Width="35" Height="35" Source="ms-appx:///Assets/logo.png" />
                 </Border>
-                <TextBlock Text="Sappfiler" FontSize="14" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                <TextBlock Text="SAPPFILER" FontSize="16" FontWeight="Black" FontFamily="{StaticResource AppHeadingFontFamily}"
+                           Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
             </StackPanel>
         </Grid>
 
