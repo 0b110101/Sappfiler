@@ -1681,6 +1681,31 @@ public class NotionSyncService : INotionSyncService
                 .Where(c => c.MatchType is "identifier_match" or "exact" or "normalized")
                 .ToList();
 
+            // 若仍未匹配成功且属于 Steam 平台，尝试通过 SteamAPI 获取官方中文名自动二次匹配
+            // （应对用户在总表中填写 Steam 中文游戏名，而本地进程识别为英文名的情况）
+            if (deterministic.Count != 1 && !string.IsNullOrWhiteSpace(steamAppId))
+            {
+                try
+                {
+                    var cnTitle = await _matcher.ResolveSteamChineseTitleAsync(steamAppId);
+                    if (!string.IsNullOrWhiteSpace(cnTitle))
+                    {
+                        var cnCandidates = _matcher.MatchGame(cnTitle, usable, steamAppId);
+                        var cnDeterministic = cnCandidates
+                            .Where(c => c.MatchType is "identifier_match" or "exact" or "normalized")
+                            .ToList();
+                        if (cnDeterministic.Count == 1)
+                        {
+                            deterministic = cnDeterministic;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 网络异常或非官方应用，静默容错
+                }
+            }
+
             if (deterministic.Count != 1) continue;
 
             try

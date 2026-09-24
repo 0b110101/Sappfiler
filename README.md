@@ -1,4 +1,4 @@
-# GameTimeTracker
+# Sappfiler
 
 [![Release](https://img.shields.io/github/v/release/bbbab/GameTimeTracker?style=flat-square&color=blue)](https://github.com/bbbab/GameTimeTracker/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-informational?style=flat-square)](https://github.com/bbbab/GameTimeTracker)
@@ -12,7 +12,7 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
 
 ## 目录
 
-- [💡 为什么需要 GameTimeTracker](#-为什么需要-gametimetracker)
+- [💡 为什么需要 Sappfiler](#-为什么需要-sappfiler)
 - [✨ 核心特性](#-核心特性)
 - [🚀 快速开始](#-快速开始)
 - [🔗 Notion 关联配置指南（核心）](#-notion-关联配置指南核心)
@@ -23,19 +23,19 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
   - [5. 在总表中自动汇总累计时长（Formula 公式）](#5-在总表中自动汇总累计时长formula-公式)
 - [🎮 游戏识别与映射机制](#-游戏识别与映射机制)
 - [🔄 版本更新与数据安全](#-版本更新与数据安全)
-- [⛔ 项目边界（What it doesn't do）](#-项目边界what-it-doesnt-do)
+- [⛔ 项目边界与安全性原则（What it doesn't do）](#-项目边界与安全性原则what-it-doesnt-do)
 - [🛠️ 技术栈](#️-技术栈)
 - [📦 从源码构建](#-从源码构建)
-- [📄 开源协议](#-开源协议)
+- [📄 开源协议与非商业条款](#-开源协议与非商业条款)
 - [🙏 致谢](#-致谢)
 
 ---
 
-## 💡 为什么需要 GameTimeTracker
+## 💡 为什么需要 Sappfiler
 
 - **跨平台时长专精记录痛点**：现有网站与App多以成就为锚点，而不是游玩时长记录。
 - **Notion 个人数据库的优势与门槛**：Notion 是搭建个人全能游戏库与自由看板的绝佳工具，但手工打卡耗时费力、极易遗漏，且容易因记账负担过重而放弃。
-- **自动化无感解决方案**：GameTimeTracker 在 Windows 后台低开销静默常驻，全自动识别当前运行的游戏进程并精确记录时长，自动处理跨午夜拆分，并将每日明细实时同步至你的专属 Notion 数据库，真正实现「玩游戏零打扰，查数据全自动」。
+- **自动化无感解决方案**：Sappfiler 在 Windows 后台低开销静默常驻，全自动识别当前运行的游戏进程并精确记录时长，自动处理跨午夜拆分，并将每日明细实时同步至你的专属 Notion 数据库，真正实现「玩游戏零打扰，查数据全自动」。
 
 ---
 
@@ -44,20 +44,21 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
 - **零感心跳监控**：轻量级进程检测，每 5 秒进行一次增量心跳累加；突发断电或强退进程最多仅丢失 5 秒统计，数据极其稳健。
 - **午夜自动拆分**：跨越午夜 00:00 的连续游玩进程，自动切分归属自然日，保证每日统计精确无偏差。
 - **Notion 双向增量同步**：
+  - **同步时机明确**：同步 Notion 的时间点为**启动程序时**以及**结束游戏时**（常驻后台期间亦包含定期增量心跳对账）。
   - 自动向「每日时长表」推送打卡记录，并建立与「游戏总表」的 Relation 关联。
   - 双向状态对账与防漏同步：支持本地与 Notion 任意一侧的数据删除核验，本地更具备已删除归档兜底保护。
   - 绑定状态全自动标记：每日记录自动标定 `已绑定` 与 `未绑定` 状态，未绑定游戏后续关联总表时自动回填历史明细。
 - **多平台广泛兼容**：原生支持 Steam、Epic Games、GOG Galaxy、Ubisoft Connect、EA Desktop、Xbox PC、WeGame 等主流平台，并支持通过可执行文件（.exe）手动添加任意游戏。
-- **离线优先与数据自决**：数据完全持久化于本地 SQLite 数据库，即便无网络或未配置 Notion 亦可离线统计，提供 GitHub 风格年度热力图、时长排行、分类占比环形图等丰富离线可视化视图。
+- **离线优先与数据自决**：数据完全持久化于本地 SQLite 数据库，即便无网络或未配置 Notion 亦可离线统计，提供 GitHub 风格年度热力图、时长排行、游戏活跃度、游戏探索等丰富离线可视化视图。
 - **原生 WinUI 3 体验**：基于 Windows App SDK 与 WinUI 3 构建，支持 Mica 云母透明材质与系统级深浅色主题自适应，界面流畅细腻。
 
 ---
 
 ## 🚀 快速开始
 
-1. 前往 [Releases](https://github.com/bbbab/GameTimeTracker/releases) 下载最新发行包 `GameTimeTracker-vX.X.X-win-x64.zip`。
-2. **解压至任意可写目录**（例如 `D:\Tools\GameTimeTracker`，请勿置于 `C:\Program Files` 以免受 UAC 写入权限限制）。
-3. 双击运行 `GameTimeTracker.exe`，程序将常驻于系统托盘。
+1. 前往 [Releases](https://github.com/bbbab/GameTimeTracker/releases) 下载最新发行包 `Sappfiler-vX.X.X-win-x64.zip`。
+2. **解压至任意可写目录**（例如 `D:\Tools\Sappfiler`，请勿置于 `C:\Program Files` 以免受 UAC 写入权限限制）。
+3. 双击运行 `Sappfiler.exe`，程序将常驻于系统托盘。
 4. 打开程序「设置」界面，按照下方指南配置 Notion，保存后即可开启全自动同步。
 
 > 💡 **系统要求**：Windows 10 1809（Build 17763）或更高版本 / Windows 11（x64 架构）。程序为独立自包含打包，无需用户安装任何额外的 .NET 或 WinUI 运行时。
@@ -65,6 +66,7 @@ Windows 后台自动追踪游戏时长，并无缝双向同步至 Notion 数据�
 ---
 
 ⚠️ 数据安全提示：首次使用前，建议提前备份 Notion 总表，以防配置错误或 API 异常导致数据变更。
+
 ## 🔗 Notion 关联配置指南（核心）
 
 Notion 同步需建立两个 Database：**「游戏总表」**（管理你的全部游戏库藏）与**「每日时长表」**（记录每天各游戏的游玩明细）。
@@ -84,7 +86,7 @@ Notion 同步需建立两个 Database：**「游戏总表」**（管理你的全
 
 1. 登录 Notion 并访问 [Notion My Integrations](https://www.notion.so/my-integrations)。
 2. 点击 **New integration**：
-   - **Name**：填写自定义名称（例如 `GameTimeTracker`）。
+   - **Name**：填写自定义名称（例如 `Sappfiler`）。
    - **Type**：必须选择 **Internal**。
    - **Associated workspace**：选择存放你游戏数据库的工作区。
 3. 创建完成后，复制 **Internal Integration Secret**（格式为 `ntn_...` 或 `secret_...`）。此密钥即为客户端设置中的 `Notion Token`。
@@ -98,9 +100,10 @@ Notion 同步需建立两个 Database：**「游戏总表」**（管理你的全
 针对**「游戏总表」**和**「每日时长表」**两个数据库，分别执行：
 1. 在浏览器或客户端中将该数据库**展开为完整全页（Full Page）**。
 2. 点击页面右上角的 **`···`** 菜单。
-3. 选择 **Connections**（连接）并在列表中搜索你创建的 Integration 名称并点击添加。
+3. 滚动至底部选择 **Connections**（连接）→ **Connect to**（添加连接）。
+4. 在搜索框中找到第 1 步创建的集成名称（如 `Sappfiler`），点击授权关联。
 
-[![Notion Connection Authorization](https://img.shields.io/badge/Tutorial_Step_2-Authorize_Connections-orange?style=for-the-badge)](#)
+[![Notion Connect Step](https://img.shields.io/badge/Tutorial_Step_2-Connect_Integration_To_Database-orange?style=for-the-badge)](#)
 
 ### 3. 获取 Database ID
 
@@ -126,15 +129,9 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 | 属性名 | 字段类型 (Type) | 必需 | 说明 |
 |---|---|---|---|
 | `游戏名称` | **Title** | ✅ | 游戏主标题，每日打卡与历史回刷将引用此名称 |
-| `封面` | Files & media 或 URL | 可选 | 用于客户端展示背景与海报（亦可直接使用 Notion 页面 Cover） |
-| `类型` | Multi-select 或 Text | 可选 | 游戏分类/标签（支持属性名：`类型` / `游戏类型` / `Genre` / `Genres` / `分类`，如 `RPG`、`动作`、`独立`、`FPS`）。用于客户端「统计」页生成游戏类型占比环形图 |
+| `封面` | Files & media 或 URL | 可选 | 用于客户端展示背景与海报（亦可直接使用 Notion 页面 Cover 或页面 Icon，在本地未运行时用作展示游戏封面） |
 | `别名` | Multi-select 或 Text | 可选 | 辅助匹配别名（如带括号的发布年 `Valheim (2020)`） |
 | `游戏标识` | Multi-select 或 Text | 可选 | 填入 `steam:appid`（例如 `steam:3112010`）实现 100% 精确映射 |
-
-> 💡 **游戏类型与分类统计说明**：
-> - 客户端「统计」页展示的「游戏类型分布」环形图，其数据正是读取自游戏总表的 **`类型`**（或 `游戏类型`）属性。
-> - 客户端在同步总表目录时会自动拉取并持久化至本地缓存；若游戏总表中未填写类型或游戏尚未绑定，统计时自动归类为「其他」。
-> - 环形图取所选周期内游玩时长最多的前 5 大分类，其余标签合并至「其他」（鼠标悬停于图例「其他」可查看全部具体子标签）。
 
 #### B. 每日时长表（Daily Records Database）
 用于程序写入每天的游戏打卡数据：
@@ -177,8 +174,9 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 
 1. **自动化分级匹配**：
    - **Level 1（确定性）**：通过可执行文件与 Steam 安装清单直接比对 Steam AppID，若总表包含匹配的 `steam:appid` 或封面内嵌 AppID，实现 100% 自动绑定。
+   - **Level 1.5（Steam 中文名自动化匹配）**：对于 Steam 平台游戏，若本地识别到的为英文名且初次未能匹配，程序会自动根据 Steam AppID 调用 Steam 官方 API 请求对应的中文游戏名称进行二次确定性匹配，完美兼容用户在总表中填写 Steam 页面中文名的情况。
    - **Level 2（名称归一化）**：程序自动滤除进程名与总表名中的特殊符号、空格与常见版本后缀（如 `Deluxe Edition`、`Remastered`、`GOTY` 等）进行高精度比对。
-   - **Level 3（模糊待定）**：对于多重重名或低确定度命中，程序不妄作推断，统一收录至「待处理」列表由用户确认，杜绝错误关联。
+   - **Level 3（待处理列表）**：对于多重重名或低确定度命中，程序不妄作推断，统一收录至「待处理」列表由用户确认，杜绝错误关联。
 2. **一键绑定与历史回刷**：
    - 在客户端「待处理」页面，用户可一键将本地游戏绑定到 Notion 总表条目。
    - 绑定生效后，程序会自动回溯修补本地及 Notion 云端历史记录，将记录标题、关联 Relation 与 `绑定状态`（置为 `已绑定`）自动回填更新。
@@ -189,21 +187,21 @@ https://www.notion.so/<workspace>/1a2b3c4d5e6f7890abcdef1234567890?v=...
 
 - **数据与程序分离架构**：
   - 本地 SQLite 核心数据、自定义别名及封面缓存均存储于系统目录：
-    `%LocalAppData%\GameTimeTracker\`
+    `%LocalAppData%\GameTimeTracker\` (或在客户端设置中自定义位置)
   - 运行日志存放于 `<程序安装目录>\data\logs\app.log`，具备 2MB 自动滚卷轮转机制。
 - **平滑升级（零丢失风险）**：
   1. 右键系统托盘图标，选择 **退出**（务必完全退出程序以释放文件锁定）。
   2. 下载新版本压缩包，直接解压并**覆盖替换**原安装目录中的所有文件。
-  3. 重新启动客户端即可。升级过程绝不影响 `%LocalAppData%` 内的个人历史数据。
+  3. 重新启动客户端即可。升级过程绝不影响本地存储的个人历史数据。
 
 ---
 
 ## ⛔ 项目边界与安全性原则（What it doesn't do）
 
-为保障系统稳定性与用户账号绝对安全，本项目严格遵守以下技术原则：
+为保障系统稳定性与用户账号安全，本项目严格遵守以下技术原则：
 - **🚫 绝不注入任何游戏进程**：不使用任何 DLL 注入、API Hook 或驱动级监测技术，仅依赖 Windows 官方进程快照与性能计数器。
-- **🛡️ 反作弊与安全性兼容保障**：
-  本项目采用纯 Windows 标准用户态只读 API，运行机制等同于 Windows 自带的任务管理器。在运行搭载 **Easy Anti-Cheat (EAC)**、**BattlEye**、**Riot Vanguard** 等严苛反作弊系统的游戏时，**绝对安全合规，绝无封号或误报风险**。
+- **🛡️ 反作弊与安全性兼容说明**：
+  本项目采用纯 Windows 标准用户态只读 API，运行机制等同于 Windows 自带的任务管理器。[注意：这不等于跟所有第三方反作弊都能兼容；如果你对某款游戏的反作弊环境要求特别严，建议自己评估过再用。]
 - **🚫 无第三方中间服务器**：客户端直连 Notion 官方 HTTPS API，不存在任何中转服务器或收集个人数据的后门，Token 与游戏历史绝不离开本地环境。
 - **🚫 非在线社交对战平台**：专注服务于单机、联机全平台玩家的个人数字化生活记录与离线聚合分析。
 
@@ -236,7 +234,7 @@ cd GameTimeTracker
 # 还原并编译
 dotnet build GameTimeTracker.slnx
 
-# 运行单元测试 (158 项自动化测试)
+# 运行单元测试 (166 项自动化测试)
 dotnet test tests/GameTimeTracker.Tests/GameTimeTracker.Tests.csproj
 
 # 启动应用程序
@@ -248,7 +246,7 @@ dotnet run --project src/GameTimeTracker.App
 ```powershell
 .\publish.cmd
 ```
-产物将输出至 `dist/GameTimeTracker-vX.X.X-win-x64/` 及对应 `.zip` 压缩包。
+产物将输出至 `dist/Sappfiler-vX.X.X-win-x64/` 及对应 `.zip` 压缩包。
 
 ---
 
@@ -258,7 +256,7 @@ dotnet run --project src/GameTimeTracker.App
 
 ### 核心权益与限制说明
 - ✅ **个人自用免费**：允许任何个人出于非商业目的免费下载、安装、使用本软件。
-- ✅ **源码透明可审计**：源码完全开放，供玩家与技术同行审计安全性、反作弊机制（零内存读写、零 DLL 注入）及本地数据流转。
+- ✅ **源码透明可审计**：源码完全开放，供玩家与技术同行审计安全性（零内存读写、零 DLL 注入）及本地数据流转。
 - ❌ **严格禁止任何商业行为（Non-Commercial）**：
   - **严禁任何个人、团队或机构将本项目源代码、编译产物（.exe / .zip）或二次修改版本用于任何盈利性商业活动**。
   - 严禁行为包括但不限于：打包倒卖、上架收费软件分发平台、网盘付费下载、植入商业广告/流氓推广、捆绑第三方商业插件、提供付费托管服务等。
@@ -270,13 +268,5 @@ dotnet run --project src/GameTimeTracker.App
 
 ## 🙏 致谢
 
-在 GameTimeTracker 的架构设计、核心算法推演、UI/UX 迭代与代码工程化实现过程中，感谢以下贡献者与 AI 编程伙伴提供的深度协助：
-
-- **特别鸣谢**：
-  - **SAMK**：长期深度测试、边界缺陷排查与体验反馈
-  - **UNICORN**：视觉审美指导、功能构想与交互设计建议
-- **AI 编程伙伴**：
-  - [Google Gemini](https://deepmind.google/technologies/gemini/)
-  - [OpenAI GPT](https://openai.com/)
-  - [Anthropic Claude](https://www.anthropic.com/)
-  - [DeepSeek](https://www.deepseek.com/)
+- SAMK
+- UNICORN
