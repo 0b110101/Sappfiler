@@ -195,11 +195,11 @@ public static class StatsAggregator
         string prevEndStr = range.PrevEndDate.ToString("yyyy-MM-dd");
 
         var curSummaries = allSummaries
-            .Where(s => string.CompareOrdinal(s.Date, startStr) >= 0 && string.CompareOrdinal(s.Date, endStr) <= 0)
+            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, startStr) >= 0 && string.CompareOrdinal(s.Date, endStr) <= 0)
             .ToList();
 
         var prevSummaries = allSummaries
-            .Where(s => string.CompareOrdinal(s.Date, prevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevEndStr) <= 0)
+            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, prevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevEndStr) <= 0)
             .ToList();
 
         DateTime prevPrevStartDate = range.PeriodComparisonLabel switch
@@ -213,18 +213,18 @@ public static class StatsAggregator
         string prevPrevEndStr = prevPrevEndDate.ToString("yyyy-MM-dd");
 
         var prevPrevSummaries = allSummaries
-            .Where(s => string.CompareOrdinal(s.Date, prevPrevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevPrevEndStr) <= 0)
+            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, prevPrevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevPrevEndStr) <= 0)
             .ToList();
 
         // 1. Current period metrics
         int curTotalMinutes = curSummaries.Sum(s => s.DurationMinutes);
-        int curTotalSessions = curSummaries.Sum(s => Math.Max(1, s.SessionCount));
+        int curTotalSessions = curSummaries.Sum(s => Math.Max(0, s.SessionCount));
         var curActiveDays = curSummaries.Select(s => s.Date).Distinct().Count();
         int curAvgMinutes = curActiveDays > 0 ? (int)Math.Round((double)curTotalMinutes / curActiveDays) : 0;
 
         // 2. Previous period metrics
         int prevTotalMinutes = prevSummaries.Sum(s => s.DurationMinutes);
-        int prevTotalSessions = prevSummaries.Sum(s => Math.Max(1, s.SessionCount));
+        int prevTotalSessions = prevSummaries.Sum(s => Math.Max(0, s.SessionCount));
         var prevActiveDays = prevSummaries.Select(s => s.Date).Distinct().Count();
         int prevAvgMinutes = prevActiveDays > 0 ? (int)Math.Round((double)prevTotalMinutes / prevActiveDays) : 0;
 
@@ -338,7 +338,7 @@ public static class StatsAggregator
                     .ToList();
 
                 int mins = mSummaries.Sum(x => x.DurationMinutes);
-                int sessions = mSummaries.Sum(x => Math.Max(1, x.SessionCount));
+                int sessions = mSummaries.Sum(x => Math.Max(0, x.SessionCount));
                 int gamesCount = mSummaries.Select(x => x.GameId).Distinct().Count();
 
                 if (mins > maxDailyMins) maxDailyMins = mins;
@@ -388,7 +388,7 @@ public static class StatsAggregator
                     .ToList();
 
                 int mins = wSummaries.Sum(x => x.DurationMinutes);
-                int sessions = wSummaries.Sum(x => Math.Max(1, x.SessionCount));
+                int sessions = wSummaries.Sum(x => Math.Max(0, x.SessionCount));
                 int gamesCount = wSummaries.Select(x => x.GameId).Distinct().Count();
 
                 if (mins > maxDailyMins) maxDailyMins = mins;
@@ -431,7 +431,7 @@ public static class StatsAggregator
                 if (summariesByDate.TryGetValue(dStr, out var dayList))
                 {
                     mins = dayList.Sum(x => x.DurationMinutes);
-                    sessions = dayList.Sum(x => Math.Max(1, x.SessionCount));
+                    sessions = dayList.Sum(x => Math.Max(0, x.SessionCount));
                     gamesCount = dayList.Select(x => x.GameId).Distinct().Count();
                 }
 
@@ -804,7 +804,8 @@ public static class StatsAggregator
         IReadOnlyList<DailySummary> curSummaries,
         IReadOnlyDictionary<int, string?>? gameCoverMap)
     {
-        var grouped = curSummaries
+        var validSummaries = curSummaries.Where(s => s.DurationMinutes > 0).ToList();
+        var grouped = validSummaries
             .GroupBy(s => s.GameId)
             .Select(g =>
             {

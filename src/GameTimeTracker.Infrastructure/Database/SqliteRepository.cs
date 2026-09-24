@@ -770,6 +770,36 @@ public class SqliteRepository : IDatabaseRepository
                 WHERE id = @sessionId;
                 """,
                 new { sessionId, endTime = endTime.ToString("yyyy-MM-dd HH:mm:ss"), durationSeconds });
+
+            // 只有当会话时长 >= 60 秒（1分钟）时才计入有效游玩次数；低于 60 秒的微小启动忽略
+            if (durationSeconds >= 60)
+            {
+                var sessionRow = await conn.QuerySingleOrDefaultAsync<dynamic>(
+                    "SELECT game_id, substr(start_time, 1, 10) AS session_date FROM sessions WHERE id = @sessionId;",
+                    new { sessionId });
+                if (sessionRow != null)
+                {
+                    int gameId = (int)sessionRow.game_id;
+                    string date = (string)sessionRow.session_date;
+                    var validSessionsCount = await conn.ExecuteScalarAsync<int>(
+                        """
+                        SELECT COUNT(*) FROM sessions 
+                        WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date AND duration_seconds >= 60;
+                        """,
+                        new { gameId, date });
+
+                    if (validSessionsCount > 0)
+                    {
+                        await conn.ExecuteAsync(
+                            """
+                            UPDATE daily_summary 
+                            SET session_count = @validSessionsCount 
+                            WHERE game_id = @gameId AND date = @date;
+                            """,
+                            new { gameId, date, validSessionsCount });
+                    }
+                }
+            }
         }
         finally
         {
@@ -819,7 +849,9 @@ public class SqliteRepository : IDatabaseRepository
                 await conn.ExecuteAsync(
                     """
                     UPDATE daily_summary
-                    SET duration_seconds = @newSecs, duration_minutes = @newMins, sync_status = 'pending'
+                    SET duration_seconds = @newSecs, duration_minutes = @newMins,
+                        session_count = CASE WHEN duration_minutes = 0 AND @newMins > 0 THEN 1 ELSE session_count END,
+                        sync_status = 'pending'
                     WHERE id = @id;
                     """,
                     new { id = existing.id, newSecs, newMins });
@@ -827,12 +859,13 @@ public class SqliteRepository : IDatabaseRepository
             else
             {
                 var mins = durationSeconds / 60;
+                var sessionCount = mins > 0 ? 1 : 0;
                 await conn.ExecuteAsync(
                     """
                     INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status)
-                    VALUES (@date, @gameId, @durationSeconds, @mins, 1, 'pending');
+                    VALUES (@date, @gameId, @durationSeconds, @mins, @sessionCount, 'pending');
                     """,
-                    new { date, gameId, durationSeconds, mins });
+                    new { date, gameId, durationSeconds, mins, sessionCount });
             }
         }
         finally
@@ -865,7 +898,7 @@ public class SqliteRepository : IDatabaseRepository
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
-            WHERE d.date >= @startDate AND d.date <= @endDate
+            WHERE d.date >= @startDate AND d.date <= @endDate AND d.duration_minutes > 0
             ORDER BY d.date ASC;
             """,
             new { startDate, endDate });

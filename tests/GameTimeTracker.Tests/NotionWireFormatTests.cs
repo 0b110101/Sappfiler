@@ -60,17 +60,17 @@ public class NotionWireFormatTests
         handler.RequestBodies.Should().ContainSingle();
         using var doc = JsonDocument.Parse(handler.RequestBodies[0]);
         var number = doc.RootElement
-            .GetProperty("properties").GetProperty("单次时长").GetProperty("number")
+            .GetProperty("properties").GetProperty("时长").GetProperty("number")
             .GetDouble();
 
         number.Should().BeApproximately(expectedHours, 0.001,
-            $"「单次时长」的单位是小时（1 位小数），{durationMinutes} 分钟应为 {expectedHours} 小时");
+            $"「时长」的单位是小时（2 位小数），{durationMinutes} 分钟应为 {expectedHours} 小时");
     }
 
     [Fact]
     public async Task CreateDailyRecord_ShouldSendHours_ConsistentWithTitle()
     {
-        // 标题后缀和「单次时长」数值必须表达同一个时长。
+        // 标题后缀和「时长」数值必须表达同一个时长。
         // 曾出现过标题是小时、数值是分钟的不一致，所以这里把两者放一起比。
         var (client, handler) = MakeClient();
 
@@ -80,7 +80,7 @@ public class NotionWireFormatTests
         var props = doc.RootElement.GetProperty("properties");
 
         var title = props.GetProperty("游戏动态").GetProperty("title")[0].GetProperty("text").GetProperty("content").GetString();
-        var hours = props.GetProperty("单次时长").GetProperty("number").GetDouble();
+        var hours = props.GetProperty("时长").GetProperty("number").GetDouble();
 
         title.Should().Be("测试游戏 · 1.5 h");
         hours.Should().Be(1.5);
@@ -96,7 +96,7 @@ public class NotionWireFormatTests
 
         handler.RequestBodies.Should().ContainSingle();
         using var doc = JsonDocument.Parse(handler.RequestBodies[0]);
-        doc.RootElement.GetProperty("properties").GetProperty("单次时长").GetProperty("number")
+        doc.RootElement.GetProperty("properties").GetProperty("时长").GetProperty("number")
             .GetDouble().Should().Be(2.0, "120 分钟 = 2 小时");
         doc.RootElement.GetProperty("properties").GetProperty("绑定状态").GetProperty("select").GetProperty("name")
             .GetString().Should().Be("未绑定", "未绑定的游戏更新时必须明确写入「未绑定」状态");
@@ -130,6 +130,7 @@ public class NotionWireFormatTests
         var props = doc.RootElement.GetProperty("properties");
         props.GetProperty("绑定状态").GetProperty("select").GetProperty("name")
             .GetString().Should().Be("未绑定");
+        props.TryGetProperty("时长", out _).Should().BeFalse("单独更新绑定状态绝不能携带时长");
         props.TryGetProperty("单次时长", out _).Should().BeFalse("单独更新绑定状态绝不能携带单次时长");
         props.TryGetProperty("游戏动态", out _).Should().BeFalse("单独更新绑定状态绝不能携带标题");
     }
@@ -286,7 +287,7 @@ public class NotionWireFormatTests
             await writeClient.CreateDailyRecordAsync("db-1", "2026-09-19", "往返测试", minutes, null);
             using var sent = JsonDocument.Parse(writeHandler.RequestBodies[0]);
             var sentProps = sent.RootElement.GetProperty("properties");
-            var hours = sentProps.GetProperty("单次时长").GetProperty("number").GetDouble();
+            var hours = sentProps.GetProperty("时长").GetProperty("number").GetDouble();
             // 连标题一起取出来：生产路径判单位靠的就是标题末尾的「h」，
             // 用真实标题读回来才算真的走完整链路（否则只是在测那条回退分支）
             var writtenTitle = sentProps.GetProperty("游戏动态")

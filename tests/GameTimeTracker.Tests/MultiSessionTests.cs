@@ -124,4 +124,48 @@ public class MultiSessionTests : IDisposable
         _manager.IsGameActive(gameA.Id).Should().BeFalse();
         _manager.IsGameActive(gameB.Id).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task SubMinuteSession_ShouldNotIncrementSessionCount_OrBeCountedInPlayCount()
+    {
+        var game = await MakeGameAsync("蝴蝶收藏家", "3384350");
+        var dateStr = "2026-09-24";
+        var start1 = new DateTime(2026, 9, 24, 10, 0, 0);
+
+        // 第一次游玩：只有 10 秒（低于 1 分钟）
+        await _manager.StartSessionAsync(game, new DetectedProcess(301, "butterfly.exe", @"C:\butterfly.exe", "蝴蝶收藏家"), start1);
+        await _manager.EndSessionAsync(301, start1.AddSeconds(10));
+
+        // 验证：今日汇总中由于不足 1 分钟，duration_minutes 为 0，session_count 为 0
+        var summariesDay = await _repo.GetDailySummariesByDateAsync(dateStr);
+        summariesDay.Should().HaveCount(1);
+        summariesDay[0].DurationMinutes.Should().Be(0);
+        summariesDay[0].SessionCount.Should().Be(0, "低于 1 分钟的启动不应计入游玩次数");
+
+        // 范围查询（供统计页与热力图使用）过滤 duration_minutes > 0，不应查出任何无效记录
+        var rangeSummaries = await _repo.GetDailySummariesRangeAsync(dateStr, dateStr);
+        rangeSummaries.Should().BeEmpty("统计范围查询应过滤时长为 0 的记录");
+
+        // 第二次游玩：游玩 10 分钟（有效游玩）
+        var start2 = new DateTime(2026, 9, 24, 14, 0, 0);
+        await _manager.StartSessionAsync(game, new DetectedProcess(302, "butterfly.exe", @"C:\butterfly.exe", "蝴蝶收藏家"), start2);
+        await _manager.EndSessionAsync(302, start2.AddMinutes(10));
+
+        // 验证：有效游玩后 session_count 成为 1
+        summariesDay = await _repo.GetDailySummariesByDateAsync(dateStr);
+        summariesDay.Should().HaveCount(1);
+        summariesDay[0].DurationMinutes.Should().Be(10);
+        summariesDay[0].SessionCount.Should().Be(1, "有效游玩后应正确记录 1 次游玩");
+
+        // 第三次游玩：仅启动 15 秒并关闭（低于 1 分钟）
+        var start3 = new DateTime(2026, 9, 24, 20, 0, 0);
+        await _manager.StartSessionAsync(game, new DetectedProcess(303, "butterfly.exe", @"C:\butterfly.exe", "蝴蝶收藏家"), start3);
+        await _manager.EndSessionAsync(303, start3.AddSeconds(15));
+
+        // 验证：第三次由于低于 1 分钟，游玩次数不应增加，依然保持为 1
+        summariesDay = await _repo.GetDailySummariesByDateAsync(dateStr);
+        summariesDay.Should().HaveCount(1);
+        summariesDay[0].DurationMinutes.Should().Be(10);
+        summariesDay[0].SessionCount.Should().Be(1, "第二次低于1分钟的快速退出绝不应递增游玩次数");
+    }
 }

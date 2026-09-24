@@ -306,7 +306,7 @@ public class NotionClient : INotionClient
                     //    单位**优先从标题判定**（标题里一直带着 h/min），
                     //    只按数值大小猜会把旧行的 5 分钟读成 5 小时（放大 60 倍）。
                     var durationUnit = DetectDurationUnit(rawTitle);
-                    var durationRaw = ExtractDouble(props, "单次时长", "时长", "时长(分)", "Duration", "DurationMinutes");
+                    var durationRaw = ExtractDouble(props, "时长", "单次时长", "时长(分)", "Duration", "DurationMinutes");
                     var duration = RawDurationToMinutes(durationRaw, rawTitle);
                     var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
@@ -347,16 +347,15 @@ public class NotionClient : INotionClient
     {
         var cleanDbId = dailyDbId.Replace("-", "");
         var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
-        // ⚠️ 每日时长表的属性名（2026-09-18 由用户改名，见 README「版本更新」）：
-        //    游戏名称 → 游戏动态 ／ 时长 → 单次时长 ／ 游戏 → 关联游戏
+        // ⚠️ 每日时长表的属性名：游戏动态 ／ 时长 ／ 关联游戏 ／ 绑定状态
         //    写错名字 Notion 会返回 400（property does not exist），同步直接失败。
         //    注意**总表**的 title 属性仍叫「游戏名称」，别一起改了。
         var properties = new Dictionary<string, object>
         {
             ["游戏动态"] = new { title = new[] { new { text = new { content = titleText } } } },
             ["日期"] = new { date = new { start = date } },
-            // 值是**小时**（1 位小数），不是分钟 —— 与标题后缀保持一致。
-            ["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) },
+            // 值是**小时**（2 位小数），不是分钟 —— 与标题后缀保持一致。
+            ["时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) },
             ["绑定状态"] = new { select = new { name = !string.IsNullOrEmpty(gamePageId) ? "已绑定" : "未绑定" } }
         };
 
@@ -390,7 +389,7 @@ public class NotionClient : INotionClient
         string? titleOverride = null)
     {
         var cleanPageId = pageId.Replace("-", "");
-        // 属性名同 CreateDailyRecordAsync：游戏动态 / 单次时长 / 关联游戏
+        // 属性名同 CreateDailyRecordAsync：游戏动态 / 时长 / 关联游戏
         var properties = new Dictionary<string, object>();
 
         if (writeDuration)
@@ -400,7 +399,7 @@ public class NotionClient : INotionClient
             //    （2026-09-19 回刷链路就是这么篡改了 QA 786 条记录）。
             //    只改"呈现"（标题 / 关系 / 图标）的调用必须传 writeDuration: false。
             // 值是**小时**（2 位小数），与创建时以及标题后缀保持一致
-            properties["单次时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) };
+            properties["时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) };
         }
 
         if (!string.IsNullOrEmpty(titleOverride))

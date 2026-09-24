@@ -538,4 +538,32 @@ public class StatsAggregatorTests
         yearResult.PlaytimeTiers.Tiers[3].GameCount.Should().Be(1); // 60-120h
         yearResult.PlaytimeTiers.Tiers[5].GameCount.Should().Be(1); // 240h+
     }
+
+    [Fact]
+    public void AggregatePeriod_ZeroMinuteRecords_ShouldBeIgnoredInActivitiesAndSessions()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 24), StatsPeriodMode.Month);
+        var yesterdayStr = new DateTime(2026, 9, 23).ToString("yyyy-MM-dd");
+        var todayStr = new DateTime(2026, 9, 24).ToString("yyyy-MM-dd");
+
+        var summaries = new List<DailySummary>
+        {
+            // Game 1 played yesterday for 42 minutes (valid)
+            new() { Date = yesterdayStr, GameId = 1, GameName = "蝴蝶收藏家", DurationMinutes = 42, SessionCount = 1 },
+            // Game 1 launched today for only 10s (0 minutes, 0 sessions) - should be ignored!
+            new() { Date = todayStr, GameId = 1, GameName = "蝴蝶收藏家", DurationMinutes = 0, SessionCount = 0 }
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries);
+
+        // 1. Total sessions should only be 1 (yesterday), NOT 2
+        result.TotalSessions.Should().Be(1);
+
+        // 2. GameActivities should have 1 active day, and last played should be yesterday
+        result.GameActivities.Should().NotBeNull();
+        result.GameActivities!.Should().HaveCount(1);
+        var activity = result.GameActivities[0];
+        activity.ActiveDays.Should().Be(1, "低于1分钟的启动不应计入游玩日");
+        activity.LastPlayedDate.Should().Be(yesterdayStr, "最后游玩日期应为真正游玩的那一天");
+    }
 }
