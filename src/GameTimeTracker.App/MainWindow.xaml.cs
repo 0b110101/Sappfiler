@@ -302,7 +302,7 @@ public sealed partial class MainWindow : Window
                 if (!_minimizeNoticeShown)
                 {
                     _minimizeNoticeShown = true;
-                    _trayService?.ShowNotification("GameTimeTracker", "已最小化到系统托盘，后台持续统计游戏时长。");
+                    _trayService?.ShowNotification("Sappfiler", "已最小化到系统托盘，后台持续统计游戏时长。");
                 }
 
                 TrimMemoryWorkingSet();

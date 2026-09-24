@@ -276,17 +276,17 @@ public class StatsAggregatorTests
     }
 
     [Fact]
-    public void AggregatePeriod_PlaytimeTiers_ShouldCategorizeTiersWithStrictPalette()
+    public void AggregatePeriod_PlaytimeTiers_ShouldCategorizeTiersWithStrictPalette_Month()
     {
         var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Month);
         var summaries = new List<DailySummary>
         {
-            new() { Date = "2026-09-01", GameId = 1, GameName = "Game1", DurationMinutes = 60 },    // 0-2h (TierGrey)
-            new() { Date = "2026-09-02", GameId = 2, GameName = "Game2", DurationMinutes = 300 },   // 2-10h (TierGreen)
-            new() { Date = "2026-09-03", GameId = 3, GameName = "Game3", DurationMinutes = 1200 },  // 10-50h (TierBlue)
-            new() { Date = "2026-09-04", GameId = 4, GameName = "Game4", DurationMinutes = 4000 },  // 50-100h (TierYellow)
-            new() { Date = "2026-09-05", GameId = 5, GameName = "Game5", DurationMinutes = 15000 }, // 100-500h (TierPurple)
-            new() { Date = "2026-09-06", GameId = 6, GameName = "Game6", DurationMinutes = 35000 }  // 500h+ (TierOrange)
+            new() { Date = "2026-09-01", GameId = 1, GameName = "Game1", DurationMinutes = 60 },   // 0-2h (TierGrey)
+            new() { Date = "2026-09-02", GameId = 2, GameName = "Game2", DurationMinutes = 200 },  // 2-5h (TierGreen)
+            new() { Date = "2026-09-03", GameId = 3, GameName = "Game3", DurationMinutes = 600 },  // 5-15h (TierBlue)
+            new() { Date = "2026-09-04", GameId = 4, GameName = "Game4", DurationMinutes = 1200 }, // 15-30h (TierYellow)
+            new() { Date = "2026-09-05", GameId = 5, GameName = "Game5", DurationMinutes = 2400 }, // 30-50h (TierPurple)
+            new() { Date = "2026-09-06", GameId = 6, GameName = "Game6", DurationMinutes = 3500 }  // 50h+ (TierOrange)
         };
 
         var result = StatsAggregator.AggregatePeriod(range, summaries);
@@ -295,13 +295,77 @@ public class StatsAggregatorTests
         result.PlaytimeTiers!.TotalGamesCount.Should().Be(6);
         result.PlaytimeTiers.Tiers.Should().HaveCount(6);
 
+        result.PlaytimeTiers.Tiers[0].TierName.Should().Be("0-2h");
         result.PlaytimeTiers.Tiers[0].ColorHex.Should().Be(StatsAggregator.TierGrey);
+        result.PlaytimeTiers.Tiers[1].TierName.Should().Be("2-5h");
         result.PlaytimeTiers.Tiers[1].ColorHex.Should().Be(StatsAggregator.TierGreen);
+        result.PlaytimeTiers.Tiers[2].TierName.Should().Be("5-15h");
         result.PlaytimeTiers.Tiers[2].ColorHex.Should().Be(StatsAggregator.TierBlue);
+        result.PlaytimeTiers.Tiers[3].TierName.Should().Be("15-30h");
         result.PlaytimeTiers.Tiers[3].ColorHex.Should().Be(StatsAggregator.TierYellow);
+        result.PlaytimeTiers.Tiers[4].TierName.Should().Be("30-50h");
         result.PlaytimeTiers.Tiers[4].ColorHex.Should().Be(StatsAggregator.TierPurple);
+        result.PlaytimeTiers.Tiers[5].TierName.Should().Be("50h+");
         result.PlaytimeTiers.Tiers[5].ColorHex.Should().Be(StatsAggregator.TierOrange);
 
+        result.PlaytimeTiers.Tiers.All(t => t.GameCount == 1).Should().BeTrue();
+    }
+
+    [Fact]
+    public void AggregatePeriod_PlaytimeTiers_ShouldCategorizeTiers_Quarter()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Quarter);
+        var summaries = new List<DailySummary>
+        {
+            new() { Date = "2026-07-05", GameId = 1, GameName = "Game1", DurationMinutes = 100 },  // 0-3h
+            new() { Date = "2026-07-10", GameId = 2, GameName = "Game2", DurationMinutes = 300 },  // 3-10h
+            new() { Date = "2026-08-01", GameId = 3, GameName = "Game3", DurationMinutes = 1000 }, // 10-30h
+            new() { Date = "2026-08-15", GameId = 4, GameName = "Game4", DurationMinutes = 2000 }, // 30-60h
+            new() { Date = "2026-09-01", GameId = 5, GameName = "Game5", DurationMinutes = 4000 }, // 60-100h
+            new() { Date = "2026-09-10", GameId = 6, GameName = "Game6", DurationMinutes = 7000 }  // 100h+
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries);
+
+        result.PlaytimeTiers.Should().NotBeNull();
+        result.PlaytimeTiers!.TotalGamesCount.Should().Be(6);
+        result.PlaytimeTiers.Tiers.Should().HaveCount(6);
+
+        result.PlaytimeTiers.Tiers[0].TierName.Should().Be("0-3h");
+        result.PlaytimeTiers.Tiers[1].TierName.Should().Be("3-10h");
+        result.PlaytimeTiers.Tiers[2].TierName.Should().Be("10-30h");
+        result.PlaytimeTiers.Tiers[3].TierName.Should().Be("30-60h");
+        result.PlaytimeTiers.Tiers[4].TierName.Should().Be("60-100h");
+        result.PlaytimeTiers.Tiers[5].TierName.Should().Be("100h+");
+        result.PlaytimeTiers.Tiers.All(t => t.GameCount == 1).Should().BeTrue();
+    }
+
+    [Fact]
+    public void AggregatePeriod_PlaytimeTiers_ShouldCategorizeTiers_Year()
+    {
+        var range = StatsAggregator.ComputePeriodRange(new DateTime(2026, 9, 20), StatsPeriodMode.Year);
+        var summaries = new List<DailySummary>
+        {
+            new() { Date = "2026-01-10", GameId = 1, GameName = "Game1", DurationMinutes = 300 },   // 0-10h
+            new() { Date = "2026-02-15", GameId = 2, GameName = "Game2", DurationMinutes = 1000 },  // 10-30h
+            new() { Date = "2026-03-20", GameId = 3, GameName = "Game3", DurationMinutes = 2000 },  // 30-60h
+            new() { Date = "2026-04-10", GameId = 4, GameName = "Game4", DurationMinutes = 5000 },  // 60-120h
+            new() { Date = "2026-05-15", GameId = 5, GameName = "Game5", DurationMinutes = 10000 }, // 120-240h
+            new() { Date = "2026-06-20", GameId = 6, GameName = "Game6", DurationMinutes = 20000 }  // 240h+
+        };
+
+        var result = StatsAggregator.AggregatePeriod(range, summaries);
+
+        result.PlaytimeTiers.Should().NotBeNull();
+        result.PlaytimeTiers!.TotalGamesCount.Should().Be(6);
+        result.PlaytimeTiers.Tiers.Should().HaveCount(6);
+
+        result.PlaytimeTiers.Tiers[0].TierName.Should().Be("0-10h");
+        result.PlaytimeTiers.Tiers[1].TierName.Should().Be("10-30h");
+        result.PlaytimeTiers.Tiers[2].TierName.Should().Be("30-60h");
+        result.PlaytimeTiers.Tiers[3].TierName.Should().Be("60-120h");
+        result.PlaytimeTiers.Tiers[4].TierName.Should().Be("120-240h");
+        result.PlaytimeTiers.Tiers[5].TierName.Should().Be("240h+");
         result.PlaytimeTiers.Tiers.All(t => t.GameCount == 1).Should().BeTrue();
     }
 
@@ -427,5 +491,51 @@ public class StatsAggregatorTests
         // Rank 1: #F97316 (橙), Rank 2: #8B5CF6 (紫)
         result.GameRankings[0].ColorHex.Should().Be("#F97316");
         result.GameRankings[1].ColorHex.Should().Be("#8B5CF6");
+    }
+
+    [Fact]
+    public void AggregatePeriod_SwitchingPeriodMode_ShouldDynamicallyUpdatePlaytimeTiers()
+    {
+        var date = new DateTime(2026, 9, 20);
+        var summaries = new List<DailySummary>
+        {
+            // Game 1: 150 mins (2.5h) -> Month: 2-5h, Quarter: 0-3h, Year: 0-10h
+            new() { Date = "2026-09-01", GameId = 1, GameName = "Game1", DurationMinutes = 150 },
+            // Game 2: 700 mins (11.6h) -> Month: 5-15h, Quarter: 10-30h, Year: 10-30h
+            new() { Date = "2026-09-02", GameId = 2, GameName = "Game2", DurationMinutes = 700 },
+            // Game 3: 4000 mins (66.6h) -> Month: 50h+, Quarter: 60-100h, Year: 60-120h
+            new() { Date = "2026-09-03", GameId = 3, GameName = "Game3", DurationMinutes = 4000 },
+            // Game 4: 15000 mins (250h) -> Month: 50h+, Quarter: 100h+, Year: 240h+
+            new() { Date = "2026-09-04", GameId = 4, GameName = "Game4", DurationMinutes = 15000 }
+        };
+
+        // 1. Month mode
+        var monthRange = StatsAggregator.ComputePeriodRange(date, StatsPeriodMode.Month);
+        var monthResult = StatsAggregator.AggregatePeriod(monthRange, summaries);
+        monthResult.PlaytimeTiers!.Tiers.Select(t => t.TierName).Should().Equal(
+            "0-2h", "2-5h", "5-15h", "15-30h", "30-50h", "50h+");
+        monthResult.PlaytimeTiers.Tiers[1].GameCount.Should().Be(1); // 2-5h
+        monthResult.PlaytimeTiers.Tiers[2].GameCount.Should().Be(1); // 5-15h
+        monthResult.PlaytimeTiers.Tiers[5].GameCount.Should().Be(2); // 50h+
+
+        // 2. Quarter mode
+        var quarterRange = StatsAggregator.ComputePeriodRange(date, StatsPeriodMode.Quarter);
+        var quarterResult = StatsAggregator.AggregatePeriod(quarterRange, summaries);
+        quarterResult.PlaytimeTiers!.Tiers.Select(t => t.TierName).Should().Equal(
+            "0-3h", "3-10h", "10-30h", "30-60h", "60-100h", "100h+");
+        quarterResult.PlaytimeTiers.Tiers[0].GameCount.Should().Be(1); // 0-3h
+        quarterResult.PlaytimeTiers.Tiers[2].GameCount.Should().Be(1); // 10-30h
+        quarterResult.PlaytimeTiers.Tiers[4].GameCount.Should().Be(1); // 60-100h
+        quarterResult.PlaytimeTiers.Tiers[5].GameCount.Should().Be(1); // 100h+
+
+        // 3. Year mode
+        var yearRange = StatsAggregator.ComputePeriodRange(date, StatsPeriodMode.Year);
+        var yearResult = StatsAggregator.AggregatePeriod(yearRange, summaries);
+        yearResult.PlaytimeTiers!.Tiers.Select(t => t.TierName).Should().Equal(
+            "0-10h", "10-30h", "30-60h", "60-120h", "120-240h", "240h+");
+        yearResult.PlaytimeTiers.Tiers[0].GameCount.Should().Be(1); // 0-10h
+        yearResult.PlaytimeTiers.Tiers[1].GameCount.Should().Be(1); // 10-30h
+        yearResult.PlaytimeTiers.Tiers[3].GameCount.Should().Be(1); // 60-120h
+        yearResult.PlaytimeTiers.Tiers[5].GameCount.Should().Be(1); // 240h+
     }
 }

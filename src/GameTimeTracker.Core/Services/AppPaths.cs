@@ -4,7 +4,7 @@ namespace GameTimeTracker.Core.Services;
 
 /// <summary>
 /// 数据存档位置解析。
-/// 默认 %LocalAppData%\GameTimeTracker（不易被误删、不随解压目录丢失）；
+/// 默认 %LocalAppData%\Sappfiler（不易被误删、不随解压目录丢失）；
 /// 用户可在设置页更改位置——更改结果写入引导文件，重启后生效。
 /// 引导文件固定放在默认位置（它自己不能跟着自定义位置走，否则找不到）。
 /// </summary>
@@ -12,8 +12,32 @@ public static class AppPaths
 {
     private const string BootstrapFileName = "data_location.txt";
 
-    public static string DefaultDataDir =>
+    private static readonly string LegacyDataDir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GameTimeTracker");
+
+    private static readonly string SappfilerDataDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sappfiler");
+
+    public static string DefaultDataDir
+    {
+        get
+        {
+            if (Directory.Exists(SappfilerDataDir)) return SappfilerDataDir;
+            if (Directory.Exists(LegacyDataDir))
+            {
+                try
+                {
+                    Directory.Move(LegacyDataDir, SappfilerDataDir);
+                    return SappfilerDataDir;
+                }
+                catch
+                {
+                    return LegacyDataDir;
+                }
+            }
+            return SappfilerDataDir;
+        }
+    }
 
     public static string BootstrapFile => Path.Combine(DefaultDataDir, BootstrapFileName);
 

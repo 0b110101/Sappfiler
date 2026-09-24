@@ -10,7 +10,8 @@ namespace GameTimeTracker.App.Services;
 public static class AutoStartHelper
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string AppName = "GameTimeTracker";
+    private const string AppName = "Sappfiler";
+    private const string LegacyAppName = "GameTimeTracker";
 
     /// <summary>
     /// 检查当前是否已开启开机自启。
@@ -20,7 +21,7 @@ public static class AutoStartHelper
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false);
-            var val = key?.GetValue(AppName) as string;
+            var val = (key?.GetValue(AppName) as string) ?? (key?.GetValue(LegacyAppName) as string);
             return !string.IsNullOrWhiteSpace(val);
         }
         catch (Exception ex)
@@ -57,6 +58,7 @@ public static class AutoStartHelper
                 {
                     var cmd = $"\"{exePath}\" --autostart";
                     key.SetValue(AppName, cmd);
+                    key.DeleteValue(LegacyAppName, false);
                     AppLog.Info($"[自启动] 已成功设置开机自启: {cmd}");
                     return true;
                 }
@@ -67,6 +69,7 @@ public static class AutoStartHelper
             else
             {
                 key.DeleteValue(AppName, false);
+                key.DeleteValue(LegacyAppName, false);
                 AppLog.Info("[自启动] 已关闭开机自启");
                 return true;
             }

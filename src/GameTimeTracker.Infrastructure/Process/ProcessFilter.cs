@@ -63,7 +63,7 @@ public static class ProcessFilter
         "taskmgr.exe", "perfmon.exe", "audiodg.exe", "wlanext.exe", "dllhost.exe",
         "securityhealthservice.exe", "smartscreen.exe", "msmpeng.exe", "nissrv.exe",
         "antigravity.exe", "devenv.exe", "py.exe", "python.exe", "pythonw.exe",
-        "memcompression", "dotnet.exe", "msbuild.exe", "gametimetracker.app.exe"
+        "memcompression", "dotnet.exe", "msbuild.exe", "gametimetracker.app.exe", "sappfiler.exe", "sappfiler.app.exe"
     };
 
     private static readonly HashSet<string> AuxiliaryProcesses = new(StringComparer.OrdinalIgnoreCase)

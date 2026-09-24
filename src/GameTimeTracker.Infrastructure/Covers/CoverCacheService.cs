@@ -94,7 +94,7 @@ public class CoverCacheService
         }
         else
         {
-            // 封面缓存与数据库同处一个数据目录（默认 %LocalAppData%\GameTimeTracker，可自定义）
+            // 封面缓存与数据库同处一个数据目录（默认 %LocalAppData%\Sappfiler，可自定义）
             _cacheDirectory = GameTimeTracker.Core.Services.AppPaths.CoversDir;
         }
 

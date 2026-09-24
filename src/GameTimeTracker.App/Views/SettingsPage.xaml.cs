@@ -28,8 +28,8 @@ public sealed partial class SettingsPage : Page
         base.OnNavigatedTo(e);
 
         // 版本号来自 AssemblyInformationalVersion（由仓库根 Directory.Build.props 统一注入）。
-        // 形如 "0.2.21-alpha.2"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
-        VersionText.Text = $"GameTimeTracker v{GetAppVersion()}";
+        // 形如 "0.3.1-alpha.3"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
+        VersionText.Text = $"Sappfiler v{GetAppVersion()}";
 
         if (e.Parameter is (IDatabaseRepository repo, TrackerConfig config, INotionClient client))
         {

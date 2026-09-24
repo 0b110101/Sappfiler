@@ -16,7 +16,7 @@ public class Win32ProcessMonitor : IProcessMonitor
         "RuntimeBroker", "smartscreen", "ApplicationFrameHost", "TextInputHost", "conhost",
         "WmiPrvSE", "dllhost", "taskmgr", "cmd", "powershell", "pwsh", "devenv", "Code",
         "steam", "steamwebhelper", "EpicGamesLauncher", "UnrealCEFSubProcess", "RiotClientServices",
-        "dotnet", "msbuild", "GameTimeTracker.App", "GameTimeTracker"
+        "dotnet", "msbuild", "GameTimeTracker.App", "GameTimeTracker", "Sappfiler.App", "Sappfiler"
     };
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]

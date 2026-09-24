@@ -238,7 +238,7 @@ public class TrackerConfig
     public double FuzzyScoreGapThreshold { get; set; } = 15.0;
 
     /// <summary>
-    /// 默认数据库路径：默认在 %LocalAppData%\GameTimeTracker（不易随解压目录被误删），
+    /// 默认数据库路径：默认在 %LocalAppData%\Sappfiler（不易随解压目录被误删），
     /// 用户可在设置页更改存档位置（见 AppPaths）。环境变量 GAMETIME_DB_PATH 优先（多实例/测试用）。
     /// </summary>
     public static string DefaultDbPath

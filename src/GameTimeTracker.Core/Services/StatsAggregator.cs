@@ -16,7 +16,8 @@ public record PeriodRange(
     DateTime PrevStartDate,
     DateTime PrevEndDate,
     string DisplayTitle,
-    string PeriodComparisonLabel // "较上月" / "较上季度" / "较上年"
+    string PeriodComparisonLabel, // "较上月" / "较上季度" / "较上年"
+    StatsPeriodMode Mode = StatsPeriodMode.Month
 );
 
 public record GameStatItem(
@@ -126,7 +127,8 @@ public static class StatsAggregator
                 return new PeriodRange(
                     start, end, prevStart, prevEnd,
                     $"{date.Year}年{date.Month}月",
-                    "较上月"
+                    "较上月",
+                    StatsPeriodMode.Month
                 );
             }
             case StatsPeriodMode.Quarter:
@@ -139,7 +141,8 @@ public static class StatsAggregator
                 return new PeriodRange(
                     start, end, prevStart, prevEnd,
                     $"{date.Year}年第{q}季度",
-                    "较上季度"
+                    "较上季度",
+                    StatsPeriodMode.Quarter
                 );
             }
             case StatsPeriodMode.Year:
@@ -152,7 +155,8 @@ public static class StatsAggregator
                 return new PeriodRange(
                     start, end, prevStart, prevEnd,
                     $"{date.Year}年",
-                    "较上年"
+                    "较上年",
+                    StatsPeriodMode.Year
                 );
             }
         }
@@ -463,7 +467,7 @@ public static class StatsAggregator
             range, curSummaries, prevSummaries, prevPrevSummaries, allSummaries, earliestPlayDates, gameCoverMap);
 
         // 9. Playtime Tier Distribution & Donut Slices
-        var (playtimeTiers, playtimeTierSlices) = BuildPlaytimeTiers(curSummaries);
+        var (playtimeTiers, playtimeTierSlices) = BuildPlaytimeTiers(curSummaries, range.Mode);
 
         // 10. Game Activities (sorted by ActiveDays desc)
         var gameActivities = BuildGameActivities(curSummaries, gameCoverMap);
@@ -715,7 +719,8 @@ public static class StatsAggregator
     }
 
     private static (PlaytimeTierResult Result, IReadOnlyList<DonutSlice> Slices) BuildPlaytimeTiers(
-        IReadOnlyList<DailySummary> curSummaries)
+        IReadOnlyList<DailySummary> curSummaries,
+        StatsPeriodMode mode = StatsPeriodMode.Month)
     {
         var gamesGrouped = curSummaries
             .GroupBy(s => s.GameId)
@@ -725,14 +730,35 @@ public static class StatsAggregator
 
         int totalGames = gamesGrouped.Count;
 
-        var tierDefs = new (string Name, int Min, int Max, string Color)[]
+        var tierDefs = mode switch
         {
-            ("0-2h", 0, 120, TierGrey),
-            ("2-10h", 120, 600, TierGreen),
-            ("10-50h", 600, 3000, TierBlue),
-            ("50-100h", 3000, 6000, TierYellow),
-            ("100-500h", 6000, 30000, TierPurple),
-            ("500h+", 30000, int.MaxValue, TierOrange)
+            StatsPeriodMode.Quarter => new (string Name, int Min, int Max, string Color)[]
+            {
+                ("0-3h", 0, 180, TierGrey),
+                ("3-10h", 180, 600, TierGreen),
+                ("10-30h", 600, 1800, TierBlue),
+                ("30-60h", 1800, 3600, TierYellow),
+                ("60-100h", 3600, 6000, TierPurple),
+                ("100h+", 6000, int.MaxValue, TierOrange)
+            },
+            StatsPeriodMode.Year => new (string Name, int Min, int Max, string Color)[]
+            {
+                ("0-10h", 0, 600, TierGrey),
+                ("10-30h", 600, 1800, TierGreen),
+                ("30-60h", 1800, 3600, TierBlue),
+                ("60-120h", 3600, 7200, TierYellow),
+                ("120-240h", 7200, 14400, TierPurple),
+                ("240h+", 14400, int.MaxValue, TierOrange)
+            },
+            _ => new (string Name, int Min, int Max, string Color)[] // Month and default
+            {
+                ("0-2h", 0, 120, TierGrey),
+                ("2-5h", 120, 300, TierGreen),
+                ("5-15h", 300, 900, TierBlue),
+                ("15-30h", 900, 1800, TierYellow),
+                ("30-50h", 1800, 3000, TierPurple),
+                ("50h+", 3000, int.MaxValue, TierOrange)
+            }
         };
 
         var tierItems = new List<PlaytimeTierItem>();
