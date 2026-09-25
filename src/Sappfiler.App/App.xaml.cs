@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Threading;
+using GameTimeTracker.App.Services;
 using GameTimeTracker.Infrastructure;
 using Windows.ApplicationModel;
 using Windows.ApplicationModel.Activation;
@@ -100,6 +101,16 @@ public partial class App : Application
     /// <param name="args">Details about the launch request for the process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        // 启动时自动检查并迁移/校准开机自启项（清理旧版 GameTimeTracker 并对齐当前 Sappfiler 实际路径）
+        try
+        {
+            AutoStartHelper.SyncAutoStartRegistration();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[启动] 自动同步自启动配置异常: {ex.Message}");
+        }
+
         var cmdArgs = Environment.GetCommandLineArgs();
         var isAutoStart = cmdArgs.Any(a =>
             string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||

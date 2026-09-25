@@ -37,6 +37,9 @@ public sealed partial class SettingsPage : Page
             _config = config;
             _notionClient = client;
 
+            var autoStartDb = await _repo.GetSettingAsync("auto_start");
+            AutoStartHelper.SyncAutoStartRegistration(autoStartDb);
+
             _isInitializingAutoStart = true;
             AutoStartToggle.IsOn = AutoStartHelper.IsAutoStartEnabled();
             _isInitializingAutoStart = false;
