@@ -87,6 +87,7 @@ public class NotionClient : INotionClient
     private readonly HttpClient _httpClient;
     private string _token;
     private readonly int _maxRetries;
+    private string? _lastGameMasterTitlePropName;
 
     public NotionClient(string token, HttpClient? httpClient = null, int maxRetries = 3)
     {
@@ -230,7 +231,11 @@ public class NotionClient : INotionClient
                     var pageId = page.GetProperty("id").GetString() ?? "";
                     var props = page.GetProperty("properties");
 
-                    var name = ExtractTitle(props);
+                    var (name, titlePropName) = ExtractTitleWithPropertyName(props);
+                    if (!string.IsNullOrEmpty(titlePropName))
+                    {
+                        _lastGameMasterTitlePropName = titlePropName;
+                    }
                     var aliases = ExtractMultiSelectOrText(props, "别名", "Aliases");
                     var idents = ExtractMultiSelectOrText(props, "游戏标识", "Identifiers", "Steam ID");
                     var genres = ExtractMultiSelectOrText(props, "类型", "游戏类型", "Genre", "Genres", "分类");
@@ -497,16 +502,61 @@ public class NotionClient : INotionClient
         return res.TryGetProperty("id", out _);
     }
 
-    public async Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle)
+    public async Task<string> GetDatabaseTitlePropertyNameAsync(string cleanDbId)
+    {
+        if (!string.IsNullOrWhiteSpace(_lastGameMasterTitlePropName))
+        {
+            return _lastGameMasterTitlePropName;
+        }
+
+        try
+        {
+            using var req = CreateRequest(HttpMethod.Get, $"/databases/{cleanDbId}");
+            var root = await SendWithRetryAsync(req);
+            if (root.TryGetProperty("properties", out var propsObj))
+            {
+                foreach (var prop in propsObj.EnumerateObject())
+                {
+                    if (prop.Value.TryGetProperty("type", out var type) && type.GetString() == "title")
+                    {
+                        _lastGameMasterTitlePropName = prop.Name;
+                        return prop.Name;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[Notion] 查询总表数据库 schema 失败，使用默认属性名「游戏名称」: {ex.Message}");
+        }
+
+        return "游戏名称";
+    }
+
+    public async Task<string> CreateGameMasterPageAsync(
+        string gameDbId,
+        string gameTitle,
+        string? iconUrl = null,
+        string? coverUrl = null)
     {
         var cleanDbId = gameDbId.Replace("-", "");
+        var titleProp = await GetDatabaseTitlePropertyNameAsync(cleanDbId);
+
+        var properties = new Dictionary<string, object>
+        {
+            [titleProp] = new { title = new[] { new { text = new { content = gameTitle } } } }
+        };
+
         var payload = new
         {
             parent = new { database_id = cleanDbId },
-            properties = new Dictionary<string, object>
-            {
-                ["游戏名称"] = new { title = new[] { new { text = new { content = gameTitle } } } }
-            }
+            properties,
+            icon = string.IsNullOrWhiteSpace(iconUrl)
+                ? null
+                : new { type = "external", external = new { url = iconUrl } },
+            cover = string.IsNullOrWhiteSpace(coverUrl)
+                ? null
+                : new { type = "external", external = new { url = coverUrl } }
         };
 
         using var req = CreateRequest(HttpMethod.Post, "/pages", payload);
@@ -991,11 +1041,11 @@ public class NotionSyncService : INotionSyncService
                 // 现在让 game_catalog 成为总表的忠实快照，删除对账也依赖这份快照。
                 var removed = await _repo.DeleteCatalogItemsNotInAsync(items.Select(i => i.PageId));
                 SyncStatusChanged?.Invoke(this,
-                    removed > 0 ? $"游戏总表已更新（清理 {removed} 条已失效条目）" : "游戏总表已更新");
+                    removed > 0 ? $"游戏总表快照已同步（清理 {removed} 条已失效条目）" : $"游戏总表快照已是最新（共 {items.Count} 款）");
                 return;
             }
 
-            SyncStatusChanged?.Invoke(this, "游戏总表已更新");
+            SyncStatusChanged?.Invoke(this, "游戏总表快照已是最新");
         }
         catch (Exception ex)
         {
@@ -2025,12 +2075,26 @@ public class NotionSyncService : INotionSyncService
             throw new InvalidOperationException("Notion 未配置，请先在设置中填写 Notion Token 及游戏总表 ID");
         }
 
-        // 1. Create page in Notion Game Master Database
-        var newPageId = await _client.CreateGameMasterPageAsync(_config.GameDatabaseId, gameName);
+        var game = await _repo.GetGameByIdAsync(gameId);
+        string? iconUrl = null;
+        string? coverUrl = null;
+
+        if (game != null && string.Equals(game.Platform, "steam", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(game.PlatformId) && game.PlatformId.All(char.IsDigit))
+        {
+            iconUrl = $"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.PlatformId}/header.jpg";
+            coverUrl = $"https://cdn.cloudflare.steamstatic.com/steam/apps/{game.PlatformId}/library_hero.jpg";
+        }
+
+        // 1. Create page in Notion Game Master Database with title, icon, and cover
+        var newPageId = await _client.CreateGameMasterPageAsync(
+            _config.GameDatabaseId, gameName, iconUrl, coverUrl);
         if (string.IsNullOrEmpty(newPageId))
         {
             throw new Exception("Notion 未返回新建页面的 ID");
         }
+
+        AppLog.Info($"[总表新增] 已在 Notion 游戏总表成功新建条目：「{gameName}」（页面 ID: {newPageId}）");
 
         // 2. Cache new game in local catalog
         await _repo.UpsertCatalogItemsAsync(new[]
@@ -2039,12 +2103,15 @@ public class NotionSyncService : INotionSyncService
             {
                 PageId = newPageId,
                 Name = gameName,
+                IconUrl = iconUrl,
+                CoverUrl = coverUrl,
                 LastSyncedAt = DateTime.UtcNow
             }
         });
 
         // 3. Link and backfill all daily records for this game
         await LinkGameRelationAsync(gameId, newPageId);
+        SyncStatusChanged?.Invoke(this, $"已在游戏总表新建「{gameName}」");
         return newPageId;
     }
 

@@ -135,7 +135,7 @@ public interface INotionClient
     Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态");
     /// <summary>更新每日记录的「绑定状态」属性（已绑定 / 未绑定），绝不修改时长、日期或标题。</summary>
     Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status);
-    Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle);
+    Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle, string? iconUrl = null, string? coverUrl = null);
     /// <summary>把页面移入 Notion 回收站（archived）。这是 Notion API 唯一的"删除"方式，30 天内可恢复。</summary>
     Task<bool> ArchivePageAsync(string pageId);
 
