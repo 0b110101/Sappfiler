@@ -399,8 +399,11 @@ public partial class HomeViewModel : ObservableObject
                 }
             }
 
-            // 注意：这里不再为 CurrentGameHeroBackgroundUrl 做任何本地图回退。
-            // 背景图只认 Notion 总表的 cover，没有就保持原样（见 RefreshHeroCardAsync 的说明）。
+            if (CurrentGameHeroBackgroundUrl == null && _heroArtworkTargetGameId != active.GameId && _artworkService != null && _activeGamePlatform != null && _activeGamePlatformId != null)
+            {
+                var identity = new GameIdentity(_activeGamePlatform, _activeGamePlatformId, "", "", _activeGameExePath ?? "", null, active.GameId);
+                _ = LoadHeroArtworkAsync(identity, active.GameId);
+            }
         }
     }
 
@@ -666,6 +669,7 @@ public partial class HomeViewModel : ObservableObject
         GameRecord? activeGame = null;
         string? activeCover = null;
         string? activeHeroBg = null;
+        GameIdentity? identity = null;
 
         if (active != null)
         {
@@ -685,6 +689,31 @@ public partial class HomeViewModel : ObservableObject
                 if (File.Exists(localCover) && new FileInfo(localCover).Length > 0)
                 {
                     activeCover = localCover;
+                }
+
+                if (_artworkService != null)
+                {
+                    identity = new GameIdentity(
+                        activeGame.Platform,
+                        activeGame.PlatformId,
+                        activeGame.Name,
+                        activeGame.Executable,
+                        activeGame.ExecutablePath,
+                        activeGame.NotionPageId,
+                        activeGame.Id
+                    );
+
+                    using var fastCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+                    try
+                    {
+                        var art = await _artworkService.ResolveArtworkAsync(identity, fastCts.Token);
+                        if (art != null && !string.IsNullOrEmpty(art.FilePathOrUrl))
+                        {
+                            activeHeroBg = art.FilePathOrUrl;
+                            _heroArtworkTargetGameId = activeGame.Id;
+                        }
+                    }
+                    catch { }
                 }
 
                 if (activeHeroBg == null && !string.IsNullOrEmpty(activeGame.NotionPageId))
@@ -720,11 +749,6 @@ public partial class HomeViewModel : ObservableObject
                     }
                 }
 
-                // 【设计约定】环境背景图只认 Notion 总表的 cover：
-                // 总表有 cover 就用它的 URL，没有就保持原样、不铺任何图。
-                // 因此这里刻意不再回退到 games.cover_url / 本地 SplashScreenImage / 本地图标封面
-                // —— 用本地图标撑满整块背景会变成一团模糊色块，与设计不符。
-                // 背景缺失时由 XAML 上的 Visibility 绑定自动隐藏。
                 activeCover ??= activeHeroBg;
             }
         }
@@ -769,25 +793,16 @@ public partial class HomeViewModel : ObservableObject
                 CurrentGameCoverPath = activeCover;
                 CurrentGameStoreUrl = BuildSteamStoreUrl(activeGame.Platform, activeGame.PlatformId);
 
-                if (_artworkService != null)
+                if (_artworkService != null && identity != null)
                 {
-                    var identity = new GameIdentity(
-                        activeGame.Platform,
-                        activeGame.PlatformId,
-                        activeGame.Name,
-                        activeGame.Executable,
-                        activeGame.ExecutablePath,
-                        activeGame.NotionPageId,
-                        activeGame.Id
-                    );
-
-                    if (_activeGameId != activeGame.Id)
+                    if (activeHeroBg != null)
+                    {
+                        CurrentGameHeroBackgroundUrl = activeHeroBg;
+                        _heroArtworkTargetGameId = activeGame.Id;
+                    }
+                    else if (_heroArtworkTargetGameId != activeGame.Id)
                     {
                         CurrentGameHeroBackgroundUrl = null;
-                        _ = LoadHeroArtworkAsync(identity, activeGame.Id);
-                    }
-                    else if (CurrentGameHeroBackgroundUrl == null && _heroArtworkTargetGameId != activeGame.Id)
-                    {
                         _ = LoadHeroArtworkAsync(identity, activeGame.Id);
                     }
                 }
