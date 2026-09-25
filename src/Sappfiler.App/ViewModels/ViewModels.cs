@@ -148,7 +148,7 @@ public partial class HomeViewModel : ObservableObject
 
     // Notion Status
     [ObservableProperty] public partial string NotionStatusText { get; set; } = "未绑定 Notion · 本地模式";
-    [ObservableProperty] public partial string NotionLastSyncText { get; set; } = "在设置页填入 Token 与数据库 ID 后启用同步";
+    [ObservableProperty] public partial string NotionLastSyncText { get; set; } = "";
     [ObservableProperty] public partial string NotionStatusBrushKey { get; set; } = "TextPrimaryBrush";
 
     public Microsoft.UI.Xaml.Media.Brush NotionStatusBrush
@@ -565,7 +565,7 @@ public partial class HomeViewModel : ObservableObject
             _dispatcherQueue.TryEnqueue(() =>
             {
                 NotionStatusText = "未绑定 Notion · 本地模式";
-                NotionLastSyncText = "在设置页填入 Token 与数据库 ID 后启用同步";
+                NotionLastSyncText = "";
                 UpdateNotionStatusBrush();
             });
         }
@@ -962,7 +962,7 @@ public partial class HomeViewModel : ObservableObject
             _dispatcherQueue.TryEnqueue(() =>
             {
                 NotionStatusText = "同步进行中…";
-                NotionLastSyncText = "上一轮同步尚未完成，请稍候";
+                NotionLastSyncText = "进行中";
             });
             return;
         }
@@ -973,7 +973,7 @@ public partial class HomeViewModel : ObservableObject
             _dispatcherQueue.TryEnqueue(() =>
             {
                 NotionStatusText = "未绑定 Notion · 本地模式";
-                NotionLastSyncText = "在设置页填入 Token 与数据库 ID 后启用同步";
+                NotionLastSyncText = "";
             });
             await RefreshAllDataAsync();
             return;
@@ -1007,8 +1007,8 @@ public partial class HomeViewModel : ObservableObject
         {
             _dispatcherQueue.TryEnqueue(() =>
             {
-                NotionStatusText = "同步异常";
-                NotionLastSyncText = ex.Message;
+                NotionStatusText = string.IsNullOrWhiteSpace(ex.Message) ? "同步失败" : ex.Message;
+                NotionLastSyncText = "同步异常";
             });
         }
         finally

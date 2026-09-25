@@ -368,21 +368,42 @@
                         Background="{ThemeResource CardBackgroundBrush}"
                         Padding="16,14">
                     <StackPanel Spacing="10">
-                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                            <Viewbox Width="22" Height="22" VerticalAlignment="Center">
-                                <Canvas Width="24" Height="24">
-                                    <Path Stroke="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                          Data="M 11 18.004 h -4.343 c -2.572 -0.004 -4.657 -2.011 -4.657 -4.487 c 0 -2.475 2.085 -4.482 4.657 -4.482 c 0.393 -1.762 1.794 -3.2 3.675 -3.773 c 1.88 -0.572 3.956 -0.193 5.444 1 c 1.488 1.19 2.162 3.007 1.77 4.769 h 0.99 c 1.388 0 2.585 0.82 3.138 2.007 M 15 19 l 2 2 l 4 -4" />
-                                </Canvas>
-                            </Viewbox>
-                            <TextBlock Text="同步状态" FontSize="15" FontWeight="Bold" Foreground="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" VerticalAlignment="Center" />
-                        </StackPanel>
+                        <!-- Header: Title on Left, Last Sync Timestamp on Right -->
+                        <Grid VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Left">
+                                <Viewbox Width="22" Height="22" VerticalAlignment="Center">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Stroke="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                              Data="M 11 18.004 h -4.343 c -2.572 -0.004 -4.657 -2.011 -4.657 -4.487 c 0 -2.475 2.085 -4.482 4.657 -4.482 c 0.393 -1.762 1.794 -3.2 3.675 -3.773 c 1.88 -0.572 3.956 -0.193 5.444 1 c 1.488 1.19 2.162 3.007 1.77 4.769 h 0.99 c 1.388 0 2.585 0.82 3.138 2.007 M 15 19 l 2 2 l 4 -4" />
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="同步状态" FontSize="15" FontWeight="Bold" Foreground="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" VerticalAlignment="Center" />
+                            </StackPanel>
 
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Ellipse Width="8" Height="8" Fill="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" VerticalAlignment="Center" />
-                            <TextBlock Text="{x:Bind ViewModel.NotionStatusText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
-                            <TextBlock Text="{x:Bind ViewModel.NotionLastSyncText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
-                        </StackPanel>
+                            <TextBlock Text="{x:Bind ViewModel.NotionLastSyncText, Mode=OneWay}"
+                                       FontSize="12"
+                                       Foreground="{ThemeResource TextSecondaryBrush}"
+                                       VerticalAlignment="Center"
+                                       HorizontalAlignment="Right"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxWidth="150" />
+                        </Grid>
+
+                        <!-- Status detail row: Gets full width of card without crowding -->
+                        <Grid ColumnSpacing="8" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Ellipse Grid.Column="0" Width="8" Height="8" Fill="{x:Bind ViewModel.NotionStatusBrush, Mode=OneWay}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.NotionStatusText, Mode=OneWay}"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextPrimaryBrush}"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTipService.ToolTip="{x:Bind ViewModel.NotionStatusText, Mode=OneWay}" />
+                        </Grid>
 
                         <Button Command="{x:Bind ViewModel.SyncNowCommand}"
                                 HorizontalAlignment="Stretch"
