@@ -40,19 +40,25 @@
                     <!-- Period Tabs (Month / Quarter / Year) -->
                     <Border CornerRadius="8" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="3">
                         <StackPanel Orientation="Horizontal" Spacing="2">
-                            <Button Command="{x:Bind ViewModel.SetMonthModeCommand}" CornerRadius="6" Padding="12,5" BorderThickness="0"
+                            <Button Click="OnMonthButtonClick" DoubleTapped="OnMonthButtonDoubleTapped"
+                                    CornerRadius="6" Padding="12,5" BorderThickness="0"
                                     Background="{x:Bind ViewModel.IsMonthSelected, Mode=OneWay, Converter={StaticResource BoolToAccentBrushConverter}}"
-                                    Foreground="{x:Bind ViewModel.IsMonthSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}">
+                                    Foreground="{x:Bind ViewModel.IsMonthSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}"
+                                    ToolTipService.ToolTip="单击切换月度，双击回到当前月份">
                                 <TextBlock Text="月度" FontSize="12" FontWeight="SemiBold" />
                             </Button>
-                            <Button Command="{x:Bind ViewModel.SetQuarterModeCommand}" CornerRadius="6" Padding="12,5" BorderThickness="0"
+                            <Button Click="OnQuarterButtonClick" DoubleTapped="OnQuarterButtonDoubleTapped"
+                                    CornerRadius="6" Padding="12,5" BorderThickness="0"
                                     Background="{x:Bind ViewModel.IsQuarterSelected, Mode=OneWay, Converter={StaticResource BoolToAccentBrushConverter}}"
-                                    Foreground="{x:Bind ViewModel.IsQuarterSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}">
+                                    Foreground="{x:Bind ViewModel.IsQuarterSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}"
+                                    ToolTipService.ToolTip="单击切换季度，双击回到当前季度">
                                 <TextBlock Text="季度" FontSize="12" FontWeight="SemiBold" />
                             </Button>
-                            <Button Command="{x:Bind ViewModel.SetYearModeCommand}" CornerRadius="6" Padding="12,5" BorderThickness="0"
+                            <Button Click="OnYearButtonClick" DoubleTapped="OnYearButtonDoubleTapped"
+                                    CornerRadius="6" Padding="12,5" BorderThickness="0"
                                     Background="{x:Bind ViewModel.IsYearSelected, Mode=OneWay, Converter={StaticResource BoolToAccentBrushConverter}}"
-                                    Foreground="{x:Bind ViewModel.IsYearSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}">
+                                    Foreground="{x:Bind ViewModel.IsYearSelected, Mode=OneWay, Converter={StaticResource BoolToContrastTextBrushConverter}}"
+                                    ToolTipService.ToolTip="单击切换年度，双击回到当前年份">
                                 <TextBlock Text="年度" FontSize="12" FontWeight="SemiBold" />
                             </Button>
                         </StackPanel>
@@ -69,7 +75,8 @@
                                     </Canvas>
                                 </Viewbox>
                             </Button>
-                            <Grid Width="104" VerticalAlignment="Center" Margin="2,0">
+                            <Grid Width="104" VerticalAlignment="Center" Margin="2,0" Background="Transparent"
+                                  DoubleTapped="OnPeriodTitleDoubleTapped" ToolTipService.ToolTip="双击回到当前周期">
                                 <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
                                     <Viewbox Width="14" Height="14" VerticalAlignment="Center">
                                         <Canvas Width="24" Height="24">

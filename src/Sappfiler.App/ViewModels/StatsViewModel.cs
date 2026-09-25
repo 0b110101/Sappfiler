@@ -278,6 +278,46 @@ public partial class StatsViewModel : ObservableObject
     }
 
     [RelayCommand]
+    public async Task ResetToCurrentMonthAsync()
+    {
+        PeriodMode = StatsPeriodMode.Month;
+        IsMonthSelected = true;
+        IsQuarterSelected = false;
+        IsYearSelected = false;
+        CurrentPeriodDate = DateTime.Today;
+        await RefreshDataAsync();
+    }
+
+    [RelayCommand]
+    public async Task ResetToCurrentQuarterAsync()
+    {
+        PeriodMode = StatsPeriodMode.Quarter;
+        IsMonthSelected = false;
+        IsQuarterSelected = true;
+        IsYearSelected = false;
+        CurrentPeriodDate = DateTime.Today;
+        await RefreshDataAsync();
+    }
+
+    [RelayCommand]
+    public async Task ResetToCurrentYearAsync()
+    {
+        PeriodMode = StatsPeriodMode.Year;
+        IsMonthSelected = false;
+        IsQuarterSelected = false;
+        IsYearSelected = true;
+        CurrentPeriodDate = DateTime.Today;
+        await RefreshDataAsync();
+    }
+
+    [RelayCommand]
+    public async Task ResetToCurrentPeriodAsync()
+    {
+        CurrentPeriodDate = DateTime.Today;
+        await RefreshDataAsync();
+    }
+
+    [RelayCommand]
     public async Task PrevPeriodAsync()
     {
         CurrentPeriodDate = PeriodMode switch
@@ -594,7 +634,7 @@ public partial class StatsViewModel : ObservableObject
         GameActivities.Clear();
         if (result.GameActivities != null)
         {
-            foreach (var act in result.GameActivities.Take(6))
+            foreach (var act in result.GameActivities.Take(5))
             {
                 GameActivities.Add(act);
             }
