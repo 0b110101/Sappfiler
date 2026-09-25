@@ -53,6 +53,7 @@ public static class AppPaths
     }
 
     public static string CoversDir => Path.Combine(DataDir, "cache", "covers");
+    public static string ArtworkCacheDir => Path.Combine(DataDir, "cache", "artwork");
 
     /// <summary>当前生效的数据目录（引导文件 → 默认）。</summary>
     public static string DataDir { get; } = ResolveDataDir(ReadBootstrapFile());

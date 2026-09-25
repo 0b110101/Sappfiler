@@ -5,7 +5,9 @@ public record GameIdentity(
     string PlatformId,
     string Name,
     string Executable,
-    string ExecutablePath
+    string ExecutablePath,
+    string? NotionPageId = null,
+    int? GameId = null
 );
 
 public class GameRecord : System.ComponentModel.INotifyPropertyChanged

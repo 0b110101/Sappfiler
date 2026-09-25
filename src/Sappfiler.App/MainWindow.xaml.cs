@@ -7,6 +7,7 @@ using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure;
+using GameTimeTracker.Infrastructure.Artwork;
 using GameTimeTracker.Infrastructure.Covers;
 using GameTimeTracker.Infrastructure.Database;
 using GameTimeTracker.Infrastructure.Notion;
@@ -30,6 +31,7 @@ public sealed partial class MainWindow : Window
     private readonly GameLibraryManager _gameLibrary;
     private readonly GameSessionManager _sessionManager;
     private readonly CoverCacheService _coverCache;
+    private readonly IGameArtworkService _artworkService;
     private readonly INotionClient _notionClient;
     private readonly INotionSyncService _syncService;
     private readonly TrackerConfig _config;
@@ -200,8 +202,23 @@ public sealed partial class MainWindow : Window
         _notionClient = new NotionClient(_config.NotionToken);
         _syncService = new NotionSyncService(_repo, _notionClient, _config);
 
+        var artworkProviders = new IGameArtworkProvider[]
+        {
+            new NotionArtworkProvider(_repo),
+            new SteamArtworkProvider(),
+            new EpicArtworkProvider(),
+            new XboxArtworkProvider(),
+            new EaArtworkProvider(),
+            new UbisoftArtworkProvider(),
+            new LocalGameArtworkProvider(),
+            new SteamRemoteArtworkProvider(),
+            new DefaultArtworkProvider()
+        };
+        _artworkService = new GameArtworkService(artworkProviders);
+        _ = _artworkService.CleanExpiredCacheAsync(300L * 1024 * 1024);
+
         // 3. Create ViewModel
-        _homeViewModel = new HomeViewModel(_repo, _sessionManager, _syncService, _coverCache);
+        _homeViewModel = new HomeViewModel(_repo, _sessionManager, _syncService, _coverCache, _artworkService);
         _homeViewModel.RequestNavigate = (target) =>
         {
             DispatcherQueue.TryEnqueue(() => NavigateTo(target));

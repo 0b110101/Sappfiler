@@ -61,7 +61,9 @@ public class StringToImageSourceConverter : IValueConverter
         {
             try
             {
-                return new BitmapImage(uri);
+                var bmp = new BitmapImage(uri);
+                bmp.DecodePixelWidth = 920;
+                return bmp;
             }
             catch
             {
@@ -132,6 +134,7 @@ public class StringToImageSourceConverter : IValueConverter
             memStream.Seek(0);
 
             var bmp = new BitmapImage();
+            bmp.DecodePixelWidth = 920;
             bmp.SetSource(memStream);
 
             lock (LocalImageCache)

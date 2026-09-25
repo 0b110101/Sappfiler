@@ -81,8 +81,11 @@ public partial class HomeViewModel : ObservableObject
     private readonly GameSessionManager _sessionManager;
     private readonly INotionSyncService _syncService;
     private readonly CoverCacheService _coverCache;
+    private readonly IGameArtworkService? _artworkService;
     private readonly IGameMatcher _matcher;
     private readonly DispatcherQueue _dispatcherQueue;
+    private CancellationTokenSource? _heroArtworkCts;
+    private int? _heroArtworkTargetGameId;
 
     // Current Game State (Hero Card)
     [ObservableProperty] public partial bool IsGameRunning { get; set; }
@@ -230,12 +233,14 @@ public partial class HomeViewModel : ObservableObject
         IDatabaseRepository repo,
         GameSessionManager sessionManager,
         INotionSyncService syncService,
-        CoverCacheService coverCache)
+        CoverCacheService coverCache,
+        IGameArtworkService? artworkService = null)
     {
         _repo = repo;
         _sessionManager = sessionManager;
         _syncService = syncService;
         _coverCache = coverCache;
+        _artworkService = artworkService;
         _matcher = new GameMatcher();
         _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
 
@@ -762,8 +767,34 @@ public partial class HomeViewModel : ObservableObject
                 CurrentGameTimer = DailyAggregator.FormatSeconds(_currentElapsedSeconds);
 
                 CurrentGameCoverPath = activeCover;
-                CurrentGameHeroBackgroundUrl = activeHeroBg;
                 CurrentGameStoreUrl = BuildSteamStoreUrl(activeGame.Platform, activeGame.PlatformId);
+
+                if (_artworkService != null)
+                {
+                    var identity = new GameIdentity(
+                        activeGame.Platform,
+                        activeGame.PlatformId,
+                        activeGame.Name,
+                        activeGame.Executable,
+                        activeGame.ExecutablePath,
+                        activeGame.NotionPageId,
+                        activeGame.Id
+                    );
+
+                    if (_activeGameId != activeGame.Id)
+                    {
+                        CurrentGameHeroBackgroundUrl = null;
+                        _ = LoadHeroArtworkAsync(identity, activeGame.Id);
+                    }
+                    else if (CurrentGameHeroBackgroundUrl == null && _heroArtworkTargetGameId != activeGame.Id)
+                    {
+                        _ = LoadHeroArtworkAsync(identity, activeGame.Id);
+                    }
+                }
+                else
+                {
+                    CurrentGameHeroBackgroundUrl = activeHeroBg;
+                }
 
                 if (CurrentGameCoverPath == null && !string.IsNullOrEmpty(activeGame.ExecutablePath))
                 {
@@ -777,6 +808,9 @@ public partial class HomeViewModel : ObservableObject
             }
             else
             {
+                _heroArtworkCts?.Cancel();
+                _heroArtworkTargetGameId = null;
+
                 _activeGameId = null;
                 _currentElapsedSeconds = 0;
                 _activeGamePlatform = null;
@@ -808,6 +842,36 @@ public partial class HomeViewModel : ObservableObject
         else
         {
             _dispatcherQueue.TryEnqueue(ApplyToUi);
+        }
+    }
+
+    private async Task LoadHeroArtworkAsync(GameIdentity identity, int targetGameId)
+    {
+        if (_artworkService == null) return;
+
+        _heroArtworkCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _heroArtworkCts = cts;
+        _heroArtworkTargetGameId = targetGameId;
+
+        try
+        {
+            var artwork = await _artworkService.ResolveArtworkAsync(identity, cts.Token);
+            if (!cts.IsCancellationRequested && _heroArtworkTargetGameId == targetGameId)
+            {
+                _dispatcherQueue.TryEnqueue(() =>
+                {
+                    if (_activeGameId == targetGameId && !cts.IsCancellationRequested)
+                    {
+                        CurrentGameHeroBackgroundUrl = artwork?.FilePathOrUrl;
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Artwork] Error resolving artwork: {ex.Message}");
         }
     }
 
