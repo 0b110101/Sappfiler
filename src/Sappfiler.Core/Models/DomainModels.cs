@@ -147,6 +147,7 @@ public class NotionDailyRecordItem
     /// 用裸名比会把每条记录都误判成"需要更新"。
     /// </summary>
     public string? RawTitle { get; set; }
+    public string TitlePropertyName { get; set; } = "游戏动态";
 
     public string Date { get; set; } = string.Empty;
     public int DurationMinutes { get; set; }

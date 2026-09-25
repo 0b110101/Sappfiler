@@ -79,6 +79,24 @@
                 </StackPanel>
             </Border>
 
+            <!-- Notion Title Normalization Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Notion 历史数据格式规范化" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="一键扫描 Notion 每日时长表中的历史记录，将记录标题统一规范化为「游戏名 · 时长 h」标准格式，并对齐总表游戏名与页面图标。安全承诺：仅更新标题与图标，绝不修改时长数值或日期，未关联总表的记录安全跳过。"
+                               FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="NormalizeTitlesBtn" Click="OnNormalizeTitlesClicked" Content="开始格式规范化" CornerRadius="8" Padding="16,8" />
+                        <ProgressBar x:Name="NormalizeProgressBar" Width="200" VerticalAlignment="Center" Visibility="Collapsed" />
+                    </StackPanel>
+                    <TextBlock x:Name="NormalizeStatusText" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" Visibility="Collapsed" />
+                </StackPanel>
+            </Border>
+
             <!-- Daily Cutoff Card -->
             <Border CornerRadius="14"
                     BorderBrush="{ThemeResource CardBorderBrush}"

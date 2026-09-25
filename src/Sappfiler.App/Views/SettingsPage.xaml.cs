@@ -14,6 +14,7 @@ public sealed partial class SettingsPage : Page
     private IDatabaseRepository? _repo;
     private TrackerConfig? _config;
     private INotionClient? _notionClient;
+    private INotionSyncService? _syncService;
     private bool _isInitializingAutoStart;
     private bool _isInitializingTheme;
     private bool _isInitializingCutoff;
@@ -31,11 +32,22 @@ public sealed partial class SettingsPage : Page
         // 形如 "0.3.1-alpha.3"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
         VersionText.Text = $"Sappfiler v{GetAppVersion()}";
 
-        if (e.Parameter is (IDatabaseRepository repo, TrackerConfig config, INotionClient client))
+        if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient, INotionSyncService> t4)
         {
-            _repo = repo;
-            _config = config;
-            _notionClient = client;
+            _repo = t4.Item1;
+            _config = t4.Item2;
+            _notionClient = t4.Item3;
+            _syncService = t4.Item4;
+        }
+        else if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient> t3)
+        {
+            _repo = t3.Item1;
+            _config = t3.Item2;
+            _notionClient = t3.Item3;
+        }
+
+        if (_repo != null && _config != null)
+        {
 
             var autoStartDb = await _repo.GetSettingAsync("auto_start");
             AutoStartHelper.SyncAutoStartRegistration(autoStartDb);
@@ -334,6 +346,76 @@ public sealed partial class SettingsPage : Page
         StatusInfoBar.Title = "已恢复默认位置";
         StatusInfoBar.Message = $"数据将使用 {AppPaths.DefaultDataDir}。完全退出程序后重新启动生效。";
         StatusInfoBar.IsOpen = true;
+    }
+
+    private async void OnNormalizeTitlesClicked(object sender, RoutedEventArgs e)
+    {
+        if (_syncService == null || _config == null || !_config.IsNotionConfigured)
+        {
+            ShowWarning("Notion 未配置", "请先在上方正确配置 Notion Token 及两个数据库 ID 并保存。");
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "规范化 Notion 历史记录标题",
+            Content = "本操作将扫描 Notion 每日时长表中的所有历史记录，统一将标题格式规范化为「游戏名 · 时长 h」标准格式，并对齐总表游戏名称与页面图标。\n\n安全保障承诺：\n· 绝不修改或重写「时长」与「日期」数值属性\n· 绝不删除或归档任何页面\n· 未关联总表的游戏条目将 100% 保持原样跳过\n\n是否立即开始执行？",
+            PrimaryButtonText = "确认开始",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = this.XamlRoot
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        NormalizeTitlesBtn.IsEnabled = false;
+        NormalizeTitlesBtn.Content = "正在规范化...";
+        NormalizeProgressBar.Visibility = Visibility.Visible;
+        NormalizeProgressBar.IsIndeterminate = false;
+        NormalizeProgressBar.Minimum = 0;
+        NormalizeProgressBar.Maximum = 100;
+        NormalizeProgressBar.Value = 0;
+        NormalizeStatusText.Visibility = Visibility.Visible;
+        NormalizeStatusText.Text = "正在扫描 Notion 远端记录...";
+
+        try
+        {
+            var progress = new Progress<(int current, int total, string currentItem)>(info =>
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (info.total > 0)
+                    {
+                        NormalizeProgressBar.Maximum = info.total;
+                        NormalizeProgressBar.Value = info.current;
+                    }
+                    NormalizeStatusText.Text = $"[{info.current}/{info.total}] {info.currentItem}";
+                });
+            });
+
+            var normResult = await _syncService.NormalizeHistoricalDailyTitlesAsync(progress);
+
+            NormalizeStatusText.Text = normResult.SummaryMessage;
+            StatusInfoBar.Severity = normResult.ErrorCount > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
+            StatusInfoBar.Title = "历史格式规范化";
+            StatusInfoBar.Message = normResult.SummaryMessage;
+            StatusInfoBar.IsOpen = true;
+        }
+        catch (Exception ex)
+        {
+            NormalizeStatusText.Text = $"执行失败: {ex.Message}";
+            ShowWarning("格式规范化异常", ex.Message);
+        }
+        finally
+        {
+            NormalizeTitlesBtn.IsEnabled = true;
+            NormalizeTitlesBtn.Content = "开始格式规范化";
+            NormalizeProgressBar.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void ShowWarning(string title, string message)

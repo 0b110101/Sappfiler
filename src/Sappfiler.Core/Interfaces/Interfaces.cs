@@ -132,7 +132,7 @@ public interface INotionClient
     /// 不允许改"数值"。要改数值只能走 <c>UpdateDailyRecordAsync</c>（推送路径），
     /// 那条路径写的是本地确实领先的时长。
     /// </remarks>
-    Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null);
+    Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态");
     /// <summary>更新每日记录的「绑定状态」属性（已绑定 / 未绑定），绝不修改时长、日期或标题。</summary>
     Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status);
     Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle);
@@ -148,6 +148,13 @@ public interface INotionClient
     /// </summary>
     Task<bool> IsPageDeletedAsync(string pageId);
 }
+
+public record DailyTitleNormalizationResult(
+    int TotalProcessed,
+    int UpdatedCount,
+    int SkippedCount,
+    int ErrorCount,
+    string SummaryMessage);
 
 public interface INotionSyncService
 {
@@ -169,6 +176,14 @@ public interface INotionSyncService
     Task RefreshGameCatalogCacheAsync();
     Task LinkGameRelationAsync(int gameId, string notionPageId);
     Task<string> CreateGameMasterAndLinkAsync(int gameId, string gameName);
+
+    /// <summary>
+    /// 手工触发：一键扫描远端每日时长表中的历史记录，将记录标题规范化为「游戏名 · 时长 h」标准格式，
+    /// 并对齐总表游戏名与页面图标。绝不修改时长数值与日期，未关联总表的记录安全跳过。
+    /// </summary>
+    Task<DailyTitleNormalizationResult> NormalizeHistoricalDailyTitlesAsync(
+        IProgress<(int current, int total, string currentItem)>? progress = null,
+        CancellationToken ct = default);
 
     // ---- 双向删除 ----
     /// <summary>删除一个游戏：本地连记录一起删，并把该游戏在 Notion 每日表的记录（可选：总表条目）一并归档。</summary>

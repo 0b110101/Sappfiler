@@ -870,7 +870,7 @@ public sealed partial class MainWindow : Window
             case "Settings":
                 if (_settingsPage == null)
                 {
-                    ContentFrame.Navigate(typeof(SettingsPage), (_repo, _config, _notionClient));
+                    ContentFrame.Navigate(typeof(SettingsPage), (_repo, _config, _notionClient, _syncService));
                     _settingsPage = ContentFrame.Content as SettingsPage;
                 }
                 else

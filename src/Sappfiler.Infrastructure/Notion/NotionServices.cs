@@ -35,7 +35,7 @@ internal static class DailyRecordTitle
     /// "三国志11" / "F1 2023" / "Half-Life 2" 这类以数字结尾的真名不会被误剥。
     /// </summary>
     internal static readonly System.Text.RegularExpressions.Regex SuffixRegex =
-        new(@"\s*(?:(?:[·|]\s*)?\d+(?:\.\d+)?\s*(?:min|h)|\(\s*\d+\s*分\s*\))\s*$",
+        new(@"\s*(?:(?:[·|\-:]\s*)?\d+(?:\.\d+)?\s*(?:min|mins|h|hr|hrs|小时|分钟|分)|\(\s*\d+(?:\.\d+)?\s*(?:分|分钟|h|小时)\s*\))\s*$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase |
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
@@ -288,7 +288,7 @@ public class NotionClient : INotionClient
                     var pageId = page.GetProperty("id").GetString() ?? "";
                     var props = page.GetProperty("properties");
 
-                    var rawTitle = ExtractTitle(props);
+                    var (rawTitle, titlePropName) = ExtractTitleWithPropertyName(props);
                     // 标题形如「游戏名 · 42 min」（旧行是「游戏名 (42分)」），只剔除末尾的时长后缀。
                     var title = DailyRecordTitle.StripSuffix(rawTitle);
                     if (string.IsNullOrWhiteSpace(title))
@@ -318,6 +318,7 @@ public class NotionClient : INotionClient
                             PageId = pageId,
                             GameTitle = title,
                             RawTitle = rawTitle.Trim(),
+                            TitlePropertyName = string.IsNullOrWhiteSpace(titlePropName) ? "游戏动态" : titlePropName,
                             Date = date,
                             DurationMinutes = duration,
                             DurationUnitIsMinutes = durationUnit == DurationUnit.Minutes,
@@ -475,14 +476,16 @@ public class NotionClient : INotionClient
     ///    不允许改"数值"。要改数值只能走 <see cref="UpdateDailyRecordAsync"/>（推送路径），
     ///    那条路径写的是本地确实领先的时长。
     /// </remarks>
-    public async Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null)
+    public async Task<bool> UpdateDailyRecordTitleAsync(
+        string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态")
     {
         var cleanPageId = pageId.Replace("-", "");
+        var propName = string.IsNullOrWhiteSpace(titlePropertyName) ? "游戏动态" : titlePropertyName;
 
-        // 只带「游戏动态」一个属性 —— PATCH 只改传进去的属性，不传的保持原样。
+        // 只带指定 title 属性 —— PATCH 只改传进去的属性，不传的保持原样。
         var properties = new Dictionary<string, object>
         {
-            ["游戏动态"] = new { title = new[] { new { text = new { content = title } } } }
+            [propName] = new { title = new[] { new { text = new { content = title } } } }
         };
 
         var payload = string.IsNullOrWhiteSpace(iconUrl)
@@ -572,7 +575,7 @@ public class NotionClient : INotionClient
         }
     }
 
-    private static string ExtractTitle(JsonElement props)
+    private static (string Title, string PropertyName) ExtractTitleWithPropertyName(JsonElement props)
     {
         foreach (var prop in props.EnumerateObject())
         {
@@ -588,12 +591,15 @@ public class NotionClient : INotionClient
                             sb.Append(pt.GetString());
                         }
                     }
-                    return sb.ToString().Trim();
+                    return (sb.ToString().Trim(), prop.Name);
                 }
+                return (string.Empty, prop.Name);
             }
         }
-        return string.Empty;
+        return (string.Empty, "游戏动态");
     }
+
+    private static string ExtractTitle(JsonElement props) => ExtractTitleWithPropertyName(props).Title;
 
     private static List<string> ExtractMultiSelectOrText(JsonElement props, params string[] propertyNames)
     {
@@ -782,19 +788,41 @@ public class NotionClient : INotionClient
     /// </remarks>
     private static int RawDurationToMinutes(double? raw, string? title)
     {
-        if (raw is not { } value || value <= 0) return 0;
-
-        switch (DetectDurationUnit(title))
+        if (raw is { } value && value > 0)
         {
-            case DurationUnit.Minutes: return (int)Math.Round(value);
-            case DurationUnit.Hours: return (int)Math.Round(value * 60.0);
+            switch (DetectDurationUnit(title))
+            {
+                case DurationUnit.Minutes: return (int)Math.Round(value);
+                case DurationUnit.Hours: return (int)Math.Round(value * 60.0);
+            }
+
+            // 标题里没有可识别的单位：只能按数量级猜
+            const double MaxPlausibleHours = 24.0;
+            return value > MaxPlausibleHours
+                ? (int)Math.Round(value)            // 像是旧格式的分钟
+                : (int)Math.Round(value * 60.0);    // 像是小时
         }
 
-        // 标题里没有可识别的单位：只能按数量级猜
-        const double MaxPlausibleHours = 24.0;
-        return value > MaxPlausibleHours
-            ? (int)Math.Round(value)            // 像是旧格式的分钟
-            : (int)Math.Round(value * 60.0);    // 像是小时
+        // 若远端数值属性未填或为 0，尝试从标题中提取时长（兼容用户只手写在标题的情况）
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            var m = TitleDurationUnitRegex.Match(title);
+            if (m.Success && double.TryParse(m.Groups["num"].Value.Replace(',', '.'),
+                System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsedVal) && parsedVal > 0)
+            {
+                var unit = m.Groups["unit"].Value.ToLowerInvariant();
+                return unit switch
+                {
+                    "小时" or "时" or "hours" or "hour" or "hrs" or "hr" or "h" => (int)Math.Round(parsedVal * 60.0),
+                    "分钟" or "分" or "minutes" or "minute" or "mins" or "min" or "m" => (int)Math.Round(parsedVal),
+                    _ => 0
+                };
+            }
+        }
+
+        return 0;
     }
 
     private static string? ExtractRelationId(JsonElement props, params string[] propertyNames)
@@ -1586,6 +1614,190 @@ public class NotionSyncService : INotionSyncService
         }
 
         return refreshed;
+    }
+
+    /// <summary>
+    /// 手工触发：一键扫描远端每日时长表中的历史记录，将记录标题规范化为「游戏名 · 时长 h」标准格式，
+    /// 并对齐总表游戏名与页面图标。绝不修改时长数值与日期，未关联总表的记录安全跳过。
+    /// </summary>
+    public async Task<DailyTitleNormalizationResult> NormalizeHistoricalDailyTitlesAsync(
+        IProgress<(int current, int total, string currentItem)>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (!_config.IsNotionConfigured)
+        {
+            return new DailyTitleNormalizationResult(0, 0, 0, 0, "Notion 未配置，请先在设置中填写配置");
+        }
+
+        try
+        {
+            SyncStatusChanged?.Invoke(this, "正在拉取 Notion 每日时长表进行历史格式检查...");
+            var dailyRecords = await _client.QueryDailyRecordsAsync(_config.DailyDatabaseId);
+            if (dailyRecords == null || dailyRecords.Count == 0)
+            {
+                return new DailyTitleNormalizationResult(0, 0, 0, 0, "Notion 每日时长表中无任何记录");
+            }
+
+            var catalogItems = await _client.QueryGameMasterAsync(_config.GameDatabaseId);
+            var localGames = await _repo.GetAllGamesAsync();
+
+            // 建立总表目录索引
+            var catalogByPageId = new Dictionary<string, NotionGameCatalogItem>(StringComparer.OrdinalIgnoreCase);
+            var catalogByName = new Dictionary<string, NotionGameCatalogItem>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var c in catalogItems)
+            {
+                if (!string.IsNullOrWhiteSpace(c.PageId))
+                {
+                    catalogByPageId[NormalizePageId(c.PageId)] = c;
+                }
+                if (!string.IsNullOrWhiteSpace(c.Name))
+                {
+                    catalogByName[c.Name.Trim()] = c;
+                }
+                foreach (var alias in c.Aliases)
+                {
+                    if (!string.IsNullOrWhiteSpace(alias))
+                    {
+                        catalogByName.TryAdd(alias.Trim(), c);
+                    }
+                }
+            }
+
+            // 本地游戏快速索引 (name -> game, notionId -> game)
+            var localGameByName = new Dictionary<string, GameRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var g in localGames)
+            {
+                if (!string.IsNullOrWhiteSpace(g.Name))
+                {
+                    localGameByName[g.Name.Trim()] = g;
+                }
+            }
+
+            int total = dailyRecords.Count;
+            int current = 0;
+            int updated = 0;
+            int skipped = 0;
+            int errors = 0;
+
+            foreach (var r in dailyRecords)
+            {
+                ct.ThrowIfCancellationRequested();
+                current++;
+
+                if (string.IsNullOrWhiteSpace(r.PageId))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                // 1. 寻找对应的总表条目
+                NotionGameCatalogItem? matchedCatalog = null;
+
+                // 1.1 先通过 relation 页面 ID 查找
+                var masterId = NormalizePageId(r.GameMasterPageId);
+                if (!string.IsNullOrEmpty(masterId) && catalogByPageId.TryGetValue(masterId, out var catByRel))
+                {
+                    matchedCatalog = catByRel;
+                }
+
+                // 1.2 若未通过 relation 找到，通过游戏名匹配总表名称或别名
+                var baseName = DailyRecordTitle.ExtractBaseName(r.GameTitle ?? "").Trim();
+                if (matchedCatalog == null && !string.IsNullOrEmpty(baseName))
+                {
+                    if (catalogByName.TryGetValue(baseName, out var catByName))
+                    {
+                        matchedCatalog = catByName;
+                    }
+                    else if (localGameByName.TryGetValue(baseName, out var localG) &&
+                             !string.IsNullOrEmpty(localG.NotionPageId) &&
+                             catalogByPageId.TryGetValue(NormalizePageId(localG.NotionPageId), out var catByLocal))
+                    {
+                        matchedCatalog = catByLocal;
+                    }
+                }
+
+                // 1.3 若未匹配到总表游戏，绝对不盲目篡改！100% 保持原样跳过
+                if (matchedCatalog == null)
+                {
+                    skipped++;
+                    progress?.Report((current, total, $"跳过未关联游戏：{r.RawTitle}"));
+                    continue;
+                }
+
+                // 1.4 若记录无有效时长（<= 0 分钟），安全跳过，避免写出「xxx · 0 h」
+                if (r.DurationMinutes <= 0)
+                {
+                    skipped++;
+                    progress?.Report((current, total, $"跳过无时长记录：{r.RawTitle}"));
+                    continue;
+                }
+
+                // 2. 目标标题格式：{总表游戏名} · {时长} h
+                var targetGameName = matchedCatalog.Name.Trim();
+                var targetIconUrl = matchedCatalog.IconUrl;
+                var expectedTitle = DailyRecordTitle.Build(targetGameName, r.DurationMinutes);
+
+                // 3. 比对标题：若已经完全符合标准规范格式，则无需重复更新
+                if (string.Equals(r.RawTitle?.Trim(), expectedTitle, StringComparison.Ordinal))
+                {
+                    skipped++;
+                    progress?.Report((current, total, $"格式已规范：{expectedTitle}"));
+                    continue;
+                }
+
+                // 4. 调用 UpdateDailyRecordTitleAsync 执行安全更新：只改标题与图标，绝不写时长属性
+                try
+                {
+                    progress?.Report((current, total, $"正在规范化：{r.RawTitle} -> {expectedTitle}"));
+                    var success = await _client.UpdateDailyRecordTitleAsync(
+                        r.PageId,
+                        expectedTitle,
+                        targetIconUrl,
+                        r.TitlePropertyName);
+
+                    if (success)
+                    {
+                        updated++;
+                        // 同步更新本地记录快照，避免后续常规同步判定状态不一致
+                        await RecordRemoteSnapshotAsync(r.PageId, targetGameName, r.DurationMinutes, targetIconUrl);
+                    }
+                    else
+                    {
+                        errors++;
+                    }
+
+                    // 速率限制：每次更新后延时 350ms，防止 Notion HTTP 429 速率限制
+                    await Task.Delay(350, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    AppLog.Warn($"[格式规范化] 更新记录失败 ({r.PageId} - {expectedTitle}): {ex.Message}");
+                }
+            }
+
+            var summary = $"历史记录格式规范化完成！共扫描 {total} 条：规范化 {updated} 条，无需修改 {skipped} 条" +
+                          (errors > 0 ? $"，失败 {errors} 条" : "");
+            SyncStatusChanged?.Invoke(this, summary);
+            return new DailyTitleNormalizationResult(total, updated, skipped, errors, summary);
+        }
+        catch (OperationCanceledException)
+        {
+            var msg = "历史数据格式规范化已取消";
+            SyncStatusChanged?.Invoke(this, msg);
+            return new DailyTitleNormalizationResult(0, 0, 0, 0, msg);
+        }
+        catch (Exception ex)
+        {
+            var msg = $"历史数据格式规范化失败: {FriendlyNotionError(ex)}";
+            SyncStatusChanged?.Invoke(this, msg);
+            return new DailyTitleNormalizationResult(0, 0, 0, 1, msg);
+        }
     }
 
     /// <summary>
