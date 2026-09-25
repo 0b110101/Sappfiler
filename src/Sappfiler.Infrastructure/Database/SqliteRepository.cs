@@ -790,13 +790,34 @@ public class SqliteRepository : IDatabaseRepository
 
                     if (validSessionsCount > 0)
                     {
+                        // 检查 daily_summary 是否存在从 Notion 或外部手动记录的时长（即未包含在 sessions 明细里的时长）
+                        var localSessionsTotalSecs = await conn.ExecuteScalarAsync<int>(
+                            """
+                            SELECT COALESCE(SUM(duration_seconds), 0) FROM sessions 
+                            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date;
+                            """,
+                            new { gameId, date });
+
+                        var dailyRow = await conn.QuerySingleOrDefaultAsync<DailyDurationCheck>(
+                            "SELECT duration_seconds, session_count FROM daily_summary WHERE game_id = @gameId AND date = @date LIMIT 1;",
+                            new { gameId, date });
+
+                        int manualBonusSessions = 0;
+                        if (dailyRow != null && dailyRow.duration_seconds > localSessionsTotalSecs + 60)
+                        {
+                            // 存在外部/Notion 手动录入的时长（未通过本地进程捕获），计入该手动游玩次数
+                            manualBonusSessions = 1;
+                        }
+
+                        int finalSessionCount = validSessionsCount + manualBonusSessions;
+
                         await conn.ExecuteAsync(
                             """
                             UPDATE daily_summary 
-                            SET session_count = @validSessionsCount 
+                            SET session_count = @finalSessionCount 
                             WHERE game_id = @gameId AND date = @date;
                             """,
-                            new { gameId, date, validSessionsCount });
+                            new { gameId, date, finalSessionCount });
                     }
                 }
             }
@@ -1906,6 +1927,12 @@ public class SqliteRepository : IDatabaseRepository
         public string? SyncStatus { get; set; }
         public string? NotionTitle { get; set; }
         public string? NotionIconUrl { get; set; }
+    }
+
+    private sealed class DailyDurationCheck
+    {
+        public int duration_seconds { get; set; }
+        public int session_count { get; set; }
     }
 }
 
