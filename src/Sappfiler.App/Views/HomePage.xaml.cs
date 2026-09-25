@@ -187,19 +187,23 @@ public sealed partial class HomePage : Page
         var width = e.NewSize.Width;
 
         // ── 分辨率自适应（2026-09-19 QA 的 2K 反馈）──────────────────────────────
-        // 布局是按 1080p 调的：右列固定 340，内容一直拉满窗口。
-        // 2K / 4K 下窗口宽得多，右列却还是 340 —— 看起来就是"右边第三块被挤扁了"。
-        //
-        // 两条措施：
-        //   ① 给内容宽度设上限（约 1520~1840）并用**左右对称留白**居中。
-        //      这里刻意用 Padding 而不是 MaxWidth + HorizontalAlignment=Center ——
-        //      后者会让 Grid 退化成"按内容自适应宽度"，而星号列的期望宽度来自内容，
-        //      于是左列会塌掉、布局整个错位。
-        //   ② 右列按内容宽度取 26%，夹在 340~460。
-        //      1080p 下算出来是 300 → 被夹回 340，**与原布局完全一致**（无回归）。
-        var sidePadding = Math.Clamp((width - 1520) / 2, 24, 1000);
+        // ── 分辨率自适应（大屏对称留白，小屏弹性双列）──────────────────────────────
+        // 确保无论在 27寸 1080p 还是更小的笔记本屏幕上，一打开均呈现标准左右双列（图2）。
+        // 只有当窗口被手动拉拽到极窄（< 700px）时才退化为单列。
+        var minSidePadding = width < 1000 ? 16 : 24;
+        var sidePadding = Math.Clamp((width - 1520) / 2, minSidePadding, 1000);
         var contentWidth = width - sidePadding * 2;
-        var rightWidth = Math.Clamp(contentWidth * 0.26, 340, 460);
+
+        // 右列宽度：宽屏保底 340px（27寸 1080p 标准尺寸）；较小屏幕上平滑微调至 280~340px，为左侧让出空间
+        var rightWidth = width >= 1000
+            ? Math.Clamp(contentWidth * 0.26, 340, 460)
+            : Math.Clamp(contentWidth * 0.30, 280, 340);
+
+        var spacing = width < 1000 ? 14 : 20;
+        if (Math.Abs(RootContentGrid.ColumnSpacing - spacing) > 0.5)
+        {
+            RootContentGrid.ColumnSpacing = spacing;
+        }
 
         // Padding 变了才算，避免无谓的布局失效
         if (Math.Abs(RootContentGrid.Padding.Left - sidePadding) > 0.5)
@@ -207,7 +211,7 @@ public sealed partial class HomePage : Page
             RootContentGrid.Padding = new Microsoft.UI.Xaml.Thickness(sidePadding, 16, sidePadding, 24);
         }
 
-        var narrow = width < 880;
+        var narrow = width < 700;
         if (narrow != _isNarrowLayout)
         {
             _isNarrowLayout = narrow;
@@ -226,14 +230,11 @@ public sealed partial class HomePage : Page
                 Microsoft.UI.Xaml.Controls.Grid.SetColumn(RightPanel, 1);
                 Microsoft.UI.Xaml.Controls.Grid.SetRow(RightPanel, 0);
             }
-
-            return;
         }
-
-        // 模式没变，但窗口可能已经跨到另一档宽度 —— 只调右列宽度，
-        // 不动行列归属（改动越少，越不容易和布局过程互相触发）。
-        if (!narrow && Math.Abs(ColRight.Width.Value - rightWidth) > 0.5)
+        else if (!narrow && Math.Abs(ColRight.Width.Value - rightWidth) > 0.5)
         {
+            // 模式没变，但窗口可能已经跨到另一档宽度 —— 只调右列宽度，
+            // 不动行列归属（改动越少，越不容易和布局过程互相触发）。
             ColRight.Width = new Microsoft.UI.Xaml.GridLength(rightWidth);
         }
     }

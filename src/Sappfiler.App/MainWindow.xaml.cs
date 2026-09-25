@@ -106,6 +106,9 @@ public sealed partial class MainWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint msg, uint action, IntPtr pChangeFilterStruct);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
     private const uint MSGFLT_ALLOW = 1;
 
     private static readonly uint WM_ACTIVATE_INSTANCE = RegisterWindowMessage(App.SingleInstanceMsgName);
@@ -248,15 +251,12 @@ public sealed partial class MainWindow : Window
         {
             _appWindow.Title = "Sappfiler";
 
-            // ── 初始窗口尺寸随显示器自适应（2026-09-19 QA 的 2K 反馈）──────────────
-            // 原先是写死的 1200x780 —— 那是按 1080p 定的。
-            // 2K / 4K 下窗口显得很小，内容全挤在屏幕中间一小块。
-            // 改成取工作区的 62% × 78%，并夹在 [1200×780, 1720×1040]：
-            //   · 1080p (1920) → 62% = 1190 → 夹回 1200×780，**与原来一致**（无回归）
-            //   · 2K    (2560) → 1587×1123   → 夹到 1587×1040
-            //   · 4K    (3840) → 夹到上限 1720×1040
-            // 上限的意义：再大也没用 —— 首页内容会在约 1840 逻辑像素处停止变宽
-            // （见 HomePage.OnRootGridSizeChanged 的对称留白），更大的窗口只会多出空白。
+            // ── 初始窗口尺寸随显示器与 DPI 缩放自适应（适配大屏与小屏笔记本）──────────────
+            // 原先直接按物理像素计算并在 1200 保底，导致在 14寸笔记本（150% 缩放，逻辑视口仅 1280）下
+            // 物理 1200 像素相当于只有 800 逻辑像素，内容被严重挤压。
+            // 现按 DPI 换算为逻辑像素（DIPs）自适应计算：
+            //   · 紧凑小屏/笔记本高缩放 (逻辑宽 < 1400)：按工作区宽 84% / 高 86% 自适应
+            //   · 大屏 / 标准 1080p 桌面屏 (逻辑宽 >= 1400)：保持经典 62% x 78% (约 1200x780)，上限 1720x1040
             var display = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
 
             var winW = 1200;
@@ -264,12 +264,38 @@ public sealed partial class MainWindow : Window
             if (display != null)
             {
                 var workArea = display.WorkArea;
-                winW = (int)Math.Clamp(workArea.Width * 0.62, 1200, 1720);
-                winH = (int)Math.Clamp(workArea.Height * 0.78, 780, 1040);
+                uint dpi = GetDpiForWindow(_hwnd);
+                double scale = (dpi > 0 ? dpi : 96) / 96.0;
+
+                // 转为有效逻辑像素（DIPs）计算，统一不同屏幕尺寸和高 DPI 缩放下的视觉比例
+                double workAreaDipsW = workArea.Width / scale;
+                double workAreaDipsH = workArea.Height / scale;
+
+                double targetDipsW;
+                double targetDipsH;
+
+                if (workAreaDipsW < 1400)
+                {
+                    // 紧凑小屏幕 / 笔记本高 DPI 缩放（如 13~14寸 1080p @ 125%~150%，有效逻辑宽仅 1280~1536）
+                    // 给予更充裕的工作区占比，让内容在单/双列自适应下自然舒展
+                    targetDipsW = Math.Clamp(workAreaDipsW * 0.84, 1000, 1180);
+                    targetDipsH = Math.Clamp(workAreaDipsH * 0.86, 600, 860);
+                }
+                else
+                {
+                    // 大屏 / 标准 1080p 桌面屏（如 27寸 1080p @ 100%、2K、4K）
+                    // 保持经典比例 62% x 78%，稳稳落在 1200x780 左右，大屏绝不发散
+                    targetDipsW = Math.Clamp(workAreaDipsW * 0.62, 1200, 1720);
+                    targetDipsH = Math.Clamp(workAreaDipsH * 0.78, 780, 1040);
+                }
+
+                // 转换回物理像素给 AppWindow
+                winW = (int)Math.Round(targetDipsW * scale);
+                winH = (int)Math.Round(targetDipsH * scale);
 
                 // 别超过工作区 —— 否则窗口边角会跑到屏幕外（含任务栏）
-                winW = Math.Min(winW, workArea.Width - 40);
-                winH = Math.Min(winH, workArea.Height - 40);
+                winW = Math.Min(winW, workArea.Width - 30);
+                winH = Math.Min(winH, workArea.Height - 30);
             }
 
             _appWindow.Resize(new SizeInt32(winW, winH));
@@ -493,8 +519,11 @@ public sealed partial class MainWindow : Window
         if (uMsg == WM_GETMINMAXINFO)
         {
             var minMax = Marshal.PtrToStructure<MINMAXINFO>(lParam);
-            minMax.ptMinTrackSize.x = 980;
-            minMax.ptMinTrackSize.y = 640;
+            uint dpi = GetDpiForWindow(_hwnd);
+            double s = (dpi > 0 ? dpi : 96) / 96.0;
+            // 限制最小逻辑窗口尺寸：840 x 560 DIPs
+            minMax.ptMinTrackSize.x = (int)Math.Round(840 * s);
+            minMax.ptMinTrackSize.y = (int)Math.Round(560 * s);
             Marshal.StructureToPtr(minMax, lParam, true);
             return IntPtr.Zero;
         }

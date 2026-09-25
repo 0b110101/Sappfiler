@@ -145,7 +145,7 @@
                                             <TextBlock Text="● 空闲中" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" FontWeight="SemiBold" />
                                         </Border>
                                         <TextBlock Text="暂无运行中的游戏" FontSize="18" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                                        <TextBlock Text="后台持续自动监听 Steam / Epic / Xbox 平台游戏" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                        <TextBlock Text="后台持续自动监听 Steam / Epic / Xbox 平台游戏" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
                                 </StackPanel>
                             </Grid>
@@ -154,7 +154,7 @@
                 </Border>
 
                 <!-- 2. Metric Cards (Today & Week) - Figure 1 Layout -->
-                <Grid ColumnSpacing="16">
+                <Grid ColumnSpacing="14">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
@@ -165,7 +165,7 @@
                             BorderBrush="{ThemeResource CardBorderBrush}"
                             BorderThickness="1"
                             Background="{ThemeResource CardBackgroundBrush}"
-                            Padding="18,16">
+                            Padding="16,14">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
@@ -174,8 +174,8 @@
                             </Grid.ColumnDefinitions>
 
                             <!-- Circular Icon Badge -->
-                            <Border Grid.Column="0" Width="44" Height="44" CornerRadius="22" Background="#154F8FFF" VerticalAlignment="Center" Margin="0,0,14,0">
-                                <Viewbox Width="30" Height="30">
+                            <Border Grid.Column="0" Width="40" Height="40" CornerRadius="20" Background="#154F8FFF" VerticalAlignment="Center" Margin="0,0,10,0">
+                                <Viewbox Width="26" Height="26">
                                     <Canvas Width="24" Height="24">
                                         <Path Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
                                               Data="M 4 7 a 2 2 0 0 1 2 -2 h 12 a 2 2 0 0 1 2 2 v 12 a 2 2 0 0 1 -2 2 h -12 a 2 2 0 0 1 -2 -2 v -12 z M 16 3 v 4 M 8 3 v 4 M 4 11 h 16 M 7 14 h 0.013 M 10.01 14 h 0.005 M 13.01 14 h 0.005 M 16.015 14 h 0.005 M 13.015 17 h 0.005 M 7.01 17 h 0.005 M 10.01 17 h 0.005" />
@@ -186,11 +186,11 @@
                             <!-- Center: Title & Duration -->
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
                                 <TextBlock Text="今日总计" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" FontWeight="Medium" />
-                                <TextBlock Text="{x:Bind ViewModel.TodayDurationText, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.TodayDurationText, Mode=OneWay}" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
                             </StackPanel>
 
                             <!-- Right: Percent & Delta Comparison -->
-                            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2">
+                            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2" Margin="4,0,0,0">
                                 <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
                                     <Viewbox Width="12" Height="12" VerticalAlignment="Center">
                                         <Canvas Width="24" Height="24">
@@ -210,7 +210,7 @@
                             BorderBrush="{ThemeResource CardBorderBrush}"
                             BorderThickness="1"
                             Background="{ThemeResource CardBackgroundBrush}"
-                            Padding="18,16">
+                            Padding="16,14">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
@@ -219,8 +219,8 @@
                             </Grid.ColumnDefinitions>
 
                             <!-- Circular Icon Badge -->
-                            <Border Grid.Column="0" Width="44" Height="44" CornerRadius="22" Background="#154F8FFF" VerticalAlignment="Center" Margin="0,0,14,0">
-                                <Viewbox Width="30" Height="30">
+                            <Border Grid.Column="0" Width="40" Height="40" CornerRadius="20" Background="#154F8FFF" VerticalAlignment="Center" Margin="0,0,10,0">
+                                <Viewbox Width="26" Height="26">
                                     <Canvas Width="24" Height="24">
                                         <Path Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
                                               Data="M 4 7 a 2 2 0 0 1 2 -2 h 12 a 2 2 0 0 1 2 2 v 12 a 2 2 0 0 1 -2 2 h -12 a 2 2 0 0 1 -2 -2 v -12 z M 16 3 v 4 M 8 3 v 4 M 4 11 h 16 M 7 14 h 0.013 M 10.01 14 h 0.005 M 13.01 14 h 0.005 M 16.015 14 h 0.005 M 13.015 17 h 0.005 M 7.01 17 h 0.005 M 10.01 17 h 0.005" />
@@ -231,11 +231,11 @@
                             <!-- Center: Title & Duration -->
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
                                 <TextBlock Text="本周总计" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" FontWeight="Medium" />
-                                <TextBlock Text="{x:Bind ViewModel.WeekDurationText, Mode=OneWay}" FontSize="24" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.WeekDurationText, Mode=OneWay}" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
                             </StackPanel>
 
                             <!-- Right: Percent & Delta Comparison -->
-                            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2">
+                            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right" Spacing="2" Margin="4,0,0,0">
                                 <StackPanel Orientation="Horizontal" Spacing="3" HorizontalAlignment="Right">
                                     <Viewbox Width="12" Height="12" VerticalAlignment="Center">
                                         <Canvas Width="24" Height="24">

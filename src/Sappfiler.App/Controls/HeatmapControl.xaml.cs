@@ -33,8 +33,8 @@ public sealed partial class HeatmapControl : UserControl
         ActualThemeChanged += (s, e) => RenderHeatmap(HeatmapData);
     }
 
-    /// <summary>格子步进（含间距）下限。取自 1080p 的原始尺寸 —— 宽度不够时维持它并横向滚动。</summary>
-    private const double MinStep = 16.0;
+    /// <summary>格子步进（含间距）下限。按小屏紧凑显示调整，允许在 13~14 寸笔记本视口内完整展示 52 周。</summary>
+    private const double MinStep = 12.5;
 
     /// <summary>格子步进上限。屏幕很宽时不让格子粗到失真。</summary>
     private const double MaxStep = 26.0;
@@ -130,8 +130,9 @@ public sealed partial class HeatmapControl : UserControl
 
         // 1. 先定格子步进（取决于当前可用宽度，见 ComputeStep）
         _currentStep = ComputeStep(data);
-        double cellSize = Math.Max(9.0, Math.Round(_currentStep - 4));    // 间距 4
-        double rowHeight = Math.Max(12.0, Math.Round(_currentStep - 1));
+        double gap = _currentStep <= 13.5 ? 2.5 : 4.0;
+        double cellSize = Math.Max(8.0, Math.Round(_currentStep - gap));
+        double rowHeight = Math.Max(11.0, Math.Round(_currentStep - 1));
 
         // 2. Setup 7 Rows
         for (int r = 0; r < 7; r++)
@@ -161,7 +162,7 @@ public sealed partial class HeatmapControl : UserControl
                 var tb = new TextBlock
                 {
                     Text = marker.MonthLabel,
-                    FontSize = 10,
+                    FontSize = _currentStep <= 13.5 ? 9 : 10,
                     Foreground = GetTextSecondaryBrush(this),
                     HorizontalAlignment = HorizontalAlignment.Left,
                     VerticalAlignment = VerticalAlignment.Center
@@ -181,7 +182,7 @@ public sealed partial class HeatmapControl : UserControl
             {
                 Width = cellSize,
                 Height = cellSize,
-                CornerRadius = new CornerRadius(3),
+                CornerRadius = new CornerRadius(_currentStep <= 13.5 ? 2 : 3),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Tag = cell
