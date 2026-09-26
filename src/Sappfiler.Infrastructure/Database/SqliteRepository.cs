@@ -147,6 +147,41 @@ public class SqliteRepository : IDatabaseRepository
                 deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_deleted_archive_time ON deleted_archive(deleted_at);
+
+            CREATE TABLE IF NOT EXISTS sync_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                daily_summary_id INTEGER NOT NULL REFERENCES daily_summary(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                remote_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_sync_at DATETIME,
+                error_message TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(daily_summary_id, provider)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sync_records_status ON sync_records(provider, status);
+            CREATE INDEX IF NOT EXISTS idx_sync_records_daily ON sync_records(daily_summary_id);
+
+            CREATE TABLE IF NOT EXISTS game_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                remote_id TEXT NOT NULL,
+                remote_name TEXT,
+                last_verified DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(game_id, provider)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_mappings_provider ON game_mappings(provider, remote_id);
+            CREATE INDEX IF NOT EXISTS idx_game_mappings_game ON game_mappings(game_id);
+
+            CREATE TABLE IF NOT EXISTS provider_configs (
+                provider TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """;
         cmd.ExecuteNonQuery();
 
@@ -203,6 +238,48 @@ public class SqliteRepository : IDatabaseRepository
             using var alterCmd7 = conn.CreateCommand();
             alterCmd7.CommandText = "ALTER TABLE game_catalog ADD COLUMN genres_json TEXT NOT NULL DEFAULT '[]';";
             alterCmd7.ExecuteNonQuery();
+        }
+        catch { }
+
+        try
+        {
+            using var alterCmd8 = conn.CreateCommand();
+            alterCmd8.CommandText = "ALTER TABLE game_mappings ADD COLUMN remote_locator TEXT;";
+            alterCmd8.ExecuteNonQuery();
+        }
+        catch { }
+
+        try
+        {
+            using var alterCmd9 = conn.CreateCommand();
+            alterCmd9.CommandText = "ALTER TABLE game_mappings ADD COLUMN match_type TEXT;";
+            alterCmd9.ExecuteNonQuery();
+        }
+        catch { }
+
+        try
+        {
+            using var alterCmd10 = conn.CreateCommand();
+            alterCmd10.CommandText = "ALTER TABLE game_mappings ADD COLUMN match_confidence REAL;";
+            alterCmd10.ExecuteNonQuery();
+        }
+        catch { }
+
+        // 平滑数据迁移：将已有的 Notion 数据导入多后端新表（支持历史数据无缝升级）
+        try
+        {
+            using var migCmd = conn.CreateCommand();
+            migCmd.CommandText = """
+                INSERT OR IGNORE INTO game_mappings (game_id, provider, remote_id, remote_name, created_at)
+                SELECT id, 'notion', notion_page_id, name, created_at
+                FROM games
+                WHERE notion_page_id IS NOT NULL AND TRIM(notion_page_id) != '';
+
+                INSERT OR IGNORE INTO sync_records (daily_summary_id, provider, remote_id, status, last_sync_at, created_at)
+                SELECT id, 'notion', notion_page_id, COALESCE(sync_status, 'pending'), last_sync_at, created_at
+                FROM daily_summary;
+            """;
+            migCmd.ExecuteNonQuery();
         }
         catch { }
 
@@ -488,7 +565,12 @@ public class SqliteRepository : IDatabaseRepository
         {
             using var conn = CreateConnection();
             await conn.ExecuteAsync(
-                "UPDATE games SET notion_page_id = @notionPageId, updated_at = CURRENT_TIMESTAMP WHERE id = @gameId;",
+                """
+                UPDATE games SET notion_page_id = @notionPageId, updated_at = CURRENT_TIMESTAMP WHERE id = @gameId;
+                INSERT INTO game_mappings (game_id, provider, remote_id, remote_name, last_verified, created_at)
+                SELECT id, 'notion', @notionPageId, name, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM games WHERE id = @gameId
+                ON CONFLICT(game_id, provider) DO UPDATE SET remote_id = excluded.remote_id, last_verified = CURRENT_TIMESTAMP;
+                """,
                 new { gameId, notionPageId });
         }
         finally
@@ -988,6 +1070,32 @@ public class SqliteRepository : IDatabaseRepository
         return result;
     }
 
+    public async Task<GameAggregateStats> GetAggregateStatsAsync(int gameId)
+    {
+        using var conn = CreateConnection();
+        var row = await conn.QuerySingleOrDefaultAsync<dynamic>(
+            """
+            SELECT COALESCE(SUM(duration_seconds), 0) AS TotalSeconds,
+                   MAX(date) AS LastPlayedDate,
+                   COALESCE(SUM(session_count), 0) AS TotalSessions
+            FROM daily_summary
+            WHERE game_id = @gameId;
+            """,
+            new { gameId });
+
+        if (row == null)
+        {
+            return new GameAggregateStats(0, null, 0);
+        }
+
+        long totalSeconds = row.TotalSeconds != null ? Convert.ToInt64(row.TotalSeconds) : 0;
+        string? lastPlayed = row.LastPlayedDate != null ? Convert.ToString(row.LastPlayedDate) : null;
+        int totalSessions = row.TotalSessions != null ? Convert.ToInt32(row.TotalSessions) : 0;
+        double totalHours = Math.Round(totalSeconds / 3600.0, 1);
+
+        return new GameAggregateStats(totalHours, lastPlayed, totalSessions);
+    }
+
     /// <summary>
     /// 待上传的每日汇总（推送到 Notion 的候选）。
     /// </summary>
@@ -1065,6 +1173,14 @@ public class SqliteRepository : IDatabaseRepository
                     last_sync_at = CURRENT_TIMESTAMP,
                     error_message = @errorMessage
                 WHERE id = @id;
+
+                INSERT INTO sync_records (daily_summary_id, provider, remote_id, status, error_message, last_sync_at, created_at)
+                VALUES (@id, 'notion', @notionPageId, @syncStatus, @errorMessage, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(daily_summary_id, provider) DO UPDATE SET
+                    remote_id = COALESCE(excluded.remote_id, sync_records.remote_id),
+                    status = excluded.status,
+                    error_message = excluded.error_message,
+                    last_sync_at = CURRENT_TIMESTAMP;
                 """,
                 new { id, syncStatus, notionPageId, errorMessage });
         }
@@ -1908,6 +2024,250 @@ public class SqliteRepository : IDatabaseRepository
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP;
                 """,
                 new { key, value });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    // ----------------- Multi-Backend Provider Mappings & Records -----------------
+
+    public async Task<GameMappingRecord?> GetGameMappingAsync(int gameId, string provider)
+    {
+        using var conn = CreateConnection();
+        return await conn.QuerySingleOrDefaultAsync<GameMappingRecord>(
+            """
+            SELECT id AS Id, game_id AS GameId, provider AS Provider, remote_id AS RemoteId,
+                   remote_locator AS RemoteLocator, remote_name AS RemoteName,
+                   match_type AS MatchType, match_confidence AS MatchConfidence,
+                   last_verified AS LastVerified, created_at AS CreatedAt
+            FROM game_mappings
+            WHERE game_id = @gameId AND provider = @provider;
+            """,
+            new { gameId, provider });
+    }
+
+    public async Task<IReadOnlyList<GameMappingRecord>> GetGameMappingsAsync(int gameId)
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<GameMappingRecord>(
+            """
+            SELECT id AS Id, game_id AS GameId, provider AS Provider, remote_id AS RemoteId,
+                   remote_locator AS RemoteLocator, remote_name AS RemoteName,
+                   match_type AS MatchType, match_confidence AS MatchConfidence,
+                   last_verified AS LastVerified, created_at AS CreatedAt
+            FROM game_mappings
+            WHERE game_id = @gameId;
+            """,
+            new { gameId });
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<GameMappingRecord>> GetAllGameMappingsAsync()
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<GameMappingRecord>(
+            """
+            SELECT id AS Id, game_id AS GameId, provider AS Provider, remote_id AS RemoteId,
+                   remote_locator AS RemoteLocator, remote_name AS RemoteName,
+                   match_type AS MatchType, match_confidence AS MatchConfidence,
+                   last_verified AS LastVerified, created_at AS CreatedAt
+            FROM game_mappings;
+            """);
+        return rows.ToList();
+    }
+
+    public async Task UpsertGameMappingAsync(
+        int gameId,
+        string provider,
+        string remoteId,
+        string? remoteName = null,
+        string? remoteLocator = null,
+        string? matchType = null,
+        double? matchConfidence = null)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO game_mappings (game_id, provider, remote_id, remote_locator, remote_name, match_type, match_confidence, last_verified, created_at)
+                VALUES (@gameId, @provider, @remoteId, @remoteLocator, @remoteName, @matchType, @matchConfidence, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(game_id, provider) DO UPDATE SET
+                    remote_id = excluded.remote_id,
+                    remote_locator = COALESCE(excluded.remote_locator, game_mappings.remote_locator),
+                    remote_name = COALESCE(excluded.remote_name, game_mappings.remote_name),
+                    match_type = COALESCE(excluded.match_type, game_mappings.match_type),
+                    match_confidence = COALESCE(excluded.match_confidence, game_mappings.match_confidence),
+                    last_verified = CURRENT_TIMESTAMP;
+                """,
+                new { gameId, provider, remoteId, remoteLocator, remoteName, matchType, matchConfidence });
+
+            if (string.Equals(provider, "notion", StringComparison.OrdinalIgnoreCase))
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE games SET notion_page_id = @remoteId, updated_at = CURRENT_TIMESTAMP WHERE id = @gameId;",
+                    new { gameId, remoteId });
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task DeleteGameMappingAsync(int gameId, string provider)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync(
+                "DELETE FROM game_mappings WHERE game_id = @gameId AND provider = @provider;",
+                new { gameId, provider });
+
+            if (string.Equals(provider, "notion", StringComparison.OrdinalIgnoreCase))
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE games SET notion_page_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = @gameId;",
+                    new { gameId });
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task<SyncRecordItem?> GetSyncRecordAsync(int dailySummaryId, string provider)
+    {
+        using var conn = CreateConnection();
+        return await conn.QuerySingleOrDefaultAsync<SyncRecordItem>(
+            """
+            SELECT id AS Id, daily_summary_id AS DailySummaryId, provider AS Provider,
+                   remote_id AS RemoteId, status AS Status, retry_count AS RetryCount,
+                   last_sync_at AS LastSyncAt, error_message AS ErrorMessage, created_at AS CreatedAt
+            FROM sync_records
+            WHERE daily_summary_id = @dailySummaryId AND provider = @provider;
+            """,
+            new { dailySummaryId, provider });
+    }
+
+    public async Task<IReadOnlyList<SyncRecordItem>> GetSyncRecordsForDailyAsync(int dailySummaryId)
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<SyncRecordItem>(
+            """
+            SELECT id AS Id, daily_summary_id AS DailySummaryId, provider AS Provider,
+                   remote_id AS RemoteId, status AS Status, retry_count AS RetryCount,
+                   last_sync_at AS LastSyncAt, error_message AS ErrorMessage, created_at AS CreatedAt
+            FROM sync_records
+            WHERE daily_summary_id = @dailySummaryId;
+            """,
+            new { dailySummaryId });
+        return rows.ToList();
+    }
+
+    public async Task UpsertSyncRecordAsync(int dailySummaryId, string provider, string status, string? remoteId = null, string? errorMessage = null)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO sync_records (daily_summary_id, provider, remote_id, status, error_message, last_sync_at, created_at)
+                VALUES (@dailySummaryId, @provider, @remoteId, @status, @errorMessage, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(daily_summary_id, provider) DO UPDATE SET
+                    remote_id = COALESCE(excluded.remote_id, sync_records.remote_id),
+                    status = excluded.status,
+                    error_message = excluded.error_message,
+                    last_sync_at = CURRENT_TIMESTAMP,
+                    retry_count = CASE WHEN excluded.status = 'error' THEN sync_records.retry_count + 1 ELSE sync_records.retry_count END;
+                """,
+                new { dailySummaryId, provider, remoteId, status, errorMessage });
+
+            if (string.Equals(provider, "notion", StringComparison.OrdinalIgnoreCase))
+            {
+                await conn.ExecuteAsync(
+                    """
+                    UPDATE daily_summary
+                    SET sync_status = @status,
+                        notion_page_id = COALESCE(@remoteId, notion_page_id),
+                        last_sync_at = CURRENT_TIMESTAMP,
+                        error_message = @errorMessage
+                    WHERE id = @dailySummaryId;
+                    """,
+                    new { dailySummaryId, status, remoteId, errorMessage });
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<DailySummary>> GetPendingSummariesForProviderAsync(string provider)
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<dynamic>(
+            """
+            SELECT d.*, g.name AS game_name, g.platform, g.platform_id, g.notion_page_id AS game_notion_id
+            FROM daily_summary d
+            JOIN games g ON d.game_id = g.id
+            LEFT JOIN sync_records sr ON d.id = sr.daily_summary_id AND sr.provider = @provider
+            WHERE d.duration_minutes > 0
+              AND (sr.id IS NULL OR sr.status NOT IN ('synced', 'unmapped'))
+            ORDER BY d.date ASC;
+            """,
+            new { provider });
+
+        return rows.Select(MapDailySummary).ToList();
+    }
+
+    public async Task<ProviderConfigItem?> GetProviderConfigAsync(string provider)
+    {
+        using var conn = CreateConnection();
+        return await conn.QuerySingleOrDefaultAsync<ProviderConfigItem>(
+            """
+            SELECT provider AS Provider, enabled AS Enabled,
+                   config_json AS ConfigJson, updated_at AS UpdatedAt
+            FROM provider_configs
+            WHERE provider = @provider;
+            """,
+            new { provider });
+    }
+
+    public async Task<IReadOnlyList<ProviderConfigItem>> GetAllProviderConfigsAsync()
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<ProviderConfigItem>(
+            """
+            SELECT provider AS Provider, enabled AS Enabled,
+                   config_json AS ConfigJson, updated_at AS UpdatedAt
+            FROM provider_configs;
+            """);
+        return rows.ToList();
+    }
+
+    public async Task SetProviderConfigAsync(string provider, bool enabled, string configJson)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO provider_configs (provider, enabled, config_json, updated_at)
+                VALUES (@provider, @enabled, @configJson, CURRENT_TIMESTAMP)
+                ON CONFLICT(provider) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    config_json = excluded.config_json,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                new { provider, enabled = enabled ? 1 : 0, configJson });
         }
         finally
         {

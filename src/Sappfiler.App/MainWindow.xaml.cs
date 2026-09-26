@@ -13,6 +13,7 @@ using GameTimeTracker.Infrastructure.Database;
 using GameTimeTracker.Infrastructure.Notion;
 using GameTimeTracker.Infrastructure.Platforms;
 using GameTimeTracker.Infrastructure.Process;
+using GameTimeTracker.Infrastructure.Sync;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -34,7 +35,10 @@ public sealed partial class MainWindow : Window
     private readonly IGameArtworkService _artworkService;
     private readonly INotionClient _notionClient;
     private readonly INotionSyncService _syncService;
+    private readonly ISyncOrchestrator _syncOrchestrator;
     private readonly TrackerConfig _config;
+
+    public ISyncOrchestrator SyncOrchestrator => _syncOrchestrator;
 
     private readonly HomeViewModel _homeViewModel;
     private SystemTrayService? _trayService;
@@ -204,6 +208,11 @@ public sealed partial class MainWindow : Window
         _coverCache = new CoverCacheService();
         _notionClient = new NotionClient(_config.NotionToken);
         _syncService = new NotionSyncService(_repo, _notionClient, _config);
+
+        var notionProvider = new NotionSyncProvider(_repo, _notionClient, _config, _syncService);
+        var obsidianProvider = new ObsidianSyncProvider(_repo);
+        var siYuanProvider = new SiYuanSyncProvider(_repo);
+        _syncOrchestrator = new SyncOrchestrator(_repo, new ISyncProvider[] { notionProvider, obsidianProvider, siYuanProvider }, _syncService);
 
         var artworkProviders = new IGameArtworkProvider[]
         {
@@ -558,9 +567,9 @@ public sealed partial class MainWindow : Window
                 _sessionManager.DailyCutoffHour = _config.DailyCutoffHour;
             }
 
-            if (_config.IsNotionConfigured)
+            _ = Task.Run(async () =>
             {
-                _ = Task.Run(async () =>
+                if (_config.IsNotionConfigured)
                 {
                     // 顺序很关键：先把总表目录拉下来，自动关联才有数据可匹配；
                     // 删除对账要排在目录刷新之后（它以 game_catalog 作为总表的快照），
@@ -573,10 +582,14 @@ public sealed partial class MainWindow : Window
                     await _syncService.SyncPendingDailyRecordsAsync();
                     // 回刷必须在推送之后：这轮刚推上去的记录此时才有 notion_title 快照。
                     await _syncService.RefreshDailyTitlesFromMasterAsync();
-                    _ = _coverCache.EnsureLibraryCoversAsync(_repo);
-                    await _homeViewModel.RefreshAllDataAsync();
-                });
-            }
+                }
+
+                // 同步至所有启用的多后端（Obsidian、思源笔记等）
+                await _syncOrchestrator.SyncAllPendingAsync();
+
+                _ = _coverCache.EnsureLibraryCoversAsync(_repo);
+                await _homeViewModel.RefreshAllDataAsync();
+            });
         }
         catch { }
 
@@ -622,27 +635,28 @@ public sealed partial class MainWindow : Window
         await UpdatePendingBadgeAsync();
         if (_trayService != null) await _trayService.RefreshStateAsync();
 
-        // 监听游戏会话结束：游戏退出时自动同步到 Notion（后台空转周期同步已按需求取消）
+        // 监听游戏会话结束：游戏退出时自动同步到各启用后端（后台空转周期同步已按需求取消）
         _sessionManager.SessionEnded += (s, session) =>
         {
-            if (_config.IsNotionConfigured)
+            _ = Task.Run(async () =>
             {
-                _ = Task.Run(async () =>
+                try
                 {
-                    try
+                    await Task.Delay(500); // 确保本地落库完成
+                    if (_config.IsNotionConfigured)
                     {
-                        await Task.Delay(500); // 确保本地落库完成
                         await _syncService.SyncPendingDailyRecordsAsync();
                         await _syncService.RefreshDailyTitlesFromMasterAsync();
-                        await _homeViewModel.RefreshAllDataAsync();
-                        if (_trayService != null) await _trayService.RefreshStateAsync();
                     }
-                    catch (Exception ex)
-                    {
-                        AppLog.Warn($"[同步] 游戏退出后自动同步失败: {ex.Message}");
-                    }
-                });
-            }
+                    await _syncOrchestrator.SyncAllPendingAsync();
+                    await _homeViewModel.RefreshAllDataAsync();
+                    if (_trayService != null) await _trayService.RefreshStateAsync();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[同步] 游戏退出后自动同步失败: {ex.Message}");
+                }
+            });
         };
 
         // Start background 5s process monitor loop (本地进程监控不受任何影响)
@@ -888,7 +902,7 @@ public sealed partial class MainWindow : Window
             case "Pending":
                 if (_pendingPage == null)
                 {
-                    ContentFrame.Navigate(typeof(PendingPage), (_repo, _syncService, _config, _notionClient, _coverCache));
+                    ContentFrame.Navigate(typeof(PendingPage), (_repo, _syncService, _config, _notionClient, _coverCache, _syncOrchestrator));
                     _pendingPage = ContentFrame.Content as PendingPage;
                     if (_pendingPage != null)
                     {
@@ -904,7 +918,7 @@ public sealed partial class MainWindow : Window
             case "Mappings":
                 if (_mappingsPage == null)
                 {
-                    ContentFrame.Navigate(typeof(MappingsPage), (_repo, _syncService));
+                    ContentFrame.Navigate(typeof(MappingsPage), (_repo, _syncService, _syncOrchestrator));
                     _mappingsPage = ContentFrame.Content as MappingsPage;
                 }
                 else
@@ -916,7 +930,7 @@ public sealed partial class MainWindow : Window
             case "Settings":
                 if (_settingsPage == null)
                 {
-                    ContentFrame.Navigate(typeof(SettingsPage), (_repo, _config, _notionClient, _syncService));
+                    ContentFrame.Navigate(typeof(SettingsPage), (_repo, _config, _notionClient, _syncService, _syncOrchestrator));
                     _settingsPage = ContentFrame.Content as SettingsPage;
                 }
                 else

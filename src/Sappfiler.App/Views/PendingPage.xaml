@@ -12,7 +12,7 @@
         <StackPanel Spacing="18" MaxWidth="900" HorizontalAlignment="Left">
             <StackPanel Spacing="4">
                 <TextBlock Text="待处理游戏队列" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                <TextBlock Text="检测到的新游戏已自动在本地开始计时。在此处确认绑定到 Notion 游戏总表，绑定后自动同步历史记录" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                <TextBlock Text="检测到的新游戏已在本地开始记录。在此处将游戏身份与笔记库（Notion / Obsidian / 思源）对齐映射" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
             </StackPanel>
 
             <!-- Feedback InfoBar -->
@@ -22,7 +22,7 @@
             <Border x:Name="EmptyNotice" Visibility="Collapsed" CornerRadius="12" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="20">
                 <StackPanel Orientation="Horizontal" Spacing="12">
                     <FontIcon Glyph="&#xE73E;" FontSize="20" Foreground="{ThemeResource StatusGreenBrush}" />
-                    <TextBlock Text="太棒了！所有检测到的游戏均已完成 Notion 绑定，暂无待处理项。" FontSize="15" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                    <TextBlock Text="太棒了！所有检测到的游戏均已完成笔记后端关联映射，暂无待处理项。" FontSize="15" Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
                 </StackPanel>
             </Border>
 
@@ -53,7 +53,7 @@
                                                 <Path Stroke="{ThemeResource AccentBlueBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
                                                       Data="M 8 12 a 1 1 0 1 0 2 0 a 1 1 0 0 0 -2 0 M 14 12 a 1 1 0 1 0 2 0 a 1 1 0 0 0 -2 0 M 15.5 17 c 0 1 1.5 3 2 3 c 1.5 0 2.833 -1.667 3.5 -3 c 0.667 -1.667 0.5 -5.833 -1.5 -11.5 c -1.457 -1.015 -3 -1.34 -4.5 -1.5 l -0.972 1.923 a 11.913 11.913 0 0 0 -4.053 0 l -0.975 -1.923 c -1.5 0.16 -3.043 0.485 -4.5 1.5 c -2 5.667 -2.167 9.833 -1.5 11.5 c 0.667 1.333 2 3 3.5 3 c 0.5 0 2 -2 2 -3 M 7 16.5 c 3.5 1 6.5 1 10 0" />
                                             </Canvas>
-                                        </Viewbox>
+                                         </Viewbox>
                                     </Grid>
                                 </Border>
 
@@ -71,7 +71,7 @@
                                     <Button Tag="{x:Bind}" Click="OnBindGameClicked" Background="{ThemeResource AccentBlueBrush}" Foreground="White" CornerRadius="8" Padding="12,6">
                                         <StackPanel Orientation="Horizontal" Spacing="6">
                                             <FontIcon Glyph="&#xE71B;" FontSize="12" />
-                                            <TextBlock Text="绑定到 Notion" FontSize="13" FontWeight="SemiBold" />
+                                            <TextBlock Text="绑定与关联" FontSize="13" FontWeight="SemiBold" />
                                         </StackPanel>
                                     </Button>
                                     <Button Tag="{x:Bind}" Click="OnIgnoreGameClicked" CornerRadius="8" Padding="10,6">

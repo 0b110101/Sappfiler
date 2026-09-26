@@ -52,6 +52,49 @@ public class GameRecord : System.ComponentModel.INotifyPropertyChanged
     public bool IsIgnored => Status == "ignored";
     public string NotionStatusText => IsNotionBound ? "● 已绑定" : "● 未绑定";
 
+    private bool _isMapped;
+    private string _mappingStatusText = "● 未关联";
+    private string _mappingDetailsTooltip = "";
+
+    public bool IsMapped
+    {
+        get => _isMapped;
+        set
+        {
+            if (_isMapped != value)
+            {
+                _isMapped = value;
+                OnPropertyChanged(nameof(IsMapped));
+            }
+        }
+    }
+
+    public string MappingStatusText
+    {
+        get => _mappingStatusText;
+        set
+        {
+            if (_mappingStatusText != value)
+            {
+                _mappingStatusText = value;
+                OnPropertyChanged(nameof(MappingStatusText));
+            }
+        }
+    }
+
+    public string MappingDetailsTooltip
+    {
+        get => _mappingDetailsTooltip;
+        set
+        {
+            if (_mappingDetailsTooltip != value)
+            {
+                _mappingDetailsTooltip = value;
+                OnPropertyChanged(nameof(MappingDetailsTooltip));
+            }
+        }
+    }
+
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
     protected void OnPropertyChanged(string propertyName) =>
         PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(propertyName));

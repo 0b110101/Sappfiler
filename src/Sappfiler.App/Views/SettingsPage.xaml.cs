@@ -1,8 +1,10 @@
+using System.Text.Json;
 using GameTimeTracker.App.Services;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure.Notion;
+using GameTimeTracker.Infrastructure.Sync;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -15,9 +17,13 @@ public sealed partial class SettingsPage : Page
     private TrackerConfig? _config;
     private INotionClient? _notionClient;
     private INotionSyncService? _syncService;
+    private ISyncOrchestrator? _syncOrchestrator;
+    private ObsidianSyncProvider? _obsidianProvider;
+    private SiYuanSyncProvider? _siYuanProvider;
     private bool _isInitializingAutoStart;
     private bool _isInitializingTheme;
     private bool _isInitializingCutoff;
+    private bool _isInitializingProviders;
 
     public SettingsPage()
     {
@@ -32,7 +38,15 @@ public sealed partial class SettingsPage : Page
         // 形如 "0.3.1-alpha.3"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
         VersionText.Text = $"Sappfiler v{GetAppVersion()}";
 
-        if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient, INotionSyncService> t4)
+        if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient, INotionSyncService, ISyncOrchestrator> t5)
+        {
+            _repo = t5.Item1;
+            _config = t5.Item2;
+            _notionClient = t5.Item3;
+            _syncService = t5.Item4;
+            _syncOrchestrator = t5.Item5;
+        }
+        else if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient, INotionSyncService> t4)
         {
             _repo = t4.Item1;
             _config = t4.Item2;
@@ -48,6 +62,8 @@ public sealed partial class SettingsPage : Page
 
         if (_repo != null && _config != null)
         {
+            _obsidianProvider = (_syncOrchestrator?.GetProvider("obsidian") as ObsidianSyncProvider) ?? new ObsidianSyncProvider(_repo);
+            _siYuanProvider = (_syncOrchestrator?.GetProvider("siyuan") as SiYuanSyncProvider) ?? new SiYuanSyncProvider(_repo);
 
             var autoStartDb = await _repo.GetSettingAsync("auto_start");
             AutoStartHelper.SyncAutoStartRegistration(autoStartDb);
@@ -72,6 +88,31 @@ public sealed partial class SettingsPage : Page
             TokenInput.Password = await _repo.GetSettingAsync("notion_token") ?? _config.NotionToken;
             GameDbInput.Text = await _repo.GetSettingAsync("game_database_id") ?? _config.GameDatabaseId;
             DailyDbInput.Text = await _repo.GetSettingAsync("daily_database_id") ?? _config.DailyDatabaseId;
+
+            _isInitializingProviders = true;
+            var notionCfg = await _repo.GetProviderConfigAsync("notion");
+            NotionEnabledToggle.IsOn = notionCfg?.Enabled ?? _config.IsNotionConfigured;
+
+            var obsidianCfg = await _obsidianProvider.GetCurrentConfigAsync();
+            ObsidianEnabledToggle.IsOn = obsidianCfg.Enabled;
+            ObsidianModeCombo.SelectedIndex = string.Equals(obsidianCfg.Mode, "api", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            ObsidianVaultInput.Text = obsidianCfg.VaultPath ?? "";
+            ObsidianPortInput.Text = obsidianCfg.ApiPort.ToString();
+            ObsidianKeyInput.Password = obsidianCfg.ApiKey ?? "";
+            ObsidianDailyFolderInput.Text = obsidianCfg.DailyFolder ?? "Sappfiler/Daily";
+            ObsidianGamesFolderInput.Text = obsidianCfg.GamesFolder ?? "Sappfiler/Games";
+            ObsidianApiPanel.Visibility = string.Equals(obsidianCfg.Mode, "api", StringComparison.OrdinalIgnoreCase) ? Visibility.Visible : Visibility.Collapsed;
+            ObsidianFilePanel.Visibility = string.Equals(obsidianCfg.Mode, "api", StringComparison.OrdinalIgnoreCase) ? Visibility.Collapsed : Visibility.Visible;
+
+            var siYuanCfg = await _siYuanProvider.GetCurrentConfigAsync();
+            SiYuanEnabledToggle.IsOn = siYuanCfg.Enabled;
+            SiYuanEndpointInput.Text = string.IsNullOrWhiteSpace(siYuanCfg.Endpoint) ? "http://127.0.0.1:6806" : siYuanCfg.Endpoint;
+            SiYuanTokenInput.Password = siYuanCfg.Token ?? "";
+            SiYuanNotebookCombo.Text = siYuanCfg.NotebookId ?? "";
+            SiYuanMasterDbInput.Text = siYuanCfg.MasterDatabaseId ?? "";
+            SiYuanDailyDbInput.Text = siYuanCfg.DailyDatabaseId ?? "";
+            SiYuanRootPathInput.Text = string.IsNullOrWhiteSpace(siYuanCfg.RootDocPath) ? "/Sappfiler" : siYuanCfg.RootDocPath;
+            _isInitializingProviders = false;
 
             RefreshStorageUi();
         }
@@ -258,6 +299,264 @@ public sealed partial class SettingsPage : Page
             StatusInfoBar.Severity = InfoBarSeverity.Error;
             StatusInfoBar.Title = "连接失败";
             StatusInfoBar.Message = "无法通过此 Token 访问 Notion，请检查网络或 Token 权限。";
+        }
+    }
+
+    private async void OnNotionEnabledToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializingProviders || _repo == null) return;
+        var enabled = NotionEnabledToggle.IsOn;
+        await _repo.SetProviderConfigAsync("notion", enabled, "{}");
+    }
+
+    // ================= Obsidian 设置 =================
+
+    private async void OnObsidianEnabledToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializingProviders || _repo == null || _obsidianProvider == null) return;
+        var cfg = await _obsidianProvider.GetCurrentConfigAsync();
+        cfg.Enabled = ObsidianEnabledToggle.IsOn;
+        await _repo.SetProviderConfigAsync("obsidian", cfg.Enabled, JsonSerializer.Serialize(cfg));
+    }
+
+    private void OnObsidianModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ObsidianModeCombo.SelectedItem is ComboBoxItem item)
+        {
+            var isApi = string.Equals(item.Tag?.ToString(), "api", StringComparison.OrdinalIgnoreCase);
+            if (ObsidianApiPanel != null) ObsidianApiPanel.Visibility = isApi ? Visibility.Visible : Visibility.Collapsed;
+            if (ObsidianFilePanel != null) ObsidianFilePanel.Visibility = isApi ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    private async void OnBrowseVaultClicked(object sender, RoutedEventArgs e)
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(MainWindow.CurrentWindow);
+        var picker = new Windows.Storage.Pickers.FolderPicker();
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.ComputerFolder;
+
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder != null)
+        {
+            ObsidianVaultInput.Text = folder.Path;
+        }
+    }
+
+    private async void OnSaveObsidianClicked(object sender, RoutedEventArgs e)
+    {
+        if (_repo == null) return;
+        var mode = (ObsidianModeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "file";
+        int.TryParse(ObsidianPortInput.Text.Trim(), out var port);
+        if (port <= 0) port = 27124;
+
+        var cfg = new ObsidianProviderConfig
+        {
+            Enabled = ObsidianEnabledToggle.IsOn,
+            Mode = mode,
+            VaultPath = ObsidianVaultInput.Text.Trim(),
+            ApiPort = port,
+            ApiKey = ObsidianKeyInput.Password.Trim(),
+            DailyFolder = string.IsNullOrWhiteSpace(ObsidianDailyFolderInput.Text) ? "Sappfiler/Daily" : ObsidianDailyFolderInput.Text.Trim(),
+            GamesFolder = string.IsNullOrWhiteSpace(ObsidianGamesFolderInput.Text) ? "Sappfiler/Games" : ObsidianGamesFolderInput.Text.Trim()
+        };
+
+        var json = JsonSerializer.Serialize(cfg);
+        await _repo.SetProviderConfigAsync("obsidian", cfg.Enabled, json);
+
+        StatusInfoBar.Severity = InfoBarSeverity.Success;
+        StatusInfoBar.Title = "Obsidian 设置已保存";
+        StatusInfoBar.Message = "Obsidian 同步参数已成功持久化。";
+        StatusInfoBar.IsOpen = true;
+    }
+
+    private async void OnTestObsidianClicked(object sender, RoutedEventArgs e)
+    {
+        var mode = (ObsidianModeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "file";
+        StatusInfoBar.Severity = InfoBarSeverity.Informational;
+        StatusInfoBar.Title = "测试中";
+        StatusInfoBar.Message = "正在检测 Obsidian 连接状态...";
+        StatusInfoBar.IsOpen = true;
+
+        if (string.Equals(mode, "file", StringComparison.OrdinalIgnoreCase))
+        {
+            var vaultPath = ObsidianVaultInput.Text.Trim();
+            if (string.IsNullOrWhiteSpace(vaultPath) || !Directory.Exists(vaultPath))
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Error;
+                StatusInfoBar.Title = "目录无效";
+                StatusInfoBar.Message = "指定的 Vault 目录不存在，请选择有效的 Obsidian 库文件夹。";
+            }
+            else
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Success;
+                StatusInfoBar.Title = "检测成功";
+                StatusInfoBar.Message = $"Vault 目录有效: {vaultPath}";
+            }
+        }
+        else
+        {
+            int.TryParse(ObsidianPortInput.Text.Trim(), out var port);
+            if (port <= 0) port = 27124;
+            var apiKey = ObsidianKeyInput.Password.Trim();
+
+            try
+            {
+                var handler = new HttpClientHandler
+                {
+                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true
+                };
+                using var client = new HttpClient(handler);
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{port}/");
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+                using var resp = await client.SendAsync(req);
+                if (resp.IsSuccessStatusCode)
+                {
+                    StatusInfoBar.Severity = InfoBarSeverity.Success;
+                    StatusInfoBar.Title = "连接成功！";
+                    StatusInfoBar.Message = "Obsidian Local REST API 测试通过。";
+                }
+                else
+                {
+                    StatusInfoBar.Severity = InfoBarSeverity.Error;
+                    StatusInfoBar.Title = "连接失败";
+                    StatusInfoBar.Message = $"API 返回状态码 {(int)resp.StatusCode}，请确认 API Key 是否正确。";
+                }
+            }
+            catch
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Error;
+                StatusInfoBar.Title = "连接失败";
+                StatusInfoBar.Message = $"无法连接到 127.0.0.1:{port}，请确认 Obsidian 是否开启以及插件是否正在运行。";
+            }
+        }
+    }
+
+    // ================= 思源笔记设置 =================
+
+    private async void OnSiYuanEnabledToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isInitializingProviders || _repo == null || _siYuanProvider == null) return;
+        var cfg = await _siYuanProvider.GetCurrentConfigAsync();
+        cfg.Enabled = SiYuanEnabledToggle.IsOn;
+        await _repo.SetProviderConfigAsync("siyuan", cfg.Enabled, JsonSerializer.Serialize(cfg));
+    }
+
+    private async void OnFetchNotebooksClicked(object sender, RoutedEventArgs e)
+    {
+        var endpoint = SiYuanEndpointInput.Text.Trim();
+        var token = SiYuanTokenInput.Password.Trim();
+        if (string.IsNullOrWhiteSpace(endpoint)) endpoint = "http://127.0.0.1:6806";
+
+        StatusInfoBar.Severity = InfoBarSeverity.Informational;
+        StatusInfoBar.Title = "获取中";
+        StatusInfoBar.Message = "正在从思源笔记拉取笔记本列表...";
+        StatusInfoBar.IsOpen = true;
+
+        try
+        {
+            var tempCfg = new SiYuanProviderConfig { Endpoint = endpoint, Token = token };
+            using var client = new HttpClient();
+            var provider = new SiYuanSyncProvider(_repo!, client);
+            var json = JsonSerializer.Serialize(tempCfg);
+            await _repo!.SetProviderConfigAsync("siyuan", SiYuanEnabledToggle.IsOn, json);
+
+            var notebooks = await provider.GetNotebooksAsync();
+            SiYuanNotebookCombo.Items.Clear();
+            if (notebooks.Count > 0)
+            {
+                foreach (var nb in notebooks)
+                {
+                    SiYuanNotebookCombo.Items.Add(new ComboBoxItem
+                    {
+                        Content = $"{nb.Name} ({nb.Id})",
+                        Tag = nb.Id
+                    });
+                }
+                SiYuanNotebookCombo.SelectedIndex = 0;
+                StatusInfoBar.Severity = InfoBarSeverity.Success;
+                StatusInfoBar.Title = "获取成功";
+                StatusInfoBar.Message = $"已发现 {notebooks.Count} 个笔记本，请在下拉列表中选择。";
+            }
+            else
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Warning;
+                StatusInfoBar.Title = "未发现笔记本";
+                StatusInfoBar.Message = "未获取到思源笔记本列表，请检查思源笔记是否已启动且 API Token 是否匹配。";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusInfoBar.Severity = InfoBarSeverity.Error;
+            StatusInfoBar.Title = "获取失败";
+            StatusInfoBar.Message = $"连接思源异常: {ex.Message}";
+        }
+    }
+
+    private async void OnSaveSiYuanClicked(object sender, RoutedEventArgs e)
+    {
+        if (_repo == null) return;
+        var notebookId = SiYuanNotebookCombo.SelectedItem is ComboBoxItem item
+            ? item.Tag?.ToString() ?? SiYuanNotebookCombo.Text.Trim()
+            : SiYuanNotebookCombo.Text.Trim();
+
+        var cfg = new SiYuanProviderConfig
+        {
+            Enabled = SiYuanEnabledToggle.IsOn,
+            Endpoint = string.IsNullOrWhiteSpace(SiYuanEndpointInput.Text) ? "http://127.0.0.1:6806" : SiYuanEndpointInput.Text.Trim(),
+            Token = SiYuanTokenInput.Password.Trim(),
+            NotebookId = notebookId,
+            MasterDatabaseId = SiYuanMasterDbInput.Text.Trim(),
+            DailyDatabaseId = SiYuanDailyDbInput.Text.Trim(),
+            RootDocPath = string.IsNullOrWhiteSpace(SiYuanRootPathInput.Text) ? "/Sappfiler" : SiYuanRootPathInput.Text.Trim()
+        };
+
+        var json = JsonSerializer.Serialize(cfg);
+        await _repo.SetProviderConfigAsync("siyuan", cfg.Enabled, json);
+
+        StatusInfoBar.Severity = InfoBarSeverity.Success;
+        StatusInfoBar.Title = "思源设置已保存";
+        StatusInfoBar.Message = "思源笔记同步配置已保存。";
+        StatusInfoBar.IsOpen = true;
+    }
+
+    private async void OnTestSiYuanClicked(object sender, RoutedEventArgs e)
+    {
+        StatusInfoBar.Severity = InfoBarSeverity.Informational;
+        StatusInfoBar.Title = "测试中";
+        StatusInfoBar.Message = "正在连接思源笔记内核 API...";
+        StatusInfoBar.IsOpen = true;
+
+        var endpoint = string.IsNullOrWhiteSpace(SiYuanEndpointInput.Text) ? "http://127.0.0.1:6806" : SiYuanEndpointInput.Text.Trim();
+        var token = SiYuanTokenInput.Password.Trim();
+
+        try
+        {
+            var tempCfg = new SiYuanProviderConfig { Endpoint = endpoint, Token = token };
+            var json = JsonSerializer.Serialize(tempCfg);
+            await _repo!.SetProviderConfigAsync("siyuan", SiYuanEnabledToggle.IsOn, json);
+
+            var provider = new SiYuanSyncProvider(_repo!);
+            var success = await provider.TestConnectionAsync();
+
+            if (success)
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Success;
+                StatusInfoBar.Title = "连接成功！";
+                StatusInfoBar.Message = "思源笔记内核 API 通信正常。";
+            }
+            else
+            {
+                StatusInfoBar.Severity = InfoBarSeverity.Error;
+                StatusInfoBar.Title = "连接失败";
+                StatusInfoBar.Message = "无法连接思源笔记，请检查服务是否开启或 Token 是否正确。";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusInfoBar.Severity = InfoBarSeverity.Error;
+            StatusInfoBar.Title = "连接失败";
+            StatusInfoBar.Message = $"测试失败: {ex.Message}";
         }
     }
 

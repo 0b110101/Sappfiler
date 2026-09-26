@@ -294,4 +294,209 @@ public class GameMatcher : IGameMatcher
         // 也不要给一个看着很像、实际错误的建议。
         return results;
     }
+
+    public MatchResult? MatchCandidate(
+        string gameTitle,
+        IReadOnlyList<RemoteGameCandidate> candidates,
+        string? steamAppId = null,
+        string? steamLocalizedTitle = null)
+    {
+        var allMatches = MatchAllCandidates(gameTitle, candidates, steamAppId, steamLocalizedTitle);
+        if (allMatches.Count == 0) return null;
+        return allMatches[0];
+    }
+
+    public IReadOnlyList<MatchResult> MatchAllCandidates(
+        string gameTitle,
+        IReadOnlyList<RemoteGameCandidate> candidates,
+        string? steamAppId = null,
+        string? steamLocalizedTitle = null)
+    {
+        var results = new List<MatchResult>();
+        if (candidates == null || candidates.Count == 0 || string.IsNullOrWhiteSpace(gameTitle))
+        {
+            return results;
+        }
+
+        var cleanQuery = gameTitle.Trim();
+        var normQuery = NormalizeTitle(cleanQuery);
+        var normSteamCn = !string.IsNullOrWhiteSpace(steamLocalizedTitle) ? NormalizeTitle(steamLocalizedTitle.Trim()) : null;
+
+        // 1. External ID (e.g. "steam:2246340" 或 "2246340")
+        if (!string.IsNullOrWhiteSpace(steamAppId))
+        {
+            var appId = steamAppId.Trim();
+            var steamKey = $"steam:{appId}";
+            var extMatches = candidates.Where(c =>
+                !string.IsNullOrWhiteSpace(c.ExternalId) &&
+                (string.Equals(c.ExternalId.Trim(), steamKey, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(c.ExternalId.Trim(), appId, StringComparison.OrdinalIgnoreCase))).ToList();
+
+            if (extMatches.Count == 1)
+            {
+                results.Add(new MatchResult
+                {
+                    Candidate = extMatches[0],
+                    Score = 100.0,
+                    MatchType = GameMatchType.ExternalId,
+                    Evidence = $"Steam AppID {appId} 完全匹配",
+                    CanAutoBind = true
+                });
+                return results;
+            }
+            else if (extMatches.Count > 1)
+            {
+                foreach (var c in extMatches)
+                {
+                    results.Add(new MatchResult
+                    {
+                        Candidate = c,
+                        Score = 95.0,
+                        MatchType = GameMatchType.ExternalId,
+                        Evidence = $"Steam AppID {appId} 匹配但存在 {extMatches.Count} 个冲突条目，需人工确认",
+                        CanAutoBind = false
+                    });
+                }
+                return results;
+            }
+        }
+
+        // 2. Exact Title Match
+        var exactTitleMatches = candidates.Where(c =>
+            string.Equals(c.RemoteName.Trim(), cleanQuery, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (exactTitleMatches.Count == 1)
+        {
+            results.Add(new MatchResult
+            {
+                Candidate = exactTitleMatches[0],
+                Score = 100.0,
+                MatchType = GameMatchType.ExactTitle,
+                Evidence = $"游戏标题「{cleanQuery}」完全一致",
+                CanAutoBind = true
+            });
+            return results;
+        }
+        else if (exactTitleMatches.Count > 1)
+        {
+            foreach (var c in exactTitleMatches)
+            {
+                results.Add(new MatchResult
+                {
+                    Candidate = c,
+                    Score = 95.0,
+                    MatchType = GameMatchType.ExactTitle,
+                    Evidence = $"存在多个同名「{cleanQuery}」条目，需人工确认",
+                    CanAutoBind = false
+                });
+            }
+            return results;
+        }
+
+        // 3. Exact Alias Match
+        var aliasMatches = candidates.Where(c =>
+            c.Aliases.Any(a => string.Equals(a.Trim(), cleanQuery, StringComparison.OrdinalIgnoreCase))).ToList();
+
+        if (aliasMatches.Count == 1)
+        {
+            var matchedAlias = aliasMatches[0].Aliases.First(a => string.Equals(a.Trim(), cleanQuery, StringComparison.OrdinalIgnoreCase));
+            results.Add(new MatchResult
+            {
+                Candidate = aliasMatches[0],
+                Score = 98.0,
+                MatchType = GameMatchType.Alias,
+                Evidence = $"完全匹配别名「{matchedAlias}」",
+                CanAutoBind = true
+            });
+            return results;
+        }
+        else if (aliasMatches.Count > 1)
+        {
+            foreach (var c in aliasMatches)
+            {
+                results.Add(new MatchResult
+                {
+                    Candidate = c,
+                    Score = 90.0,
+                    MatchType = GameMatchType.Alias,
+                    Evidence = $"命中别名「{cleanQuery}」但存在 {aliasMatches.Count} 个候选，需人工确认",
+                    CanAutoBind = false
+                });
+            }
+            return results;
+        }
+
+        // 4. Steam Localized Title Exact Match (官方本地化名称辅助对齐)
+        if (!string.IsNullOrWhiteSpace(steamLocalizedTitle))
+        {
+            var cleanCn = steamLocalizedTitle.Trim();
+            var cnMatches = candidates.Where(c =>
+                string.Equals(c.RemoteName.Trim(), cleanCn, StringComparison.OrdinalIgnoreCase) ||
+                c.Aliases.Any(a => string.Equals(a.Trim(), cleanCn, StringComparison.OrdinalIgnoreCase))).ToList();
+
+            if (cnMatches.Count == 1)
+            {
+                results.Add(new MatchResult
+                {
+                    Candidate = cnMatches[0],
+                    Score = 96.0,
+                    MatchType = GameMatchType.ExactTitle,
+                    Evidence = $"Steam 本地化名称「{cleanCn}」完全对齐",
+                    CanAutoBind = true
+                });
+                return results;
+            }
+            else if (cnMatches.Count > 1)
+            {
+                foreach (var c in cnMatches)
+                {
+                    results.Add(new MatchResult
+                    {
+                        Candidate = c,
+                        Score = 88.0,
+                        MatchType = GameMatchType.ExactTitle,
+                        Evidence = $"Steam 本地化名称「{cleanCn}」匹配到 {cnMatches.Count} 个候选，需人工确认",
+                        CanAutoBind = false
+                    });
+                }
+                return results;
+            }
+        }
+
+        // 5. Normalized Title or Normalized Alias Match
+        var normMatches = candidates.Where(c =>
+            NormalizeTitle(c.RemoteName) == normQuery ||
+            c.Aliases.Any(a => NormalizeTitle(a) == normQuery) ||
+            (!string.IsNullOrWhiteSpace(normSteamCn) && (NormalizeTitle(c.RemoteName) == normSteamCn || c.Aliases.Any(a => NormalizeTitle(a) == normSteamCn)))).ToList();
+
+        if (normMatches.Count == 1)
+        {
+            results.Add(new MatchResult
+            {
+                Candidate = normMatches[0],
+                Score = 92.0,
+                MatchType = GameMatchType.NormalizedTitle,
+                Evidence = "符号/大小写/版本后缀归一化后完全匹配",
+                CanAutoBind = true
+            });
+            return results;
+        }
+        else if (normMatches.Count > 1)
+        {
+            foreach (var c in normMatches)
+            {
+                results.Add(new MatchResult
+                {
+                    Candidate = c,
+                    Score = 82.0,
+                    MatchType = GameMatchType.NormalizedTitle,
+                    Evidence = $"归一化匹配到 {normMatches.Count} 个候选，需人工确认",
+                    CanAutoBind = false
+                });
+            }
+            return results;
+        }
+
+        return results;
+    }
 }

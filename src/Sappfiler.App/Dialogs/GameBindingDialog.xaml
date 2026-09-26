@@ -34,7 +34,7 @@
         </Border>
 
         <!-- Prompt -->
-        <TextBlock Text="请选择对应的 Notion 记录：" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextSecondaryBrush}" />
+        <TextBlock x:Name="PromptTitleText" Text="请选择对应的笔记记录：" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextSecondaryBrush}" />
 
         <!-- Candidates Radio List -->
         <StackPanel x:Name="CandidatesPanel" Spacing="8">
@@ -49,7 +49,7 @@
 
         <!-- Manual Catalog Search -->
         <StackPanel Spacing="6">
-            <TextBlock Text="或者从 Notion 游戏总表中搜索绑定：" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
+            <TextBlock x:Name="SearchPromptText" Text="或者从笔记库/数据库中搜索绑定：" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}" />
             <AutoSuggestBox x:Name="CatalogSuggestBox" PlaceholderText="输入游戏名称搜索..."
                             TextChanged="OnCatalogSuggestBoxTextChanged"
                             SuggestionChosen="OnCatalogSuggestBoxSuggestionChosen" />

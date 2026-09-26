@@ -49,6 +49,7 @@ public interface IDatabaseRepository
     Task<IReadOnlyList<DailySummary>> GetTopGamesByDateAsync(string date, int limit = 5);
     Task<int> GetConsecutiveStreakDaysAsync(DateTime referenceDate, int cutoffHour = 24);
     Task<IReadOnlyDictionary<int, string>> GetEarliestPlayDatesAsync();
+    Task<GameAggregateStats> GetAggregateStatsAsync(int gameId);
 
     /// <summary>
     /// 回写一条已同步每日记录在 Notion 侧的标题与图标快照。
@@ -63,6 +64,22 @@ public interface IDatabaseRepository
     Task UpsertCatalogItemsAsync(IEnumerable<NotionGameCatalogItem> items);
     Task ClearCatalogCacheAsync();
     Task<Dictionary<string, List<string>>> GetGameGenresMapAsync();
+
+    // Multi-Backend Provider Mappings & Records
+    Task<GameMappingRecord?> GetGameMappingAsync(int gameId, string provider);
+    Task<IReadOnlyList<GameMappingRecord>> GetGameMappingsAsync(int gameId);
+    Task<IReadOnlyList<GameMappingRecord>> GetAllGameMappingsAsync();
+    Task UpsertGameMappingAsync(int gameId, string provider, string remoteId, string? remoteName = null, string? remoteLocator = null, string? matchType = null, double? matchConfidence = null);
+    Task DeleteGameMappingAsync(int gameId, string provider);
+
+    Task<SyncRecordItem?> GetSyncRecordAsync(int dailySummaryId, string provider);
+    Task<IReadOnlyList<SyncRecordItem>> GetSyncRecordsForDailyAsync(int dailySummaryId);
+    Task UpsertSyncRecordAsync(int dailySummaryId, string provider, string status, string? remoteId = null, string? errorMessage = null);
+    Task<IReadOnlyList<DailySummary>> GetPendingSummariesForProviderAsync(string provider);
+
+    Task<ProviderConfigItem?> GetProviderConfigAsync(string provider);
+    Task<IReadOnlyList<ProviderConfigItem>> GetAllProviderConfigsAsync();
+    Task SetProviderConfigAsync(string provider, bool enabled, string configJson);
 
     // App Settings
     Task<string?> GetSettingAsync(string key);
@@ -86,6 +103,8 @@ public interface IGameMatcher
     string NormalizeTitle(string title);
     Task<string?> ResolveSteamChineseTitleAsync(string appId);
     IReadOnlyList<GameCandidate> MatchGame(string gameTitle, IReadOnlyList<NotionGameCatalogItem> catalog, string? steamAppId = null);
+    MatchResult? MatchCandidate(string gameTitle, IReadOnlyList<RemoteGameCandidate> candidates, string? steamAppId = null, string? steamLocalizedTitle = null);
+    IReadOnlyList<MatchResult> MatchAllCandidates(string gameTitle, IReadOnlyList<RemoteGameCandidate> candidates, string? steamAppId = null, string? steamLocalizedTitle = null);
 }
 
 public interface INotionClient

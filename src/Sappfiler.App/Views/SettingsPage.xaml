@@ -63,7 +63,19 @@
                     Background="{ThemeResource CardBackgroundBrush}"
                     Padding="22">
                 <StackPanel Spacing="16">
-                    <TextBlock Text="Notion 同步配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="Notion 同步配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="通过 Notion API 将游戏时长与游戏总表同步至云端" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="NotionEnabledToggle" Grid.Column="1" Toggled="OnNotionEnabledToggled" OnContent="已开启" OffContent="已关闭" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
 
                     <PasswordBox x:Name="TokenInput" Header="Notion Token" PlaceholderText="secret_xxxxxxxxxxxxxxxx"
                                  MaxWidth="520" HorizontalAlignment="Stretch" />
@@ -73,8 +85,129 @@
                              MaxWidth="520" HorizontalAlignment="Stretch" />
 
                     <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
-                        <Button x:Name="SaveBtn" Click="OnSaveClicked" Content="保存设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button x:Name="SaveBtn" Click="OnSaveClicked" Content="保存 Notion 设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
                         <Button x:Name="TestBtn" Click="OnTestConnectionClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Obsidian Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="Obsidian 同步配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="将每日时长与游戏笔记同步至 Obsidian Vault，支持原子写入与标记区间保护" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="ObsidianEnabledToggle" Grid.Column="1" Toggled="OnObsidianEnabledToggled" OnContent="已开启" OffContent="已关闭" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="同步模式" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                        <ComboBox x:Name="ObsidianModeCombo" MinWidth="320" SelectionChanged="OnObsidianModeChanged">
+                            <ComboBoxItem Content="文件直写模式（直接读写 Vault 目录，推荐）" Tag="file" />
+                            <ComboBoxItem Content="Local REST API 插件模式（通过本地 HTTP API）" Tag="api" />
+                        </ComboBox>
+                    </StackPanel>
+
+                    <!-- 文件模式专属: Vault 路径 -->
+                    <StackPanel x:Name="ObsidianFilePanel" Spacing="8">
+                        <TextBlock Text="Vault 根目录路径" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ObsidianVaultInput" PlaceholderText="例如: D:\Obsidian\MyVault"
+                                     HorizontalAlignment="Stretch" />
+                            <Button x:Name="BrowseVaultBtn" Grid.Column="1" Content="浏览…" CornerRadius="8" Padding="14,6"
+                                    Margin="12,0,0,0" Click="OnBrowseVaultClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- API 模式专属: 端口与 Key -->
+                    <StackPanel x:Name="ObsidianApiPanel" Spacing="12" Visibility="Collapsed">
+                        <TextBox x:Name="ObsidianPortInput" Header="API 端口" PlaceholderText="27124"
+                                 MaxWidth="520" HorizontalAlignment="Stretch" />
+                        <PasswordBox x:Name="ObsidianKeyInput" Header="API Key" PlaceholderText="插件生成的 API Key"
+                                     MaxWidth="520" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+
+                    <!-- 通用子目录设置 -->
+                    <TextBox x:Name="ObsidianDailyFolderInput" Header="日报保存子路径" PlaceholderText="Sappfiler/Daily"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+                    <TextBox x:Name="ObsidianGamesFolderInput" Header="游戏笔记保存子路径" PlaceholderText="Sappfiler/Games"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                        <Button x:Name="SaveObsidianBtn" Click="OnSaveObsidianClicked" Content="保存 Obsidian 设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button x:Name="TestObsidianBtn" Click="OnTestObsidianClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 思源笔记 (SiYuan) Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="思源笔记 (SiYuan) 同步配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="通过官方本地内核 API 将游戏时长与游戏文档同步至思源笔记本" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SiYuanEnabledToggle" Grid.Column="1" Toggled="OnSiYuanEnabledToggled" OnContent="已开启" OffContent="已关闭" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <TextBox x:Name="SiYuanEndpointInput" Header="API 地址" PlaceholderText="http://127.0.0.1:6806"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+                    <PasswordBox x:Name="SiYuanTokenInput" Header="API Token (设置 → 关于 → API Token，无则留空)"
+                                 MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="目标笔记本" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="SiYuanNotebookCombo" PlaceholderText="请选择或输入笔记本 ID"
+                                      HorizontalAlignment="Stretch" IsEditable="True" />
+                            <Button x:Name="FetchNotebooksBtn" Grid.Column="1" Content="刷新列表" CornerRadius="8" Padding="14,6"
+                                    Margin="12,0,0,0" Click="OnFetchNotebooksClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <TextBox x:Name="SiYuanMasterDbInput" Header="游戏总表数据库 Block ID (推荐)" PlaceholderText="输入思源游戏总表数据库 Block ID（支持原生 Rollup 自动汇总总时长）"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <TextBox x:Name="SiYuanDailyDbInput" Header="每日打卡数据库 Block ID (推荐)" PlaceholderText="输入思源每日时长打卡数据库 Block ID（支持关联游戏总表打卡）"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <TextBox x:Name="SiYuanRootPathInput" Header="根文档路径 (文档模式备用)" PlaceholderText="/Sappfiler"
+                             MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                        <Button x:Name="SaveSiYuanBtn" Click="OnSaveSiYuanClicked" Content="保存思源设置" CornerRadius="8" Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button x:Name="TestSiYuanBtn" Click="OnTestSiYuanClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
                     </StackPanel>
                 </StackPanel>
             </Border>

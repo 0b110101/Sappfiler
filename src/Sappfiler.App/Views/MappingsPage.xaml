@@ -16,7 +16,7 @@
             <Grid>
                 <StackPanel Spacing="4">
                     <TextBlock Text="游戏映射库" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                    <TextBlock Text="管理已识别的本地游戏身份及其关联的 Notion 总表映射" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+                    <TextBlock Text="管理已识别的本地游戏身份及其关联的多端笔记映射（Notion / Obsidian / 思源）" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
                 </StackPanel>
 
                 <AutoSuggestBox x:Name="SearchBox" QuerySubmitted="OnSearchSubmitted"
@@ -37,13 +37,13 @@
                             <ColumnDefinition Width="2.5*" MinWidth="180" />
                             <ColumnDefinition Width="100" />
                             <ColumnDefinition Width="2*" MinWidth="140" />
-                            <ColumnDefinition Width="120" />
+                            <ColumnDefinition Width="140" />
                             <ColumnDefinition Width="130" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="游戏名称" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
                         <TextBlock Grid.Column="1" Text="平台" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
                         <TextBlock Grid.Column="2" Text="可执行文件" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
-                        <TextBlock Grid.Column="3" Text="Notion 绑定状态" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Grid.Column="3" Text="笔记关联状态" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
                         <TextBlock Grid.Column="4" Text="操作" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" HorizontalAlignment="Right" />
                     </Grid>
 
@@ -57,7 +57,7 @@
                                             <ColumnDefinition Width="2.5*" MinWidth="180" />
                                             <ColumnDefinition Width="100" />
                                             <ColumnDefinition Width="2*" MinWidth="140" />
-                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="140" />
                                             <ColumnDefinition Width="130" />
                                         </Grid.ColumnDefinitions>
 
@@ -72,18 +72,18 @@
 
                                         <TextBlock Grid.Column="2" Text="{x:Bind Executable}" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
 
-                                        <StackPanel Grid.Column="3" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind NotionPageId}">
-                                            <TextBlock Text="● 已绑定" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusGreenBrush}"
-                                                       Visibility="{x:Bind IsNotionBound, Mode=OneWay, Converter={StaticResource BoolToVisConverter}}" />
-                                            <TextBlock Text="● 未绑定" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusOrangeBrush}"
-                                                       Visibility="{x:Bind IsNotionBound, Mode=OneWay, Converter={StaticResource InverseBoolToVisConverter}}" />
+                                        <StackPanel Grid.Column="3" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind MappingDetailsTooltip, Mode=OneWay}">
+                                            <TextBlock Text="{x:Bind MappingStatusText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusGreenBrush}"
+                                                       Visibility="{x:Bind IsMapped, Mode=OneWay, Converter={StaticResource BoolToVisConverter}}" />
+                                            <TextBlock Text="● 未关联" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource StatusOrangeBrush}"
+                                                       Visibility="{x:Bind IsMapped, Mode=OneWay, Converter={StaticResource InverseBoolToVisConverter}}" />
                                         </StackPanel>
 
                                         <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Center">
-                                            <Button Tag="{x:Bind}" Click="OnBindClicked" ToolTipService.ToolTip="重新绑定 Notion 总表游戏" Padding="6,4">
+                                            <Button Tag="{x:Bind}" Click="OnBindClicked" ToolTipService.ToolTip="关联与映射游戏笔记" Padding="6,4">
                                                 <FontIcon Glyph="&#xE71B;" FontSize="12" />
                                             </Button>
-                                            <Button Tag="{x:Bind}" Click="OnUnbindClicked" ToolTipService.ToolTip="解除 Notion 关联" Padding="6,4">
+                                            <Button Tag="{x:Bind}" Click="OnUnbindClicked" ToolTipService.ToolTip="解除笔记关联" Padding="6,4">
                                                 <FontIcon Glyph="&#xE77A;" FontSize="12" />
                                             </Button>
                                             <Button Tag="{x:Bind}" Click="OnDeleteClicked" ToolTipService.ToolTip="彻底删除记录" Foreground="{ThemeResource StatusRedBrush}" Padding="6,4">

@@ -12,6 +12,7 @@ public sealed partial class MappingsPage : Page
 {
     private IDatabaseRepository? _repo;
     private INotionSyncService? _syncService;
+    private ISyncOrchestrator? _orchestrator;
     private IGameMatcher? _matcher;
     private List<GameRecord> _allGames = new();
 
@@ -26,6 +27,11 @@ public sealed partial class MappingsPage : Page
 
         switch (e.Parameter)
         {
+            case (IDatabaseRepository repo, INotionSyncService syncService, ISyncOrchestrator orchestrator):
+                _repo = repo;
+                _syncService = syncService;
+                _orchestrator = orchestrator;
+                break;
             case (IDatabaseRepository repo, INotionSyncService syncService):
                 _repo = repo;
                 _syncService = syncService;
@@ -94,6 +100,55 @@ public sealed partial class MappingsPage : Page
     {
         if (_repo == null) return;
         var games = await _repo.GetAllGamesAsync();
+        var allMappings = await _repo.GetAllGameMappingsAsync();
+        var mapLookup = allMappings.GroupBy(m => m.GameId).ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var g in games)
+        {
+            mapLookup.TryGetValue(g.Id, out var gMaps);
+            gMaps ??= new List<GameMappingRecord>();
+
+            bool isBound = gMaps.Count > 0 || !string.IsNullOrWhiteSpace(g.NotionPageId);
+            string badgeText;
+            if (gMaps.Count > 0)
+            {
+                badgeText = $"● 已关联 ({gMaps.Count}端)";
+            }
+            else if (!string.IsNullOrWhiteSpace(g.NotionPageId))
+            {
+                badgeText = "● 已关联 (Notion)";
+            }
+            else
+            {
+                badgeText = "● 未关联";
+            }
+
+            var sbTip = new System.Text.StringBuilder();
+            if (gMaps.Count > 0)
+            {
+                foreach (var m in gMaps)
+                {
+                    sbTip.AppendLine($"{m.Provider.ToUpperInvariant()}: {m.RemoteName ?? m.RemoteId}");
+                    if (!string.IsNullOrWhiteSpace(m.MatchType))
+                    {
+                        sbTip.AppendLine($"  (匹配类型: {m.MatchType})");
+                    }
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(g.NotionPageId))
+            {
+                sbTip.AppendLine($"NOTION: {g.NotionPageId}");
+            }
+            else
+            {
+                sbTip.Append("尚未与任何笔记或数据库建立身份映射");
+            }
+
+            g.IsMapped = isBound;
+            g.MappingStatusText = badgeText;
+            g.MappingDetailsTooltip = sbTip.ToString().Trim();
+        }
+
         _allGames = games.ToList();
         FilterMappings(SearchBox.Text);
     }
@@ -121,46 +176,78 @@ public sealed partial class MappingsPage : Page
 
     private async void OnBindClicked(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: GameRecord game }) return;
-        if (_repo == null || _syncService == null || _matcher == null) return;
+        if (sender is not Button { Tag: GameRecord game } || _repo == null || _matcher == null) return;
 
         try
         {
-            var catalog = await _repo.GetCatalogItemsAsync();
-            if (catalog.Count == 0)
+            var enabledProviders = _orchestrator?.Providers.Where(p => p.IsEnabled).ToList()
+                ?? new List<ISyncProvider>();
+
+            if (enabledProviders.Count == 0 && _syncService != null)
             {
-                await _syncService.RefreshGameCatalogCacheAsync();
-                catalog = await _repo.GetCatalogItemsAsync();
+                await BindNotionSingleAsync(game);
+                return;
             }
 
-            var candidates = _matcher.MatchGame(game.Name, catalog, game.PlatformId);
-
-            var dialog = new GameBindingDialog
+            if (enabledProviders.Count == 0)
             {
-                XamlRoot = XamlRoot
-            };
+                ShowStatus(InfoBarSeverity.Warning, "未启用同步后端", "请先在「设置」中配置并启用笔记后端。");
+                return;
+            }
 
-            dialog.Setup(game.Name, $"{game.Platform.ToUpper()} · {game.PlatformId}", game.Executable, candidates, catalog);
-
-            var result = await dialog.ShowAsync();
-            if (result == ContentDialogResult.Primary)
+            int boundCount = 0;
+            foreach (var provider in enabledProviders)
             {
-                var pageId = dialog.GetSelectedPageId();
-                if (!string.IsNullOrEmpty(pageId))
+                var catalog = await provider.GetRemoteCatalogAsync();
+                var matches = _matcher.MatchAllCandidates(game.Name, catalog, steamAppId: game.PlatformId);
+
+                var dialog = new GameBindingDialog
                 {
-                    if (pageId == "CREATE_NEW")
-                    {
-                        pageId = await _syncService.CreateGameMasterAndLinkAsync(game.Id, game.Name);
-                    }
-                    else
-                    {
-                        await _syncService.LinkGameRelationAsync(game.Id, pageId);
-                    }
+                    XamlRoot = XamlRoot
+                };
 
-                    await LoadMappingsAsync();
-                    ShowStatus(InfoBarSeverity.Success, "绑定成功",
-                        $"已将「{game.Name}」关联至 Notion 总表，并已触发记录同步。");
+                dialog.SetupForProvider(
+                    provider.ProviderName,
+                    provider.DisplayName,
+                    game.Name,
+                    $"{game.Platform.ToUpper()} · {game.PlatformId}",
+                    game.Executable,
+                    matches,
+                    catalog);
+
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    var selectedId = dialog.GetSelectedPageId();
+                    var selectedCand = dialog.GetSelectedCandidate();
+
+                    if (!string.IsNullOrEmpty(selectedId))
+                    {
+                        if (selectedId == "CREATE_NEW")
+                        {
+                            var newId = await provider.CreateGameEntryAsync(game);
+                            await _repo.UpsertGameMappingAsync(game.Id, provider.ProviderName, newId, game.Name, null, "manual_create", 100);
+                        }
+                        else
+                        {
+                            var candName = selectedCand?.RemoteName ?? game.Name;
+                            var candLoc = selectedCand?.Location;
+                            await _repo.UpsertGameMappingAsync(game.Id, provider.ProviderName, selectedId, candName, candLoc, "manual", 100);
+
+                            if (string.Equals(provider.ProviderName, "notion", StringComparison.OrdinalIgnoreCase) && _syncService != null)
+                            {
+                                await _syncService.LinkGameRelationAsync(game.Id, selectedId);
+                            }
+                        }
+                        boundCount++;
+                    }
                 }
+            }
+
+            if (boundCount > 0)
+            {
+                await LoadMappingsAsync();
+                ShowStatus(InfoBarSeverity.Success, "绑定成功", $"已成功为「{game.Name}」更新笔记后端映射。");
             }
         }
         catch (Exception ex)
@@ -169,12 +256,58 @@ public sealed partial class MappingsPage : Page
         }
     }
 
+    private async Task BindNotionSingleAsync(GameRecord game)
+    {
+        if (_repo == null || _syncService == null || _matcher == null) return;
+        var catalog = await _repo.GetCatalogItemsAsync();
+        if (catalog.Count == 0)
+        {
+            await _syncService.RefreshGameCatalogCacheAsync();
+            catalog = await _repo.GetCatalogItemsAsync();
+        }
+
+        var candidates = _matcher.MatchGame(game.Name, catalog, game.PlatformId);
+
+        var dialog = new GameBindingDialog
+        {
+            XamlRoot = XamlRoot
+        };
+
+        dialog.Setup(game.Name, $"{game.Platform.ToUpper()} · {game.PlatformId}", game.Executable, candidates, catalog);
+
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary)
+        {
+            var pageId = dialog.GetSelectedPageId();
+            if (!string.IsNullOrEmpty(pageId))
+            {
+                if (pageId == "CREATE_NEW")
+                {
+                    pageId = await _syncService.CreateGameMasterAndLinkAsync(game.Id, game.Name);
+                }
+                else
+                {
+                    await _syncService.LinkGameRelationAsync(game.Id, pageId);
+                }
+
+                await LoadMappingsAsync();
+                ShowStatus(InfoBarSeverity.Success, "绑定成功", $"已将「{game.Name}」关联至 Notion 总表，并已触发记录同步。");
+            }
+        }
+    }
+
     private async void OnUnbindClicked(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: GameRecord game } && _repo != null)
         {
+            var mappings = await _repo.GetGameMappingsAsync(game.Id);
+            foreach (var m in mappings)
+            {
+                await _repo.DeleteGameMappingAsync(game.Id, m.Provider);
+            }
             await _repo.UpdateGameNotionIdAsync(game.Id, "");
             await LoadMappingsAsync();
+            ShowStatus(InfoBarSeverity.Informational, "已解除关联", $"已清除「{game.Name}」在各笔记后端的映射关系，历史游玩时长完好保留。");
         }
     }
 

@@ -35,13 +35,13 @@
       AssemblyVersion               -> 程序集绑定版本，只在 MAJOR 变动时改
   -->
   <PropertyGroup>
-    <VersionPrefix>0.3.2</VersionPrefix>
+    <VersionPrefix>0.4.0</VersionPrefix>
     <!-- 预发布序号：调试中用 alpha.N；测试确认后留空并把 VersionPrefix 定为该版本 -->
-    <VersionSuffix>alpha.2</VersionSuffix>
+    <VersionSuffix>alpha.1</VersionSuffix>
 
     <!-- FileVersion 只能是四段纯数字：MAJOR.MINOR.PATCH.<预发布序号>（无预发布时为 0） -->
-    <FileVersion>0.3.2.2</FileVersion>
-    <AssemblyVersion>0.3.2.0</AssemblyVersion>
+    <FileVersion>0.4.0.1</FileVersion>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
 
     <Product>Sappfiler</Product>
     <Company>Sappfiler</Company>
