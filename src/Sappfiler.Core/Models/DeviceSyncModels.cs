@@ -142,6 +142,38 @@ public sealed class SyncTombstone
 }
 
 /// <summary>
+/// **Identity Supersession**：表达"这个身份**等同于**那个身份"，用于跨设备身份合并。
+///
+/// ⚠️ 与 <see cref="SyncTombstone"/>（= 这个实体被**删除**了）**严格区分，不得混用**：
+/// <code>
+/// 真删除     → sync_tombstones              （对端收到后删除本地副本）
+/// 身份合并   → sync_identity_supersessions  （对端收到后把引用重定向到 canonical）
+/// </code>
+/// 用墓碑表达身份合并，会让对端把"合并"误解成"删除"从而丢数据
+/// （用户 2026-10-03 裁定，"这两个概念以后不得再混用"）。
+/// </summary>
+public sealed class SyncIdentitySupersession
+{
+    public string SupersessionId { get; set; } = "";
+
+    public string EntityType { get; set; } = "";
+
+    /// <summary>被并入的 identity（例如远端来的 BBB）。</summary>
+    public string SupersededGlobalId { get; set; } = "";
+
+    /// <summary>保留的权威 identity（例如本机的 AAA）。</summary>
+    public string CanonicalGlobalId { get; set; } = "";
+
+    /// <summary>做出该判断的设备。</summary>
+    public string DeviceId { get; set; } = "";
+
+    /// <summary>判定依据，见 <see cref="GameTimeTracker.Core.DeviceSync.SupersessionReasons"/>。</summary>
+    public string Reason { get; set; } = "";
+
+    public string CreatedAtUtc { get; set; } = "";
+}
+
+/// <summary>
 /// <b>Deferred 台账</b>：远端变更"本轮没有落地、但同步游标已经越过它"时留痕。
 ///
 /// ⚠️ 为什么必须有这张表（用户 2026-10-03 冻结）：
@@ -182,6 +214,30 @@ public sealed class DeferredSyncChange
 
     /// <summary>被反复发现了几次（值大说明长期无法落地，多半需要人工介入）。</summary>
     public int SeenCount { get; set; }
+
+    /// <summary>这条远端变更的操作（Create/Update/Delete）。</summary>
+    public SyncOperation Operation { get; set; } = SyncOperation.Create;
+
+    /// <summary>**远端**设备 id（发起这条变更的那台设备）—— 不是本机。</summary>
+    public string? DeviceId { get; set; }
+
+    /// <summary>
+    /// 当次 Pull 收到的**原始 payload 快照**（migration 003 新增）。
+    ///
+    /// ⚠️ 这是 2e 重处理的**唯一输入**：被延后的远端对象从未落地到本地库，
+    /// 没有它就无法在离线状态下判断它到底是不是本地某个游戏。
+    /// 重处理时**不得**重新去远端拉，也**不得**按本地当前状态重新构造。
+    /// </summary>
+    public string? Payload { get; set; }
+
+    /// <summary>
+    /// 处理完成时间。**NULL = 仍待处理**；非 NULL 表示已经过 Identity Reconciliation 并有明确结论。
+    /// ⚠️ **Resolved ≠ Completed**：审计记录必须保留。
+    /// </summary>
+    public string? ResolvedAtUtc { get; set; }
+
+    /// <summary>处理结论（规范化取值），见方案文档附录 I.8。</summary>
+    public string? Resolution { get; set; }
 }
 
 /// <summary>

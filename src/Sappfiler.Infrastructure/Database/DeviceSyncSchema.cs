@@ -35,6 +35,9 @@ internal static class DeviceSyncSchema
             EnsureGamesIdentityColumn(conn);
             BackfillGameSyncIdentity(conn);
 
+            // migration 003：Deferred 台账补 payload/operation/device_id + resolved 状态（2e 重处理的输入）。
+            EnsureDeferredReprocessingColumns(conn);
+
             EnsureLocalDevice(conn);
         }
         catch (Exception ex)
@@ -124,6 +127,25 @@ internal static class DeviceSyncSchema
             CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_tombstones_entity
                 ON sync_tombstones(entity_type, entity_global_id);
 
+            -- Identity Supersession（2e 冻结语义）：表达"这个身份**等同于**那个身份"。
+            --
+            -- ⚠️ 与 sync_tombstones（= 这个实体被**删除**了）严格区分，**两者不得混用**：
+            --      真删除      → sync_tombstones（对端收到后删除本地副本）
+            --      身份合并    → sync_identity_supersessions（对端收到后把引用**重定向**到 canonical）
+            --    用墓碑表达身份合并，会让对端把"合并"误解成"删除"从而丢数据。
+            --    → 删除与身份合并在数据模型和同步语义上必须严格区分（用户 2026-10-03 裁定）。
+            CREATE TABLE IF NOT EXISTS sync_identity_supersessions (
+                supersession_id      TEXT PRIMARY KEY,
+                entity_type          TEXT NOT NULL,
+                superseded_global_id TEXT NOT NULL,
+                canonical_global_id  TEXT NOT NULL,
+                device_id            TEXT NOT NULL,
+                reason               TEXT NOT NULL,
+                created_at_utc       TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_supersede_entity
+                ON sync_identity_supersessions(entity_type, superseded_global_id);
+
             -- 每个 Backend 独立维护游标（切换后端时绝不复用）。
             CREATE TABLE IF NOT EXISTS sync_state (
                 backend          TEXT NOT NULL,
@@ -155,6 +177,21 @@ internal static class DeviceSyncSchema
             CREATE INDEX IF NOT EXISTS idx_sync_deferred_entity
                 ON sync_deferred_changes(entity_type, entity_global_id);
             """);
+
+        // migration 004：Identity Supersession 台账（2e 冻结语义）。
+        // ⚠️ 它先于 migration 003 落地，是因为 **2b 的语义修正依赖它**
+        //    （去重淘汰的重复行要从"写墓碑"改成"写 supersession"）。
+        //    编号只是登记用，不代表落地先后。
+        RegisterMigration(conn, 4);
+    }
+
+    /// <summary>登记一次迁移（幂等）。</summary>
+    private static void RegisterMigration(SqliteConnection conn, int version)
+    {
+        conn.Execute("""
+            INSERT INTO schema_migrations (version, applied_at_utc) VALUES (@version, @now)
+            ON CONFLICT(version) DO NOTHING;
+            """, new { version, now = UtcNowIso() });
     }
 
     /// <summary>
@@ -360,6 +397,47 @@ internal static class DeviceSyncSchema
             INSERT INTO schema_migrations (version, applied_at_utc) VALUES (2, @now)
             ON CONFLICT(version) DO NOTHING;
             """, new { now = UtcNowIso() });
+    }
+
+    /// <summary>
+    /// migration 003（2e）：让 Deferred 台账**能在离线状态下被重新处理**。
+    ///
+    /// ⚠️ 之前台账只记了"为什么延后"，**没记"延后的那个远端对象到底是什么"**。
+    ///    而那条远端对象从未落地到本地库，2e 无法凭本地状态重建它
+    ///    （platform / platform_id / executable / executable_path / name / notion_page_id 全都不在本地）。
+    ///    → **不补 payload，2e 一条也重处理不了**（阻塞性缺陷，用户 2026-10-03 裁定）。
+    ///
+    /// payload 冻结规则：必须是**当次 Pull 收到的原始/规范化同步 payload 快照**；
+    /// 重处理时**不得**重新去远端拉，也**不得**按本地当前状态重新构造。
+    ///
+    /// 另外补 <c>resolved_at_utc</c> / <c>resolution</c>：
+    /// **Resolved ≠ Completed** —— 它只表示"这条 Deferred 已经过 Identity Reconciliation 并有明确结论"，
+    /// 审计记录必须保留（不删除）。
+    /// </summary>
+    public static void EnsureDeferredReprocessingColumns(SqliteConnection conn)
+    {
+        AddColumnIfMissing(conn, "sync_deferred_changes", "operation", "operation INTEGER NOT NULL DEFAULT 1");
+        AddColumnIfMissing(conn, "sync_deferred_changes", "device_id", "device_id TEXT");
+        AddColumnIfMissing(conn, "sync_deferred_changes", "payload", "payload TEXT");
+        AddColumnIfMissing(conn, "sync_deferred_changes", "resolved_at_utc", "resolved_at_utc TEXT");
+        AddColumnIfMissing(conn, "sync_deferred_changes", "resolution", "resolution TEXT");
+
+        RegisterMigration(conn, 3);
+    }
+
+    /// <summary>幂等追加一列（失败只记 Warn，与项目既有惯例一致）。</summary>
+    private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string columnDdl)
+    {
+        if (ColumnExists(conn, table, column)) return;
+
+        try
+        {
+            conn.Execute($"ALTER TABLE {table} ADD COLUMN {columnDdl};");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[设备同步] 追加 {table}.{column} 失败（可能已存在）：{ex.Message}");
+        }
     }
 
     /// <summary>列是否存在（用于幂等 ALTER TABLE）。</summary>

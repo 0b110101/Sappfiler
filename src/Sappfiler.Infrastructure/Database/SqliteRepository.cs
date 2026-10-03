@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using Dapper;
+using GameTimeTracker.Core.DeviceSync;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
@@ -434,13 +435,20 @@ public partial class SqliteRepository : IDatabaseRepository
                         }
                     }
 
-                    // ⑤ 删除重复游戏行 → ⑥ 再为"被真正丢弃的同步身份"写墓碑（顺序即冻结契约的 ⑤→⑥）。
+                    // ⑤ 删除重复游戏行 → ⑥ 再记录"被淘汰的 identity 并入了谁"（顺序即冻结契约的 ⑤→⑥）。
                     //
-                    // 丢弃集合 = {快照里有 global_id 的行} \ {canonical 最终持有的 global_id}，
+                    // 淘汰集合 = {快照里有 global_id 的行} \ {canonical 最终持有的 global_id}，
                     // 且仅限**删除前 isSyncable == true** 的行（契约第 5 条）。
                     // 判定必须用**快照**而非当前库状态 —— 此刻该行的 sessions 已经搬走了。
-                    // 墓碑只认 global_id，与 notion_page_id 无关（第 6 条）：即使两行共用同一个
-                    // notion_page_id 也要写，因为**多写墓碑幂等无害、漏写是不可逆的身份残留**。
+                    // identity 只认 global_id，与 notion_page_id 无关（第 6 条）。
+                    //
+                    // ⚠️ **2e 语义修正（2026-10-03 用户裁定）**：这里写的是
+                    // **identity supersession（身份合并）**，**不是删除墓碑**。
+                    // 被淘汰的行与权威行其实是**同一个实体**、只是有两套 identity；
+                    // 若写成墓碑，其它设备会理解为"该实体已被删除"从而删掉自己的数据 ——
+                    // 把"合并"错误地表达成"删除"。两者的数据模型与同步语义必须严格区分：
+                    //     真删除   → sync_tombstones
+                    //     身份合并 → sync_identity_supersessions
                     var discarded = snapshots[dup.Id];
 
                     conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id }, tx);
@@ -448,10 +456,12 @@ public partial class SqliteRepository : IDatabaseRepository
                     if (syncIdentityReady &&
                         discarded.IsSyncable &&
                         !string.IsNullOrWhiteSpace(discarded.GlobalId) &&
+                        !string.IsNullOrWhiteSpace(bestGlobalId) &&
                         !string.Equals(discarded.GlobalId, bestGlobalId, StringComparison.Ordinal))
                     {
-                        WriteGameTombstone(conn, tx, discarded.GlobalId!);
-                        AppLog.Info($"[设备同步] 已为被合并掉的游戏 identity 写墓碑：global_id={discarded.GlobalId}（原「{dup.Name}」id={dup.Id}）");
+                        WriteGameSupersession(conn, tx, discarded.GlobalId!, bestGlobalId!,
+                            SupersessionReasons.StartupDedupDuplicateIdentity);
+                        AppLog.Info($"[设备同步] 身份合并（非删除）：{discarded.GlobalId} → {bestGlobalId}（原「{dup.Name}」id={dup.Id}）");
                     }
 
                     AppLog.Info($"[维护] 自动合并重复游戏记录：「{canonical.Name}」(保留 id={canonical.Id}, 清理重复 id={dup.Id})");

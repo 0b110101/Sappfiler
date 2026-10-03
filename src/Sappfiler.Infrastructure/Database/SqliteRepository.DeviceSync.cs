@@ -661,20 +661,28 @@ public partial class SqliteRepository
             // Deferred 台账：在游标越过它们之前先留痕（与游标同一个事务 → 绝不会"游标走了却没记上"）。
             // ⚠️ Deferred ≠ Completed：这些条目**没有**在本机同步成功，后续阶段（2e）必须能重新处理。
             // 重复发现同一 change_id 时保留 first_seen、刷新 last_seen 并累加 seen_count。
+            // ⚠️ 台账必须连同**当次 Pull 收到的原始 payload 快照**一起保存（migration 003 / 2e 冻结）：
+            //    被延后的远端对象从未落地到本地库，离线重处理时无法凭本地状态重建它
+            //    （platform / platform_id / executable / executable_path / name 全都不在本地）。
+            //    重处理时**不得**重新去远端拉，也**不得**按本地当前状态重新构造。
             foreach (var item in deferredItems)
             {
                 await conn.ExecuteAsync(
                     """
                     INSERT INTO sync_deferred_changes
-                        (change_id, backend, entity_type, entity_global_id, reason, schema_version,
-                         first_seen_at_utc, last_seen_at_utc, seen_count)
+                        (change_id, backend, entity_type, entity_global_id, operation, device_id, payload,
+                         reason, schema_version, first_seen_at_utc, last_seen_at_utc, seen_count)
                     VALUES
-                        (@ChangeId, @Backend, @EntityType, @EntityGlobalId, @Reason, @SchemaVersion,
-                         @now, @now, 1)
+                        (@ChangeId, @Backend, @EntityType, @EntityGlobalId, @Operation, @DeviceId, @Payload,
+                         @Reason, @SchemaVersion, @now, @now, 1)
                     ON CONFLICT(change_id) DO UPDATE SET
                         reason            = excluded.reason,
                         last_seen_at_utc  = excluded.last_seen_at_utc,
-                        seen_count        = sync_deferred_changes.seen_count + 1;
+                        seen_count        = sync_deferred_changes.seen_count + 1,
+                        -- 2c 时期的历史行没有 payload：若再次遇到同一条变更，把"事实"补上
+                        payload           = COALESCE(NULLIF(sync_deferred_changes.payload, ''), excluded.payload),
+                        operation         = excluded.operation,
+                        device_id         = COALESCE(sync_deferred_changes.device_id, excluded.device_id);
                     """,
                     new
                     {
@@ -682,6 +690,9 @@ public partial class SqliteRepository
                         Backend = backend,
                         EntityType = item.Change.EntityType,
                         EntityGlobalId = item.Change.EntityGlobalId,
+                        Operation = (int)item.Change.Operation,
+                        DeviceId = item.Change.DeviceId,
+                        Payload = item.Change.Payload,
                         Reason = item.Reason,
                         SchemaVersion = item.SchemaVersion,
                         now = UtcNowIso()
@@ -849,6 +860,97 @@ public partial class SqliteRepository
             new { limit });
 
         return rows.ToList();
+    }
+
+    // ==================== Identity Supersession（身份合并 ≠ 删除） ====================
+
+    /// <summary>
+    /// 写入一条身份合并记录（幂等：`UNIQUE(entity_type, superseded_global_id)`，
+    /// 重复判定只刷新 canonical 与依据，不新增行）。
+    ///
+    /// ⚠️ 这是"身份合并"，**不是删除**；真删除走 <see cref="AddTombstoneAsync"/>。
+    /// 两者语义必须严格区分（用户 2026-10-03 裁定）。
+    /// </summary>
+    public async Task AddIdentitySupersessionAsync(SyncIdentitySupersession supersession)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            AddSupersessionCore(conn, null, supersession);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private static void AddSupersessionCore(
+        SqliteConnection conn, SqliteTransaction? tx, SyncIdentitySupersession supersession)
+    {
+        conn.Execute(
+            """
+            INSERT INTO sync_identity_supersessions
+                (supersession_id, entity_type, superseded_global_id, canonical_global_id,
+                 device_id, reason, created_at_utc)
+            VALUES
+                (@SupersessionId, @EntityType, @SupersededGlobalId, @CanonicalGlobalId,
+                 @DeviceId, @Reason, @CreatedAtUtc)
+            ON CONFLICT(entity_type, superseded_global_id) DO UPDATE SET
+                canonical_global_id = excluded.canonical_global_id,
+                reason              = excluded.reason;
+            """,
+            supersession, tx);
+    }
+
+    /// <summary>
+    /// 把一个 identity 解析到它的 canonical（若它已被判定为"与另一个身份是同一实体"）。
+    /// 返回 null = 这个 identity 没有被合并过，它就是它自己。
+    /// </summary>
+    public async Task<string?> ResolveCanonicalGlobalIdAsync(string entityType, string globalId)
+    {
+        using var conn = CreateConnection();
+        return await conn.QuerySingleOrDefaultAsync<string>(
+            """
+            SELECT canonical_global_id FROM sync_identity_supersessions
+            WHERE entity_type = @entityType AND superseded_global_id = @globalId
+            LIMIT 1;
+            """,
+            new { entityType, globalId });
+    }
+
+    public async Task<IReadOnlyList<SyncIdentitySupersession>> GetIdentitySupersessionsAsync(int limit = 500)
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<SyncIdentitySupersession>(
+            "SELECT * FROM sync_identity_supersessions ORDER BY created_at_utc ASC, rowid ASC LIMIT @limit;",
+            new { limit });
+
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// 在**调用方的事务内**记录一次"去重导致的身份合并"。
+    /// 由启动去重（被淘汰的重复行）与 2e 的对账共用。
+    /// </summary>
+    private static void WriteGameSupersession(
+        SqliteConnection conn, SqliteTransaction? tx,
+        string supersededGlobalId, string canonicalGlobalId, string reason)
+    {
+        var deviceId = conn.QuerySingleOrDefault<string>(
+            "SELECT value FROM settings WHERE key = @k;",
+            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx) ?? string.Empty;
+
+        AddSupersessionCore(conn, tx, new SyncIdentitySupersession
+        {
+            SupersessionId = Guid.NewGuid().ToString("N"),
+            EntityType = nameof(SyncEntityType.Game),
+            SupersededGlobalId = supersededGlobalId,
+            CanonicalGlobalId = canonicalGlobalId,
+            DeviceId = deviceId,
+            Reason = reason,
+            CreatedAtUtc = UtcNowIso()
+        });
     }
 
     // ============================ 删除墓碑 ============================
@@ -1056,11 +1158,15 @@ public partial class SqliteRepository
     }
 
     /// <summary>
-    /// 在**调用方的事务内**为被丢弃的游戏 identity 写一条墓碑。
+    /// 在**调用方的事务内**为被删除的游戏 identity 写一条墓碑。
     ///
-    /// 墓碑只认 <c>global_id</c>（Sappfiler 多设备同步身份），与 <c>notion_page_id</c> 无关：
-    /// 两行即使共用同一个 notion_page_id，只要被丢弃的 identity 曾经可同步，就要写墓碑 ——
-    /// **多写墓碑是幂等无害的，漏写是不可逆的身份残留**。
+    /// ⚠️ **当前无调用方（2e 起）**：原调用方是启动去重的"淘汰重复行"，
+    /// 那其实属于**身份合并**（两套 identity 指向同一实体），已改为写
+    /// <c>sync_identity_supersessions</c>。**保留本方法**是给"真删除"路径用的
+    /// （`DeleteGameAsync` 目前还没有写墓碑，双向删除阶段接入时必须走这里，
+    /// 而不是 supersession）—— 不要因为"暂时没人调用"就删掉它。
+    ///
+    /// 墓碑只认 <c>global_id</c>（Sappfiler 多设备同步身份），与 <c>notion_page_id</c> 无关。
     /// device_id 取本机（Phase 1 的 EnsureLocalDevice 已保证存在）。
     /// </summary>
     private static void WriteGameTombstone(SqliteConnection conn, SqliteTransaction? tx, string gameGlobalId)
