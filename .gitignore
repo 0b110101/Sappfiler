@@ -58,9 +58,17 @@ tests/*
 # immutable Session facts / Deferred payload / offline reconciliation /
 # dependency resolution / rollback / EndSession atomicity。
 # 不随仓库走，clone 之后就无法复现验收结果。
-# ⚠️ 只放行 DeviceSync 相关文件；其余测试（历史用例）继续保持忽略，不要趁机扩大范围。
+# ⚠️ 只放行 DeviceSync 相关文件**与测试的最小运行闭包**；
+# 其余测试（历史用例）继续保持忽略，不要趁机扩大范围。
 !tests/Sappfiler.Tests/
 tests/Sappfiler.Tests/*
+
+# 测试的最小运行闭包（三条分支统一跟踪，内容完全一致）：
+#   · csproj —— 没有它连测试工程都建不起来，"clone 后能跑"无从谈起；
+#   · FakeNotionClient.cs —— 共享 test double，DeviceSync 的 AutoLink 护栏依赖它。
+# ⚠️ 只在本分支跟踪这两个共享文件是不行的：切到 main 会被删除 → main 连测试工程都构建不了。
+!tests/Sappfiler.Tests/Sappfiler.Tests.csproj
+!tests/Sappfiler.Tests/FakeNotionClient.cs
 !tests/Sappfiler.Tests/DeviceSync*.cs
 
 # 内部报告与交接文档
