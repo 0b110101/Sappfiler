@@ -133,6 +133,27 @@ internal static class DeviceSyncSchema
                 last_error       TEXT,
                 PRIMARY KEY (backend, account_id)
             );
+
+            -- Deferred 台账（2c 冻结语义）：远端变更"本轮没落地、但游标已经越过它"时留痕。
+            -- ⚠️ Deferred ≠ Completed。游标前进只说明"服务端那一批消费过了"，
+            -- 不代表这条数据在本机同步成功；只计数不落库就等于静默丢数据。
+            -- 这里保留足够信息让后续阶段（2e：身份/冲突解决）能重新处理。
+            CREATE TABLE IF NOT EXISTS sync_deferred_changes (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_id         TEXT NOT NULL,
+                backend           TEXT NOT NULL DEFAULT '',
+                entity_type       TEXT NOT NULL,
+                entity_global_id  TEXT NOT NULL,
+                reason            TEXT NOT NULL,
+                schema_version    INTEGER NOT NULL DEFAULT 0,
+                first_seen_at_utc TEXT NOT NULL,
+                last_seen_at_utc  TEXT NOT NULL,
+                seen_count        INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_deferred_change
+                ON sync_deferred_changes(change_id);
+            CREATE INDEX IF NOT EXISTS idx_sync_deferred_entity
+                ON sync_deferred_changes(entity_type, entity_global_id);
             """);
     }
 

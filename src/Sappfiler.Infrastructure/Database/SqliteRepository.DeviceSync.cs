@@ -253,12 +253,6 @@ public partial class SqliteRepository
 
     // ==================== 远端变更落地（数据 + 游标同一事务） ====================
 
-    private enum RemoteApplyOutcome
-    {
-        Applied,
-        Deferred
-    }
-
     /// <summary>
     /// 把远端变更应用到本地。
     ///
@@ -291,7 +285,8 @@ public partial class SqliteRepository
             using var conn = CreateConnection();
             using var tx = conn.BeginTransaction();
 
-            int applied = 0, deferred = 0, tombstonesPropagated = 0;
+            int applied = 0, tombstonesPropagated = 0;
+            var deferredItems = new List<(SyncChange Change, string Reason, int SchemaVersion)>();
 
             foreach (var change in changes)
             {
@@ -319,19 +314,52 @@ public partial class SqliteRepository
                 // 墓碑优先：已删除的实体，旧的 Create/Update 一律不落地。
                 if (alreadyTombstoned)
                 {
-                    deferred++;
+                    deferredItems.Add((change, DeferredReasons.TombstonedLocal,
+                        SyncPayloads.TryReadSchemaVersion(change.Payload)));
                     continue;
                 }
 
-                var outcome = change.EntityType switch
+                var (reason, schemaVersion) = change.EntityType switch
                 {
                     nameof(SyncEntityType.Game) => ApplyRemoteGame(conn, tx, change),
                     nameof(SyncEntityType.Session) => ApplyRemoteSession(conn, tx, change),
-                    _ => RemoteApplyOutcome.Deferred
+                    _ => (DeferredReasons.UnsupportedEntityType,
+                          SyncPayloads.TryReadSchemaVersion(change.Payload))
                 };
 
-                if (outcome == RemoteApplyOutcome.Applied) applied++;
-                else deferred++;
+                if (reason is null) applied++;
+                else deferredItems.Add((change, reason, schemaVersion));
+            }
+
+            // Deferred 台账：在游标越过它们之前先留痕（与游标同一个事务 → 绝不会"游标走了却没记上"）。
+            // ⚠️ Deferred ≠ Completed：这些条目**没有**在本机同步成功，后续阶段（2e）必须能重新处理。
+            // 重复发现同一 change_id 时保留 first_seen、刷新 last_seen 并累加 seen_count。
+            foreach (var item in deferredItems)
+            {
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO sync_deferred_changes
+                        (change_id, backend, entity_type, entity_global_id, reason, schema_version,
+                         first_seen_at_utc, last_seen_at_utc, seen_count)
+                    VALUES
+                        (@ChangeId, @Backend, @EntityType, @EntityGlobalId, @Reason, @SchemaVersion,
+                         @now, @now, 1)
+                    ON CONFLICT(change_id) DO UPDATE SET
+                        reason            = excluded.reason,
+                        last_seen_at_utc  = excluded.last_seen_at_utc,
+                        seen_count        = sync_deferred_changes.seen_count + 1;
+                    """,
+                    new
+                    {
+                        ChangeId = item.Change.ChangeId,
+                        Backend = backend,
+                        EntityType = item.Change.EntityType,
+                        EntityGlobalId = item.Change.EntityGlobalId,
+                        Reason = item.Reason,
+                        SchemaVersion = item.SchemaVersion,
+                        now = UtcNowIso()
+                    },
+                    tx);
             }
 
             // 游标与数据同事务提交 —— 这一行必须在同一个 tx 里，不能提前。
@@ -349,7 +377,11 @@ public partial class SqliteRepository
 
             tx.Commit();
 
-            return new RemoteApplyResult(applied, deferred, tombstonesPropagated);
+            return new RemoteApplyResult(
+                applied,
+                deferredItems.Count,
+                tombstonesPropagated,
+                deferredItems.Select(i => i.Reason).Distinct(StringComparer.Ordinal).ToList());
         }
         finally
         {
@@ -357,11 +389,20 @@ public partial class SqliteRepository
         }
     }
 
-    private static RemoteApplyOutcome ApplyRemoteGame(SqliteConnection conn, SqliteTransaction tx, SyncChange change)
+    /// <summary>
+    /// 落一条远端 Game。返回 <c>null</c> = 已落地；否则是**延后原因码**（见 DeferredReasons）。
+    ///
+    /// ⚠️ 这里刻意**不做通用 LWW**：已存在同 identity 不覆盖；业务键被别的 identity 占用时不合并、不新建
+    /// —— 那属于 **2e：Identity / Conflict Resolution**，必须结合
+    /// global_id → { Notion Page ID / Obsidian path / SiYuan BlockId } 一起设计，
+    /// 不能让 2c 的同步引擎偷偷替用户做业务冲突决策。
+    /// </summary>
+    private static (string? Reason, int SchemaVersion) ApplyRemoteGame(
+        SqliteConnection conn, SqliteTransaction tx, SyncChange change)
     {
-        if (!SyncPayloads.TryParseGame(change.Payload, out var payload, out _))
+        if (!SyncPayloads.TryParseGame(change.Payload, out var payload, out var schemaVersion, out _))
         {
-            return RemoteApplyOutcome.Deferred;
+            return (ClassifyParseFailure(schemaVersion), Math.Max(schemaVersion, 0));
         }
 
         var game = payload!;
@@ -371,7 +412,7 @@ public partial class SqliteRepository
                 "SELECT COUNT(*) FROM games WHERE global_id = @gid;",
                 new { gid = game.GlobalId }, tx) > 0)
         {
-            return RemoteApplyOutcome.Deferred;
+            return (DeferredReasons.AlreadyExistsLocal, schemaVersion);
         }
 
         // 业务键已被另一个 identity 占用 → 需要身份对账（不是覆盖能解决的），本阶段不猜。
@@ -382,7 +423,7 @@ public partial class SqliteRepository
                 """,
                 new { platform = game.Platform, platformId = game.PlatformId }, tx) > 0)
         {
-            return RemoteApplyOutcome.Deferred;
+            return (DeferredReasons.BusinessKeyTakenByOtherIdentity, schemaVersion);
         }
 
         conn.Execute(
@@ -401,14 +442,15 @@ public partial class SqliteRepository
             },
             tx);
 
-        return RemoteApplyOutcome.Applied;
+        return (null, schemaVersion);
     }
 
-    private static RemoteApplyOutcome ApplyRemoteSession(SqliteConnection conn, SqliteTransaction tx, SyncChange change)
+    private static (string? Reason, int SchemaVersion) ApplyRemoteSession(
+        SqliteConnection conn, SqliteTransaction tx, SyncChange change)
     {
-        if (!SyncPayloads.TryParseSession(change.Payload, out var payload, out _))
+        if (!SyncPayloads.TryParseSession(change.Payload, out var payload, out var schemaVersion, out _))
         {
-            return RemoteApplyOutcome.Deferred;
+            return (ClassifyParseFailure(schemaVersion), Math.Max(schemaVersion, 0));
         }
 
         var session = payload!;
@@ -417,7 +459,7 @@ public partial class SqliteRepository
                 "SELECT COUNT(*) FROM sessions WHERE global_id = @gid;",
                 new { gid = session.GlobalId }, tx) > 0)
         {
-            return RemoteApplyOutcome.Deferred;
+            return (DeferredReasons.AlreadyExistsLocal, schemaVersion);
         }
 
         // 依赖：sessions.game_id NOT NULL，远端会话必须挂在本地已存在的 game 上。
@@ -428,7 +470,7 @@ public partial class SqliteRepository
 
         if (gameId is null)
         {
-            return RemoteApplyOutcome.Deferred;
+            return (DeferredReasons.DependencyMissing, schemaVersion);
         }
 
         conn.Execute(
@@ -455,7 +497,31 @@ public partial class SqliteRepository
             },
             tx);
 
-        return RemoteApplyOutcome.Applied;
+        return (null, schemaVersion);
+    }
+
+    /// <summary>解析失败时区分"版本不认识"与"payload 坏掉"——两者的后续处理方式不同。</summary>
+    private static string ClassifyParseFailure(int schemaVersion)
+        => schemaVersion >= 0 && schemaVersion != DeviceSyncConstants.CurrentSchemaVersion
+            ? DeferredReasons.UnsupportedSchemaVersion
+            : DeferredReasons.InvalidPayload;
+
+    /// <summary>
+    /// 读取 Deferred 台账（供诊断界面与 <b>2e</b> 的重新处理机制使用）。
+    /// 这里只提供"读"，本阶段**不实现**任何自动修复策略。
+    /// </summary>
+    public async Task<IReadOnlyList<DeferredSyncChange>> GetDeferredChangesAsync(int limit = 200)
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<DeferredSyncChange>(
+            """
+            SELECT * FROM sync_deferred_changes
+            ORDER BY last_seen_at_utc DESC, id DESC
+            LIMIT @limit;
+            """,
+            new { limit });
+
+        return rows.ToList();
     }
 
     // ============================ 删除墓碑 ============================
@@ -698,8 +764,19 @@ public partial class SqliteRepository
 }
 
 /// <summary>
-/// 远端变更的落地结果计数。
-/// <paramref name="Deferred"/> = 本轮**没有**落地的条目（已存在 / 需要身份对账 / 依赖缺失 /
-/// payload 版本不认识）。它不是"丢弃"—— 会计入日志，留给后续冲突解决与身份对账阶段。
+/// 远端变更的落地结果。
+///
+/// <paramref name="Deferred"/> = 本轮**没有**落地的条目数（已存在 / 需要身份对账 / 依赖缺失 /
+/// payload 版本不认识 / 本地有墓碑）。
+///
+/// ⚠️ <b>Deferred ≠ Completed</b>（用户 2026-10-03 冻结）：
+/// 游标会越过这些条目，但它们**并没有在本机同步成功**。
+/// 它们已写入 <c>sync_deferred_changes</c> 台账（含 change_id / entity / reason / schema_version /
+/// 首次与最近一次发现时间），留给 <b>2e：Identity / Conflict Resolution</b> 重新处理。
+/// 绝不能因为游标前进就把它们当成成功 —— 那是永久静默丢数据。
 /// </summary>
-public sealed record RemoteApplyResult(int Applied, int Deferred, int TombstonesPropagated);
+public sealed record RemoteApplyResult(
+    int Applied,
+    int Deferred,
+    int TombstonesPropagated,
+    IReadOnlyList<string> DeferredReasons);

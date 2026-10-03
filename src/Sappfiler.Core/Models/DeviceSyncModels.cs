@@ -142,6 +142,49 @@ public sealed class SyncTombstone
 }
 
 /// <summary>
+/// <b>Deferred 台账</b>：远端变更"本轮没有落地、但同步游标已经越过它"时留痕。
+///
+/// ⚠️ 为什么必须有这张表（用户 2026-10-03 冻结）：
+/// <c>Deferred ≠ Completed</c>。游标前进只代表"服务端那一批我已经消费过了"，
+/// **不代表这条变更在本机成功同步**。若只计数不落库，这条数据就悄无声息地丢了 ——
+/// 后续冲突/修复阶段再也找不到它。
+///
+/// 所以这里保留足够信息让**后续阶段能重新处理**：
+/// change_id（幂等键）/ entity_type / entity_global_id / reason / schema_version /
+/// 首次发现时间 / 最近一次发现时间（+ 发现次数，可判断是不是反复失败）。
+///
+/// 重新处理机制本身属于 2e（Identity / Conflict Resolution），本阶段只负责**留痕**，
+/// 不在这里偷偷塞任何自动修复策略。
+/// </summary>
+public sealed class DeferredSyncChange
+{
+    public long Id { get; set; }
+
+    /// <summary>远端变更 ID（服务端的幂等键）。重复发现时按它去重合并。</summary>
+    public string ChangeId { get; set; } = "";
+
+    /// <summary>来自哪个 Backend（多后端时用来区分）。</summary>
+    public string Backend { get; set; } = "";
+
+    public string EntityType { get; set; } = "";
+
+    /// <summary>⚠️ global_id（跨设备身份），不是本地 INTEGER id。</summary>
+    public string EntityGlobalId { get; set; } = "";
+
+    /// <summary>原因码，见 <see cref="GameTimeTracker.Core.DeviceSync.DeferredReasons"/>。</summary>
+    public string Reason { get; set; } = "";
+
+    public int SchemaVersion { get; set; }
+
+    public string FirstSeenAtUtc { get; set; } = "";
+
+    public string LastSeenAtUtc { get; set; } = "";
+
+    /// <summary>被反复发现了几次（值大说明长期无法落地，多半需要人工介入）。</summary>
+    public int SeenCount { get; set; }
+}
+
+/// <summary>
 /// 每个 Backend 独立维护的同步游标。
 /// 切换后端时**绝不复用游标**（Cloudflare 的 cursor 与 WebDAV 的 cursor 毫无关系）。
 /// </summary>

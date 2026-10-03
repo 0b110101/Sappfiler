@@ -12,6 +12,7 @@ public sealed record DeviceSyncRunResult(
     int Pulled,
     int Applied,
     int Deferred,
+    IReadOnlyList<string> DeferredReasons,
     int TombstonesPropagated,
     bool CursorAdvanced,
     string? Error)
@@ -19,8 +20,11 @@ public sealed record DeviceSyncRunResult(
     /// <summary>本轮无任何错误、无落空。</summary>
     public bool IsClean => Error is null && PushFailed == 0 && PushRejected == 0 && Deferred == 0;
 
-    public static DeviceSyncRunResult Cancelled { get; } =
-        new(0, 0, 0, 0, 0, 0, 0, false, "已取消");
+    /// <summary>什么都没做（被并发轮次挡住 / 已取消 / 前置失败）。</summary>
+    public static DeviceSyncRunResult NoOp(string? error = null) =>
+        new(0, 0, 0, 0, 0, 0, Array.Empty<string>(), 0, false, error);
+
+    public static DeviceSyncRunResult Cancelled { get; } = NoOp("已取消");
 }
 
 /// <summary>
@@ -102,7 +106,7 @@ public sealed class DeviceSyncEngine
         if (!await _gate.WaitAsync(0, cancellationToken))
         {
             // 已经有一轮在跑：直接返回，不排队、不并发。
-            return new DeviceSyncRunResult(0, 0, 0, 0, 0, 0, 0, false, null);
+            return DeviceSyncRunResult.NoOp();
         }
 
         try
@@ -114,7 +118,7 @@ public sealed class DeviceSyncEngine
 
             var result = new DeviceSyncRunResult(
                 push.Completed, push.Failed, push.Rejected,
-                pull.Pulled, pull.Applied, pull.Deferred, pull.Tombstones,
+                pull.Pulled, pull.Applied, pull.Deferred, pull.DeferredReasons, pull.Tombstones,
                 pull.CursorAdvanced,
                 push.Error ?? pull.Error);
 
@@ -134,7 +138,7 @@ public sealed class DeviceSyncEngine
         {
             // 兜底：连 Push/Pull 之外的意外也不允许冒泡到调用方（可能是游戏监听相关的调用链）。
             AppLog.Error("[设备同步] 同步轮次发生未预期异常（已吞掉，本地计时不受影响）", ex);
-            return new DeviceSyncRunResult(0, 0, 0, 0, 0, 0, 0, false, $"{ex.GetType().Name}: {ex.Message}");
+            return DeviceSyncRunResult.NoOp($"{ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -235,7 +239,14 @@ public sealed class DeviceSyncEngine
 
     // ============================ Pull ============================
 
-    private sealed record PullSummary(int Pulled, int Applied, int Deferred, int Tombstones, bool CursorAdvanced, string? Error);
+    private sealed record PullSummary(
+        int Pulled,
+        int Applied,
+        int Deferred,
+        IReadOnlyList<string> DeferredReasons,
+        int Tombstones,
+        bool CursorAdvanced,
+        string? Error);
 
     private async Task<PullSummary> PullAsync(CancellationToken cancellationToken)
     {
@@ -248,7 +259,7 @@ public sealed class DeviceSyncEngine
 
             if (outcome.Changes.Count == 0 && string.IsNullOrEmpty(outcome.NextCursor))
             {
-                return new PullSummary(0, 0, 0, 0, false, null);
+                return new PullSummary(0, 0, 0, Array.Empty<string>(), 0, false, null);
             }
 
             var deviceId = await _repo.GetLocalDeviceIdAsync();
@@ -261,9 +272,9 @@ public sealed class DeviceSyncEngine
 
             if (apply.Deferred > 0)
             {
-                AppLog.Warn($"[设备同步] 本轮有 {apply.Deferred} 条远端变更未落地"
-                    + "（本地已有同 identity / 业务键已被占用需身份对账 / 依赖的游戏还没到 / schema 不认识）"
-                    + " —— 未静默丢弃，留给冲突解决与身份对账阶段");
+                AppLog.Warn($"[设备同步] Deferred {apply.Deferred} 条（≠ Completed，本机没有同步成功）"
+                    + $"：{string.Join("、", apply.DeferredReasons)}"
+                    + " —— 已写入 sync_deferred_changes 台账，留给 2e 身份/冲突解决阶段重新处理");
             }
 
             if (apply.TombstonesPropagated > 0)
@@ -271,7 +282,7 @@ public sealed class DeviceSyncEngine
                 AppLog.Info($"[设备同步] 已传播 {apply.TombstonesPropagated} 条远端删除墓碑");
             }
 
-            return new PullSummary(outcome.Changes.Count, apply.Applied, apply.Deferred,
+            return new PullSummary(outcome.Changes.Count, apply.Applied, apply.Deferred, apply.DeferredReasons,
                 apply.TombstonesPropagated, true, null);
         }
         catch (Exception ex)
@@ -279,7 +290,7 @@ public sealed class DeviceSyncEngine
             // 拉取失败：**游标不推进**（异常发生在事务提交之前），下次会重拉同一批。
             var error = DescribeFailure(ex);
             AppLog.Warn($"[设备同步] 拉取失败（游标未推进，下次重拉同一批）：{error}");
-            return new PullSummary(0, 0, 0, 0, false, error);
+            return new PullSummary(0, 0, 0, Array.Empty<string>(), 0, false, error);
         }
     }
 

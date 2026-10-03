@@ -84,9 +84,11 @@ public static class SyncPayloads
 
     public static string Serialize(SessionSyncPayload payload) => JsonSerializer.Serialize(payload, Options);
 
-    public static bool TryParseGame(string? json, out GameSyncPayload? payload, out string? error)
+    /// <param name="schemaVersion">payload 里声明的版本；无法解析时为 -1（用于 Deferred 台账留痕）。</param>
+    public static bool TryParseGame(string? json, out GameSyncPayload? payload, out int schemaVersion, out string? error)
     {
         payload = null;
+        schemaVersion = -1;
         error = null;
 
         if (string.IsNullOrWhiteSpace(json))
@@ -103,6 +105,8 @@ public static class SyncPayloads
                 error = "payload 反序列化为空";
                 return false;
             }
+
+            schemaVersion = parsed.SchemaVersion;
 
             if (parsed.SchemaVersion != DeviceSyncConstants.CurrentSchemaVersion)
             {
@@ -126,9 +130,34 @@ public static class SyncPayloads
         }
     }
 
-    public static bool TryParseSession(string? json, out SessionSyncPayload? payload, out string? error)
+    /// <param name="schemaVersion">payload 里声明的版本；无法解析时为 -1（用于 Deferred 台账留痕）。</param>
+    /// <summary>
+    /// 只把 <c>schema_version</c> 抠出来（读不到返回 0）。
+    /// **仅供 Deferred 台账留痕**，不要用它判断 payload 是否可用 —— 那是 TryParse* 的职责。
+    /// </summary>
+    public static int TryReadSchemaVersion(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return 0;
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("schema_version", out var version)
+                && version.TryGetInt32(out var value)
+                ? value
+                : 0;
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
+
+    public static bool TryParseSession(string? json, out SessionSyncPayload? payload, out int schemaVersion, out string? error)
     {
         payload = null;
+        schemaVersion = -1;
         error = null;
 
         if (string.IsNullOrWhiteSpace(json))
@@ -145,6 +174,8 @@ public static class SyncPayloads
                 error = "payload 反序列化为空";
                 return false;
             }
+
+            schemaVersion = parsed.SchemaVersion;
 
             if (parsed.SchemaVersion != DeviceSyncConstants.CurrentSchemaVersion)
             {
