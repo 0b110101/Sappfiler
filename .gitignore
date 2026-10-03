@@ -72,10 +72,13 @@ tests/Sappfiler.Tests/*
 !tests/Sappfiler.Tests/DeviceSync*.cs
 
 # 内部报告与交接文档
+# ⚠️ 公开仓库边界（用户 2026-10-03 规则）：GitHub 只放**源代码 / 必要测试代码 / 公开文档 / 项目配置**。
+#    Agent 接管报告、阶段验收报告、测试报告、开发日志、内部设计记录、工作过程记录、私人笔记
+#    **一律本地保留**，不得 tracked / commit / push。
 /HANDOVER.md
 /CHANGELOG-QA.md
 /CLEANUP-REPORT.md
-/项目接管报告.md
+/项目接管报告*.md
 .workbuddy/
 .ai/
 
