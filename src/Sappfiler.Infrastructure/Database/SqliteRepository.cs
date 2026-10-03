@@ -8,7 +8,9 @@ using Microsoft.Data.Sqlite;
 
 namespace GameTimeTracker.Infrastructure.Database;
 
-public class SqliteRepository : IDatabaseRepository
+// partial：设备同步的存储层放在 SqliteRepository.DeviceSync.cs（新文件），
+// 这样本文件与 feature/multi-backend-sync 分支的改动区域几乎不重叠，便于将来合并。
+public partial class SqliteRepository : IDatabaseRepository
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
