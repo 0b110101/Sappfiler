@@ -1131,6 +1131,173 @@ public partial class SqliteRepository
         }
     }
 
+    // ==================== Session 身份对账（2e 步骤 6） ====================
+
+    private sealed class SessionReconcileRow
+    {
+        public int Id { get; set; }
+        public string? GlobalId { get; set; }
+        public string? DeviceId { get; set; }
+        public string? StartedAtUtc { get; set; }
+        public int DurationSeconds { get; set; }
+        public string? GameGlobalId { get; set; }
+    }
+
+    /// <summary>
+    /// 把一个**明确的远端 Session 载荷**与本地历史事实做身份收敛（2e 步骤 6）。
+    ///
+    /// <code>
+    /// 同 global_id                    → 幂等无操作（AlreadyKnown）
+    /// 同 global_id 但事实不一致        → Blocked（拒绝改写历史）
+    /// 不同 global_id + 四项事实一致    → 只写一条 supersession（Converged）
+    /// 其它（含任一项事实不一致/多候选） → Deferred
+    /// </code>
+    ///
+    /// **四项不可变事实**：`device_id` + `started_at_utc` + `duration_seconds` + game identity。
+    ///
+    /// ⚠️ **刻意不做**（用户明令禁止）：
+    ///   ① LWW / "ended_at 谁新谁对" / "created_at 谁新谁对"；
+    ///   ② duration 取最大；
+    ///   ③ 本地 / 远端设备优先级；
+    ///   ④ 进程名相似度、"看起来像同一局"就合并。
+    ///   —— Session 是**历史事实**，不是配置对象。
+    ///
+    /// ⚠️ **完全不触碰**：`sessions` 行的任何字段（尤其 duration）、`daily_summary`
+    ///   （它目前仍是**本地派生数据**，本步骤绝不把它升级成参与竞争裁决的跨设备实体）、
+    ///   `sync_tombstones`、`sync_queue`，以及 2d 的 `EndSessionWithOutboxAsync` 原子路径。
+    ///
+    /// ⚠️ 与 Game 对账一样：**一个事务处理一条**；批量消费 Deferred 台账属于步骤 7。
+    /// </summary>
+    public async Task<SessionReconcileOutcome> ReconcileRemoteSessionAsync(
+        SyncChange remoteChange,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (remoteChange.Operation == SyncOperation.Delete)
+            {
+                return new SessionReconcileOutcome(SessionReconcileResult.Deferred, null, null, ReconcileSkipDelete);
+            }
+
+            if (!SyncPayloads.TryParseSession(remoteChange.Payload, out var payload, out _, out _))
+            {
+                return new SessionReconcileOutcome(SessionReconcileResult.InvalidPayload, null, null,
+                    DeferredReasons.InvalidPayload);
+            }
+
+            var remoteFacts = new SessionFacts(
+                payload!.GlobalId, payload.DeviceId, payload.StartedAtUtc,
+                payload.DurationSeconds, payload.GameGlobalId);
+
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            // 幂等：这个远端 identity 是否已经收敛过？
+            var alreadyResolved = await conn.QuerySingleOrDefaultAsync<string>(
+                """
+                SELECT canonical_global_id FROM sync_identity_supersessions
+                WHERE entity_type = @type AND superseded_global_id = @gid LIMIT 1;
+                """,
+                new { type = nameof(SyncEntityType.Session), gid = remoteChange.EntityGlobalId }, tx);
+
+            if (!string.IsNullOrWhiteSpace(alreadyResolved))
+            {
+                return new SessionReconcileOutcome(SessionReconcileResult.AlreadyKnown, null, alreadyResolved,
+                    SessionIdentityDecisionReasons.SameImmutableFact);
+            }
+
+            // 候选筛选键 = **device_id + started_at_utc**（一条会话的"时空坐标"），外加"它自己的 global_id 投影"。
+            //
+            // ⚠️ 这里刻意**不**把 duration / game 放进筛选条件：它们是**确认键**。
+            //    · device+start 不匹配 → 那是**另一条历史事实** → 不加载 → NoLocalCandidate（交给正常落地路径）。
+            //    · device+start 匹配但 duration / game 不同 → **疑似同一条事实、但事实互相冲突** → Deferred（不裁决）。
+            //
+            // ⚠️ 更不能把筛选放宽成"同一设备的所有会话"：那样**每一条新会话**都会因为与本地其它会话不等价
+            //    而被判成 Deferred，远端时长将永远落不了地（这是本节最危险的一个坑）。
+            var rows = (await conn.QueryAsync<SessionReconcileRow>(
+                """
+                SELECT s.id             AS Id,
+                       s.global_id      AS GlobalId,
+                       s.device_id      AS DeviceId,
+                       s.started_at_utc AS StartedAtUtc,
+                       s.duration_seconds AS DurationSeconds,
+                       g.global_id      AS GameGlobalId
+                FROM sessions s
+                LEFT JOIN games g ON g.id = s.game_id
+                WHERE s.global_id = @gid
+                   OR (s.device_id = @device AND s.started_at_utc = @started);
+                """,
+                new
+                {
+                    gid = remoteChange.EntityGlobalId,
+                    device = payload.DeviceId,
+                    started = payload.StartedAtUtc
+                },
+                tx)).ToList();
+
+            var candidates = rows
+                .Select(r => new LocalSessionCandidate(
+                    r.Id, new SessionFacts(r.GlobalId, r.DeviceId, r.StartedAtUtc, r.DurationSeconds, r.GameGlobalId)))
+                .ToList();
+
+            var decision = SessionIdentityRules.Decide(remoteFacts, candidates);
+
+            switch (decision.Kind)
+            {
+                case SessionIdentityDecisionKind.NoLocalCandidate:
+                    return new SessionReconcileOutcome(SessionReconcileResult.NoLocalCandidate, null, null, decision.Reason);
+
+                case SessionIdentityDecisionKind.SameIdentity:
+                    return new SessionReconcileOutcome(SessionReconcileResult.AlreadyKnown,
+                        decision.CanonicalLocalId, remoteFacts.GlobalId, decision.Reason);
+
+                case SessionIdentityDecisionKind.Blocked:
+                    return new SessionReconcileOutcome(SessionReconcileResult.Blocked, null, null, decision.Reason);
+
+                case SessionIdentityDecisionKind.Deferred:
+                    return new SessionReconcileOutcome(SessionReconcileResult.Deferred, null, null, decision.Reason);
+            }
+
+            // EquivalentFact → **只写一条 supersession**：
+            // 不改 any sessions 字段、不删行、不写墓碑、不碰 daily_summary。
+            var canonical = rows.First(r => r.Id == decision.CanonicalLocalId);
+
+            if (string.IsNullOrWhiteSpace(canonical.GlobalId))
+            {
+                // 本地这一条还没有 identity → 不在这里凭空造 identity（那是 Phase 1 回填 / 2d 的职责）
+                return new SessionReconcileOutcome(SessionReconcileResult.Deferred, canonical.Id, null,
+                    SessionIdentityDecisionReasons.InsufficientImmutableFact);
+            }
+
+            AddSupersessionCore(conn, tx, new SyncIdentitySupersession
+            {
+                SupersessionId = Guid.NewGuid().ToString("N"),
+                EntityType = nameof(SyncEntityType.Session),
+                SupersededGlobalId = remoteChange.EntityGlobalId,
+                CanonicalGlobalId = canonical.GlobalId,
+                DeviceId = ReadLocalDeviceId(conn, tx),
+                Reason = SupersessionReasons.ReconcileSessionSameFact,
+                CreatedAtUtc = UtcNowIso()
+            });
+
+            tx.Commit();
+
+            return new SessionReconcileOutcome(SessionReconcileResult.Converged,
+                canonical.Id, canonical.GlobalId, decision.Reason);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("[设备同步] Session 身份对账失败（已整体回滚，历史事实不变）", ex);
+            return new SessionReconcileOutcome(SessionReconcileResult.Deferred, null, null,
+                SessionIdentityDecisionReasons.ImmutableFactMismatch);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     // ==================== Identity Supersession（身份合并 ≠ 删除） ====================
 
     /// <summary>
@@ -1515,4 +1682,33 @@ public sealed record GameReconcileOutcome(
     int? CanonicalLocalId,
     string? CanonicalGlobalId,
     IdentityMatchLevel Level,
+    string Reason);
+
+/// <summary>Session 身份对账结果类别。</summary>
+public enum SessionReconcileResult
+{
+    /// <summary>不同 global_id 但四项不可变事实一致 → 已收敛（只写了 supersession）。</summary>
+    Converged,
+
+    /// <summary>幂等：同 global_id 或该 identity 已收敛过。</summary>
+    AlreadyKnown,
+
+    /// <summary>拒绝改写历史（同 global_id 却报了不同事实）。</summary>
+    Blocked,
+
+    /// <summary>延后（事实不一致 / 多候选 / 信息不足）。</summary>
+    Deferred,
+
+    /// <summary>本地无候选（不归本机制管）。</summary>
+    NoLocalCandidate,
+
+    /// <summary>payload 不合法或 schema 不认识。</summary>
+    InvalidPayload
+}
+
+/// <summary>Session 身份对账结果。</summary>
+public sealed record SessionReconcileOutcome(
+    SessionReconcileResult Result,
+    int? CanonicalLocalId,
+    string? CanonicalGlobalId,
     string Reason);
