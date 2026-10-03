@@ -68,6 +68,21 @@ public sealed class PullOutcome
 ///      Pull 侧墓碑要先于其它变更可见，长期离线的设备不能把已删除实体复活。
 ///   4. 网络 / 服务错误**用异常表达**，由 SyncEngine 决定退避重试 ——
 ///      不要返回"成功但什么都没做"，那会让客户端把未落库的变更标记为已完成。
+///
+/// ⚠️ <b>契约边界（2f 冻结）</b>：
+///   · <b>Backend 只有三种结果</b>：Push 的 <c>accepted</c> / <c>rejected</c>，或传输层的
+///     <b>异常</b>；Pull 只有"变更 + 游标"或异常。
+///   · <b>Backend 永不返回 Deferred</b>：Deferred 是**客户端 Apply / Reconciliation 层的状态**
+///     （见 <c>sync_deferred_changes</c> 与 DeferredReasons）。服务端**不允许**理解
+///     <c>strong_key_conflict</c> / <c>local_ignored_protected</c> / <c>immutable_fact_mismatch</c>
+///     这类客户端一致性语义 —— 那会把本机冲突判定泄漏进云端。
+///   · <b>接口不含版本字段</b>：Backend 协议版本由具体实现的 wire format 承载
+///     （见 <see cref="DeviceSyncConstants.CurrentProtocolVersion"/>）；
+///     不兼容时由该实现拒绝会话（抛异常），引擎语义不变。
+///   · <b>未知字段可忽略，未知版本不得猜</b>：payload 里多出未来字段应被忽略；
+///     版本不认识则必须拒绝（<c>schema_version</c> 的现有语义见 <see cref="SyncPayloads"/>）。
+///
+/// 通用契约测试见 <c>DeviceSyncBackendContractTests.cs</c>：任何新 Backend 都必须通过它。
 /// </summary>
 public interface ISyncBackend
 {

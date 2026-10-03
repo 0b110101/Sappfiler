@@ -21,6 +21,22 @@ public static class DeviceSyncConstants
     /// </summary>
     public const int CurrentSchemaVersion = 1;
 
+    /// <summary>
+    /// **Backend 协议版本**（2f 冻结为 v1）。
+    ///
+    /// ⚠️ 与 <see cref="CurrentSchemaVersion"/> 职责**严格分离**，不要混用：
+    ///   · 本常量回答"**双方会不会说这个 Backend 协议**"（客户端 ↔ Backend 的通信契约版本）；
+    ///   · <see cref="CurrentSchemaVersion"/> 回答"**客户端能不能理解这个 Change Payload**"。
+    /// 二者可独立演进：换了传输协议不一定换 payload 结构，反之亦然。
+    ///
+    /// ⚠️ 它**不是** <c>ISyncBackend</c> 接口上的字段：按 2f 冻结决策，接口形状不变，
+    /// 协议版本由**具体 Backend 的 wire format**（HTTP 头 / 请求体）承载，
+    /// 不兼容时由该实现自行**拒绝会话**（抛异常），引擎的 Pending / retry / exception 语义保持不变。
+    ///
+    /// ⚠️ 也不要拿 <c>SessionSyncPayload.client_version</c> 当版本用 —— 那是**客户端软件版本**。
+    /// </summary>
+    public const int CurrentProtocolVersion = 1;
+
     /// <summary>本机设备 ID 在 <c>settings</c> 表里的键（权威来源）。</summary>
     public const string SettingKeyDeviceId = "device_id";
 }
