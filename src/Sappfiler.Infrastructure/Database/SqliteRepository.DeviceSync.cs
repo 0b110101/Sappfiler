@@ -862,6 +862,275 @@ public partial class SqliteRepository
         return rows.ToList();
     }
 
+    // ==================== Game 身份对账（2e 步骤 5） ====================
+
+    /// <summary>对账时"删除"类变更不归它管（那是墓碑路径的职责）。</summary>
+    private const string ReconcileSkipDelete = "delete_handled_by_tombstone_path";
+
+    private sealed class GameReconcileRow
+    {
+        public int Id { get; set; }
+        public string? Platform { get; set; }
+        public string? PlatformId { get; set; }
+        public string? Executable { get; set; }
+        public string? ExecutablePath { get; set; }
+        public string? Name { get; set; }
+        public string? NotionPageId { get; set; }
+        public string? Status { get; set; }
+        public string? GlobalId { get; set; }
+    }
+
+    /// <summary>
+    /// 把一个**明确的远端 Game 载荷**安全收敛到本地 canonical Game（2e 步骤 5）。
+    ///
+    /// <code>
+    /// Remote Game B → IdentityRuleEngine → Matched(A)
+    ///    → 落库层第二道 ignored 防线（canonical 状态已变 ignored → BLOCK）
+    ///    → Notion Page ID 冲突检查（不同页面 → Deferred，**绝不自动选一个**）
+    ///    → 保留本地 A：canonical 的 global_id **以本地为准**
+    ///      （绝不因为远端 payload 看起来"更新"就覆盖本地）
+    ///    → 记录 B → A 的 sync_identity_supersessions
+    ///    → **不写 deletion tombstone**
+    ///    → **不动 A 的 executable / executable_path**（保护 GetGameByPathOrExeAsync 监听链）
+    ///    → **不覆盖 A 的 Notion Page ID**（Provider identity ≠ Sappfiler global_id）
+    /// </code>
+    ///
+    /// ⚠️ 与 <c>DeduplicateGamesAndDailySummaries</c> 的关键差别：后者会把 best 值
+    /// （exe / path / notion / platform）继承到权威行；**身份对账刻意不这么做** ——
+    /// 它只回答"A 与 B 是不是同一个实体"，不改写本地运行识别所依赖的 exe/path，也不替用户选 Provider 身份。
+    ///
+    /// ⚠️ 本方法**只处理一条**远端变更（一个事务一条，失败互相隔离）。
+    /// 批量消费 Deferred 台账属于步骤 7，职责上分开。
+    /// </summary>
+    public async Task<GameReconcileOutcome> ReconcileRemoteGameAsync(
+        SyncChange remoteChange,
+        Func<string, string>? normalizeName = null,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (remoteChange.Operation == SyncOperation.Delete)
+            {
+                // 删除走正常的墓碑路径（2c 的 Apply），**不是**身份对账。
+                return new GameReconcileOutcome(GameReconcileResult.Deferred, null, null,
+                    IdentityMatchLevel.None, ReconcileSkipDelete);
+            }
+
+            if (!SyncPayloads.TryParseGame(remoteChange.Payload, out var remote, out _, out _))
+            {
+                return new GameReconcileOutcome(GameReconcileResult.InvalidPayload, null, null,
+                    IdentityMatchLevel.None, DeferredReasons.InvalidPayload);
+            }
+
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            // 幂等：这个远端 identity 是否已经被处理过？
+            var alreadyResolved = await conn.QuerySingleOrDefaultAsync<string>(
+                """
+                SELECT canonical_global_id FROM sync_identity_supersessions
+                WHERE entity_type = @type AND superseded_global_id = @gid LIMIT 1;
+                """,
+                new { type = nameof(SyncEntityType.Game), gid = remoteChange.EntityGlobalId }, tx);
+
+            if (!string.IsNullOrWhiteSpace(alreadyResolved))
+            {
+                return new GameReconcileOutcome(GameReconcileResult.AlreadyKnown, null, alreadyResolved,
+                    IdentityMatchLevel.None, IdentityDecisionReasons.StrongKeyEqual);
+            }
+
+            var allGames = (await conn.QueryAsync<GameReconcileRow>("SELECT * FROM games;", null, tx)).ToList();
+
+            // 远端 identity 在本地的那一行（如果有）—— 它是"自己"，不能当成"另一个候选"
+            var selfRow = allGames.FirstOrDefault(g =>
+                string.Equals(g.GlobalId, remoteChange.EntityGlobalId, StringComparison.Ordinal));
+
+            var candidates = allGames
+                .Where(g => selfRow is null || g.Id != selfRow.Id)
+                .Select(g => new LocalGameCandidate(
+                    g.Id,
+                    new GameIdentityFacts(g.Platform, g.PlatformId, g.Executable, g.ExecutablePath, g.Name, g.NotionPageId),
+                    string.Equals(g.Status, "ignored", StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            var decision = GameIdentityRules.Decide(
+                new GameIdentityFacts(remote!.Platform, remote.PlatformId, remote.Executable,
+                    remote.ExecutablePath, remote.Name, remote.NotionPageId),
+                candidates,
+                normalizeName);
+
+            if (decision.Kind != IdentityDecisionKind.Matched)
+            {
+                var result = decision.Kind switch
+                {
+                    IdentityDecisionKind.NoLocalCandidate => GameReconcileResult.NoLocalCandidate,
+                    IdentityDecisionKind.Blocked => GameReconcileResult.Blocked,
+                    _ => GameReconcileResult.Deferred
+                };
+
+                return new GameReconcileOutcome(result, null, null, decision.Level, decision.Reason);
+            }
+
+            var canonical = allGames.First(g => g.Id == decision.CanonicalLocalId);
+
+            // ③ 落库层的**第二道 ignored 防线**：这里**重新读一次库**（而不是复用上面的快照），
+            //    因为"纯函数正确 ≠ 落库路径永远不会被绕过" —— 状态可能在判定之后被改动。
+            var canonicalStatusFresh = await conn.QuerySingleOrDefaultAsync<string>(
+                "SELECT status FROM games WHERE id = @id;", new { id = canonical.Id }, tx);
+
+            if (string.Equals(canonicalStatusFresh, "ignored", StringComparison.OrdinalIgnoreCase))
+            {
+                return new GameReconcileOutcome(GameReconcileResult.Blocked, canonical.Id, canonical.GlobalId,
+                    decision.Level, IdentityDecisionReasons.LocalIgnored);
+            }
+
+            // ⑤ Notion Page ID 是 **Provider identity**，不是 Sappfiler global_id。
+            //    双方绑定了不同页面 → 延后（**绝不**因为"看起来是同一个游戏"就替用户选一个）。
+            if (GameIdentityRules.NotionPageConflicts(
+                    new GameIdentityFacts(NotionPageId: canonical.NotionPageId),
+                    new GameIdentityFacts(NotionPageId: remote!.NotionPageId)))
+            {
+                return new GameReconcileOutcome(GameReconcileResult.Deferred, canonical.Id, canonical.GlobalId,
+                    decision.Level, IdentityDecisionReasons.NotionPageConflict);
+            }
+
+            // ① canonical 的 identity：**本地有就永远保留**；本地没有才继承远端的
+            //    （沿用 2b 契约第 3 条"没有则继承第一个有效值"，避免多造一个 identity）。
+            var canonicalGlobalId = canonical.GlobalId;
+            var inherited = false;
+
+            if (string.IsNullOrWhiteSpace(canonicalGlobalId))
+            {
+                canonicalGlobalId = remoteChange.EntityGlobalId;
+                inherited = true;
+
+                await conn.ExecuteAsync(
+                    """
+                    UPDATE games SET global_id = @gid
+                    WHERE id = @id AND NULLIF(TRIM(global_id), '') IS NULL;
+                    """,
+                    new { gid = canonicalGlobalId, id = canonical.Id }, tx);
+            }
+
+            // 形态 2：远端 identity 在本地**也已经落地成一行** → 折叠进 canonical。
+            // 只迁移 sessions / daily_summary 并删掉这行冗余；
+            // ⚠️ **不动** canonical 的 executable / executable_path / Notion Page ID。
+            if (selfRow is not null && selfRow.Id != canonical.Id)
+            {
+                MigrateGameDataToCanonical(conn, tx, canonical.Id, selfRow.Id);
+                await conn.ExecuteAsync("DELETE FROM games WHERE id = @id;", new { id = selfRow.Id }, tx);
+            }
+
+            // ② 只记录"这两套 identity 是同一个实体"，**绝不写 deletion tombstone**。
+            var superseded = string.Equals(canonicalGlobalId, remoteChange.EntityGlobalId, StringComparison.Ordinal)
+                ? null
+                : remoteChange.EntityGlobalId;
+
+            if (superseded is not null)
+            {
+                AddSupersessionCore(conn, tx, new SyncIdentitySupersession
+                {
+                    SupersessionId = Guid.NewGuid().ToString("N"),
+                    EntityType = nameof(SyncEntityType.Game),
+                    SupersededGlobalId = superseded,
+                    CanonicalGlobalId = canonicalGlobalId!,
+                    DeviceId = ReadLocalDeviceId(conn, tx),
+                    Reason = ReasonForLevel(decision.Level),
+                    CreatedAtUtc = UtcNowIso()
+                });
+            }
+
+            tx.Commit();
+
+            return new GameReconcileOutcome(
+                inherited ? GameReconcileResult.IdentityContinued : GameReconcileResult.Merged,
+                canonical.Id, canonicalGlobalId, decision.Level, ReasonForLevel(decision.Level));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("[设备同步] Game 身份对账失败（已整体回滚，本地数据不变）", ex);
+            return new GameReconcileOutcome(GameReconcileResult.Deferred, null, null,
+                IdentityMatchLevel.None, DeferredReasons.InvalidPayload);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private static string ReasonForLevel(IdentityMatchLevel level) => level switch
+    {
+        IdentityMatchLevel.StrongKey => SupersessionReasons.ReconcileStrongKey,
+        IdentityMatchLevel.ExecutablePath => SupersessionReasons.ReconcileExecutablePath,
+        IdentityMatchLevel.ExecutableName => SupersessionReasons.ReconcileExecutableName,
+        IdentityMatchLevel.NormalizedName => SupersessionReasons.ReconcileNormalizedName,
+        _ => SupersessionReasons.ReconcileStrongKey
+    };
+
+    private static string ReadLocalDeviceId(SqliteConnection conn, SqliteTransaction? tx)
+        => conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT value FROM settings WHERE key = @k;",
+            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx).GetAwaiter().GetResult() ?? string.Empty;
+
+    /// <summary>
+    /// 把重复行的会话与每日记录迁移到权威行 —— **只做数据搬运**，不删行、不写墓碑/身份合并。
+    ///
+    /// 启动去重与 2e 的身份对账共用这一份口径（避免两套合并逻辑分叉）。
+    /// 逐字保留原 <c>DeduplicateGamesAndDailySummaries</c> 的合并语义：
+    /// 时长相加、场次相加、Notion 字段"非空优先"、<c>sync_status</c> 仅两侧都 synced 才 synced。
+    /// </summary>
+    private static void MigrateGameDataToCanonical(
+        SqliteConnection conn, SqliteTransaction tx, int canonicalGameId, int duplicateGameId)
+    {
+        conn.Execute("UPDATE sessions SET game_id = @canonicalId WHERE game_id = @dupId;",
+            new { canonicalId = canonicalGameId, dupId = duplicateGameId }, tx);
+
+        var dupSummaries = conn.Query<DailySummaryRow>(
+            "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE game_id = @dupId;",
+            new { dupId = duplicateGameId }, tx).ToList();
+
+        foreach (var ds in dupSummaries)
+        {
+            var targetRow = conn.QueryFirstOrDefault<DailySummaryRow>(
+                "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE date = @date AND game_id = @canonicalId LIMIT 1;",
+                new { date = ds.Date, canonicalId = canonicalGameId }, tx);
+
+            if (targetRow != null)
+            {
+                int combinedSecs = targetRow.DurationSeconds + ds.DurationSeconds;
+                int combinedMins = combinedSecs / 60;
+                int combinedSessions = targetRow.SessionCount + ds.SessionCount;
+                string? finalPageId = !string.IsNullOrEmpty(targetRow.NotionPageId) ? targetRow.NotionPageId : ds.NotionPageId;
+                string? finalTitle = !string.IsNullOrEmpty(targetRow.NotionTitle) ? targetRow.NotionTitle : ds.NotionTitle;
+                string? finalIcon = !string.IsNullOrEmpty(targetRow.NotionIconUrl) ? targetRow.NotionIconUrl : ds.NotionIconUrl;
+                string finalStatus = (targetRow.SyncStatus == "synced" && ds.SyncStatus == "synced") ? "synced" : "pending";
+
+                conn.Execute(
+                    """
+                    UPDATE daily_summary
+                    SET duration_seconds = @combinedSecs,
+                        duration_minutes = @combinedMins,
+                        session_count = @combinedSessions,
+                        notion_page_id = @finalPageId,
+                        notion_title = @finalTitle,
+                        notion_icon_url = @finalIcon,
+                        sync_status = @finalStatus
+                    WHERE id = @targetId;
+
+                    DELETE FROM daily_summary WHERE id = @dupDailyId;
+                    """,
+                    new { combinedSecs, combinedMins, combinedSessions, finalPageId, finalTitle, finalIcon, finalStatus, targetId = targetRow.Id, dupDailyId = ds.Id },
+                    tx);
+            }
+            else
+            {
+                conn.Execute("UPDATE daily_summary SET game_id = @canonicalId WHERE id = @id;",
+                    new { canonicalId = canonicalGameId, id = ds.Id }, tx);
+            }
+        }
+    }
+
     // ==================== Identity Supersession（身份合并 ≠ 删除） ====================
 
     /// <summary>
@@ -937,9 +1206,7 @@ public partial class SqliteRepository
         SqliteConnection conn, SqliteTransaction? tx,
         string supersededGlobalId, string canonicalGlobalId, string reason)
     {
-        var deviceId = conn.QuerySingleOrDefault<string>(
-            "SELECT value FROM settings WHERE key = @k;",
-            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx) ?? string.Empty;
+        var deviceId = ReadLocalDeviceId(conn, tx);
 
         AddSupersessionCore(conn, tx, new SyncIdentitySupersession
         {
@@ -1213,3 +1480,39 @@ public sealed record RemoteApplyResult(
     int Deferred,
     int TombstonesPropagated,
     IReadOnlyList<string> DeferredReasons);
+
+/// <summary>Game 身份对账的结果类别。</summary>
+public enum GameReconcileResult
+{
+    /// <summary>远端 identity 已并入本地 canonical，并记录了 supersession。</summary>
+    Merged,
+
+    /// <summary>canonical 原本没有 identity → 继承了远端的（同一实体延续，无需 supersession）。</summary>
+    IdentityContinued,
+
+    /// <summary>幂等：该远端 identity 已被处理过。</summary>
+    AlreadyKnown,
+
+    /// <summary>阻断（强键冲突 / 命中本地 ignored）—— 确定性结论，不是待办。</summary>
+    Blocked,
+
+    /// <summary>延后（多候选 / Notion 页面冲突 / 数据不足），留给下次。</summary>
+    Deferred,
+
+    /// <summary>本地没有候选行（不合并，由调用方按正常落地规则处理）。</summary>
+    NoLocalCandidate,
+
+    /// <summary>payload 不合法或 schema 不认识。</summary>
+    InvalidPayload
+}
+
+/// <summary>
+/// Game 身份对账结果。
+/// <paramref name="Level"/> 是命中的身份键级别（A/B/C/D），<paramref name="Reason"/> 是原因码。
+/// </summary>
+public sealed record GameReconcileOutcome(
+    GameReconcileResult Result,
+    int? CanonicalLocalId,
+    string? CanonicalGlobalId,
+    IdentityMatchLevel Level,
+    string Reason);

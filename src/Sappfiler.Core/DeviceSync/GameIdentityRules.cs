@@ -235,22 +235,32 @@ public static class GameIdentityRules
     }
 
     /// <summary>
-    /// 强键是否**可用**：platform 非空且不是 <c>manual</c>、platform_id 非空、
-    /// 且不疑似"本地行 id / GUID"（长度 8 或 16）。
+    /// platform_id 是否疑似"本地行 id / GUID"（长度 8 或 16）。
+    ///
+    /// ⚠️ **这是该启发式的唯一定义处**。2b 的去重评分与 2e 的身份判定都走这里，
+    /// 绝不允许各写一份 —— 否则哪天调整这个判据，两套规则就会分叉
+    /// （用户 2026-10-03 明确要求）。
     ///
     /// 依据：`MainWindow` 在识别不到平台时会把**本地行 id** 写成 platform_id
-    /// （`existing.Id.ToString()`），那种 platform_id 跨设备毫无意义；
-    /// 长度 8/16 的判据与 <c>DeduplicateGamesAndDailySummaries</c> 评分里的既有启发式一致。
+    /// （`existing.Id.ToString()`），GUID 形态（N 格式 32 位 / 去掉连字符的 8·16 位片段）
+    /// 同样不是跨设备可比的身份。
     /// </summary>
-    public static bool StrongKeyAvailable(GameIdentityFacts facts)
-    {
-        if (string.IsNullOrWhiteSpace(facts.Platform)) return false;
-        if (string.Equals(facts.Platform.Trim(), "manual", StringComparison.OrdinalIgnoreCase)) return false;
-        if (string.IsNullOrWhiteSpace(facts.PlatformId)) return false;
+    public static bool LooksLikeLocalOrGuidId(string? platformId)
+        => platformId is not null && (platformId.Trim().Length == 8 || platformId.Trim().Length == 16);
 
-        var id = facts.PlatformId.Trim();
-        return id.Length != 8 && id.Length != 16;
-    }
+    /// <summary>
+    /// platform + platform_id 是否构成**可跨设备比较的强身份键**（= 规则里的 A 级）。
+    /// 唯一判据来源：2b 去重评分、2e 身份判定、将来的对账都共用它。
+    /// </summary>
+    public static bool IsAuthoritativePlatformKey(string? platform, string? platformId)
+        => !string.IsNullOrWhiteSpace(platform)
+        && !string.Equals(platform.Trim(), "manual", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(platformId)
+        && !LooksLikeLocalOrGuidId(platformId);
+
+    /// <summary>强键是否**可用**（A 级是否适用）。</summary>
+    public static bool StrongKeyAvailable(GameIdentityFacts facts)
+        => IsAuthoritativePlatformKey(facts.Platform, facts.PlatformId);
 
     public static bool StrongKeyEqual(GameIdentityFacts a, GameIdentityFacts b)
         => string.Equals(a.Platform!.Trim(), b.Platform!.Trim(), StringComparison.OrdinalIgnoreCase)

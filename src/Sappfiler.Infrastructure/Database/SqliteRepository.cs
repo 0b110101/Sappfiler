@@ -292,7 +292,8 @@ public partial class SqliteRepository : IDatabaseRepository
                 {
                     int s = 0;
                     if (!string.IsNullOrWhiteSpace(g.ExecutablePath)) s += 100;
-                    if (!string.IsNullOrWhiteSpace(g.Platform) && g.Platform != "manual" && g.PlatformId.Length != 8 && g.PlatformId.Length != 16) s += 50;
+                    // 强键判据走 GameIdentityRules 的唯一定义（避免 2b / 2e 两套启发式分叉）
+                    if (GameIdentityRules.IsAuthoritativePlatformKey(g.Platform, g.PlatformId)) s += 50;
                     if (!string.IsNullOrWhiteSpace(g.NotionPageId)) s += 20;
                     if (!string.IsNullOrWhiteSpace(g.CoverUrl)) s += 10;
                     return s;
@@ -319,8 +320,8 @@ public partial class SqliteRepository : IDatabaseRepository
                     if (string.IsNullOrEmpty(bestCoverUrl) && !string.IsNullOrEmpty(dup.CoverUrl)) bestCoverUrl = dup.CoverUrl;
                     if (string.IsNullOrEmpty(bestExe) && !string.IsNullOrEmpty(dup.Executable)) bestExe = dup.Executable;
                     if (string.IsNullOrEmpty(bestExePath) && !string.IsNullOrEmpty(dup.ExecutablePath)) bestExePath = dup.ExecutablePath;
-                    if ((bestPlatform == "manual" || bestPlatformId.Length == 8 || bestPlatformId.Length == 16) &&
-                        (!string.IsNullOrEmpty(dup.Platform) && dup.Platform != "manual" && dup.PlatformId.Length != 8 && dup.PlatformId.Length != 16))
+                    if (!GameIdentityRules.IsAuthoritativePlatformKey(bestPlatform, bestPlatformId) &&
+                        GameIdentityRules.IsAuthoritativePlatformKey(dup.Platform, dup.PlatformId))
                     {
                         bestPlatform = dup.Platform;
                         bestPlatformId = dup.PlatformId;
@@ -389,51 +390,10 @@ public partial class SqliteRepository : IDatabaseRepository
 
                 foreach (var dup in duplicates)
                 {
-                    conn.Execute("UPDATE sessions SET game_id = @canonicalId WHERE game_id = @dupId;",
-                        new { canonicalId = canonical.Id, dupId = dup.Id }, tx);
-
-                    var dupSummaries = conn.Query<DailySummaryRow>(
-                        "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE game_id = @dupId;",
-                        new { dupId = dup.Id }, tx).ToList();
-
-                    foreach (var ds in dupSummaries)
-                    {
-                        var targetRow = conn.QueryFirstOrDefault<DailySummaryRow>(
-                            "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE date = @date AND game_id = @canonicalId LIMIT 1;",
-                            new { date = ds.Date, canonicalId = canonical.Id }, tx);
-
-                        if (targetRow != null)
-                        {
-                            int combinedSecs = targetRow.DurationSeconds + ds.DurationSeconds;
-                            int combinedMins = combinedSecs / 60;
-                            int combinedSessions = targetRow.SessionCount + ds.SessionCount;
-                            string? finalPageId = !string.IsNullOrEmpty(targetRow.NotionPageId) ? targetRow.NotionPageId : ds.NotionPageId;
-                            string? finalTitle = !string.IsNullOrEmpty(targetRow.NotionTitle) ? targetRow.NotionTitle : ds.NotionTitle;
-                            string? finalIcon = !string.IsNullOrEmpty(targetRow.NotionIconUrl) ? targetRow.NotionIconUrl : ds.NotionIconUrl;
-                            string finalStatus = (targetRow.SyncStatus == "synced" && ds.SyncStatus == "synced") ? "synced" : "pending";
-
-                            conn.Execute("""
-                                UPDATE daily_summary
-                                SET duration_seconds = @combinedSecs,
-                                    duration_minutes = @combinedMins,
-                                    session_count = @combinedSessions,
-                                    notion_page_id = @finalPageId,
-                                    notion_title = @finalTitle,
-                                    notion_icon_url = @finalIcon,
-                                    sync_status = @finalStatus
-                                WHERE id = @targetId;
-
-                                DELETE FROM daily_summary WHERE id = @dupDailyId;
-                                """,
-                                new { combinedSecs, combinedMins, combinedSessions, finalPageId, finalTitle, finalIcon, finalStatus, targetId = targetRow.Id, dupDailyId = ds.Id },
-                                tx);
-                        }
-                        else
-                        {
-                            conn.Execute("UPDATE daily_summary SET game_id = @canonicalId WHERE id = @id;",
-                                new { canonicalId = canonical.Id, id = ds.Id }, tx);
-                        }
-                    }
+                    // ⚠️ 只做**数据搬运**（sessions + daily_summary），
+                    //    由下面的代码单独决定"删行"与"写身份合并"。
+                    //    2e 的身份对账复用**同一个**迁移口径，避免两套合并逻辑分叉。
+                    MigrateGameDataToCanonical(conn, tx, canonical.Id, dup.Id);
 
                     // ⑤ 删除重复游戏行 → ⑥ 再记录"被淘汰的 identity 并入了谁"（顺序即冻结契约的 ⑤→⑥）。
                     //

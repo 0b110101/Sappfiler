@@ -28,6 +28,20 @@ public sealed class GameSyncPayload
 
     [JsonPropertyName("executable_path")]
     public string ExecutablePath { get; set; } = "";
+
+    /// <summary>
+    /// 该游戏在 **Provider（Notion）侧的远端身份**（可选字段，向后兼容）。
+    ///
+    /// ⚠️ 用途**只有两个**：
+    ///   1. 身份对账时检测"双方绑定了**不同**的 Notion 页面" → 延后，绝不替用户自动选一个；
+    ///   2. 未来诊断/展示。
+    ///
+    /// **不得**用它写入本地 <c>games.notion_page_id</c> —— Provider identity 由本机的
+    /// Provider 逻辑（auto-link 等）本地决定，不能因为远端带了就照抄
+    /// （Provider identity ≠ Sappfiler global_id）。
+    /// </summary>
+    [JsonPropertyName("notion_page_id")]
+    public string? NotionPageId { get; set; }
 }
 
 /// <summary>
