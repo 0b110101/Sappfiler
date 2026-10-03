@@ -23,6 +23,26 @@ internal sealed class FakeNotionClient : INotionClient
     /// <summary>设为 true 时查询每日记录抛异常，用于验证"拉取失败就不上传"。</summary>
     public bool FailQueryDailyRecords { get; set; }
 
+    // ===== 2j：总表「已忽略」Checkbox（属性探测 + 写回）=====
+
+    /// <summary>总表里是否存在「已忽略」属性。默认 false = 老用户库（降级路径）。</summary>
+    public bool SupportsIgnoredProperty { get; set; }
+
+    /// <summary>写回「已忽略」的调用记录（断言用）。</summary>
+    public List<(string PageId, bool Ignored)> IgnoredWrites { get; } = new();
+
+    /// <summary>让写回失败（验证"写失败不影响本地状态"）。</summary>
+    public bool FailIgnoredWrite { get; set; }
+
+    public bool SupportsGameIgnoredProperty => SupportsIgnoredProperty;
+
+    public Task<bool> UpdateGameMasterIgnoredAsync(string pageId, bool ignored)
+    {
+        if (!SupportsIgnoredProperty || FailIgnoredWrite) return Task.FromResult(false);
+        IgnoredWrites.Add((pageId, ignored));
+        return Task.FromResult(true);
+    }
+
     public void UpdateToken(string token) { }
 
     public Task<bool> TestConnectionAsync() => Task.FromResult(true);
