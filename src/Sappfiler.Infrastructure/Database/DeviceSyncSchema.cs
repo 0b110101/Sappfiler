@@ -379,18 +379,18 @@ internal static class DeviceSyncSchema
     /// 取得（必要时生成）本机设备 ID，并保证 <c>devices</c> 表里有本机那一行。
     /// device_id 一经生成**永不改变**（用户只能改 device_name）。
     /// </summary>
-    public static string EnsureLocalDevice(SqliteConnection conn)
+    public static string EnsureLocalDevice(SqliteConnection conn, SqliteTransaction? tx = null)
     {
         var existing = conn.QuerySingleOrDefault<string>(
             "SELECT value FROM settings WHERE key = @k",
-            new { k = DeviceSyncConstants.SettingKeyDeviceId });
+            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx);
 
         var deviceId = string.IsNullOrWhiteSpace(existing) ? NewId() : existing!;
 
         conn.Execute("""
             INSERT INTO settings (key, value) VALUES (@k, @v)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP;
-            """, new { k = DeviceSyncConstants.SettingKeyDeviceId, v = deviceId });
+            """, new { k = DeviceSyncConstants.SettingKeyDeviceId, v = deviceId }, tx);
 
         var now = UtcNowIso();
         var name = string.IsNullOrWhiteSpace(Environment.MachineName) ? "Windows Computer" : Environment.MachineName;
@@ -403,7 +403,7 @@ internal static class DeviceSyncSchema
             ON CONFLICT(device_id) DO UPDATE SET
                 last_seen_at_utc = excluded.last_seen_at_utc,
                 is_this_device   = 1;
-            """, new { id = deviceId, name, now });
+            """, new { id = deviceId, name, now }, tx);
 
         return deviceId;
     }
@@ -413,7 +413,7 @@ internal static class DeviceSyncSchema
     /// 用 TimeZoneInfo 的**逐日期**偏移（比"统一用当前偏移"准：历史行落在夏令时期间也能算对）；
     /// 遇到春季 DST 跳变造成的"不存在时刻"则退回按偏移近似，绝不抛异常。
     /// </summary>
-    private static string? LocalToUtcIso(string? localTime)
+    internal static string? LocalToUtcIso(string? localTime)
     {
         if (string.IsNullOrWhiteSpace(localTime)) return null;
 

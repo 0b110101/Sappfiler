@@ -251,6 +251,333 @@ public partial class SqliteRepository
         }
     }
 
+    // ==================== 结束会话：本地写入 + Outbox 原子化（Phase 2d） ====================
+
+    private const string SessionSyncColumns = """
+        SELECT id             AS Id,
+               game_id        AS GameId,
+               process_name   AS ProcessName,
+               start_time     AS StartTime,
+               duration_seconds AS DurationSeconds,
+               global_id      AS GlobalId,
+               device_id      AS DeviceId,
+               started_at_utc AS StartedAtUtc,
+               ended_at_utc   AS EndedAtUtc,
+               time_precision AS TimePrecision
+        FROM sessions
+        """;
+
+    private sealed class SessionSyncRow
+    {
+        public int Id { get; set; }
+        public int GameId { get; set; }
+        public string? ProcessName { get; set; }
+        public string? StartTime { get; set; }
+        public int DurationSeconds { get; set; }
+        public string? GlobalId { get; set; }
+        public string? DeviceId { get; set; }
+        public string? StartedAtUtc { get; set; }
+        public string? EndedAtUtc { get; set; }
+        public string? TimePrecision { get; set; }
+    }
+
+    /// <summary>
+    /// 结束会话，并把"这一次结束"涉及的全部本地写入与同步 Outbox 放进**同一个事务**。
+    ///
+    /// 事务内顺序（用户 2026-10-03 冻结，不要随意调整）：
+    /// <code>
+    /// BEGIN
+    ///   → 确保 game.global_id
+    ///   → 确保 session.global_id / device_id
+    ///   → 写 started_at_utc / ended_at_utc
+    ///   → 落尾段 daily_summary（跨结算点可能是两笔）
+    ///   → 重算 session_count
+    ///   → 结束 session
+    ///   → 用**事务内最终确定的数据**生成 immutable payload 快照
+    ///   → 写 sync_queue
+    /// COMMIT
+    /// </code>
+    ///
+    /// 三条铁律：
+    ///   1. **已存在的 global_id 绝不重新生成**（换 identity 等于换实体）。
+    ///   2. payload 必须来自**事务内最终确定**的数据 —— 不能先把 payload 生成好再回头补 identity，
+    ///      否则 queue 里会存下 NULL / 旧 identity，以后再也对不上。
+    ///   3. 任一步失败 → 整体 ROLLBACK；会话仍由既有恢复机制
+    ///      （<c>CleanupStaleSessionsAsync</c> + 启动时的活跃会话恢复）接住，
+    ///      **绝不因为同步能力而丢掉本地计时**。
+    ///
+    /// ⚠️ 心跳路径**不经过这里**：运行中的会话只落本地 daily_summary，结束之后才产生同步事实。
+    /// </summary>
+    public async Task<EndSessionOutboxResult> EndSessionWithOutboxAsync(
+        int sessionId,
+        DateTime endTime,
+        int durationSeconds,
+        IReadOnlyList<DailyDurationDelta> dailyDeltas)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            var row = await conn.QuerySingleOrDefaultAsync<SessionSyncRow>(
+                SessionSyncColumns + " WHERE id = @sessionId;", new { sessionId }, tx);
+
+            if (row is null)
+            {
+                // 会话不存在：什么都不做（调用方照常触发 SessionEnded）。
+                return new EndSessionOutboxResult(false, false, null, null, durationSeconds, null);
+            }
+
+            // ---- 本机稳定设备身份：device_id 一经生成永不改变，也**不会因电脑改名而变** ----
+            var deviceId = await conn.QuerySingleOrDefaultAsync<string>(
+                "SELECT value FROM settings WHERE key = @k;",
+                new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx);
+
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                deviceId = DeviceSyncSchema.EnsureLocalDevice(conn, tx);
+            }
+
+            // ---- 确保 game.global_id：可同步的游戏必须拥有 identity（已有则绝不重新生成）----
+            var gameIsSyncable = await conn.ExecuteScalarAsync<int>(
+                $"SELECT COUNT(*) FROM games WHERE id = @gameId AND {GameSyncEligibility.SqlPredicate};",
+                new { gameId = row.GameId }, tx) > 0;
+
+            if (gameIsSyncable)
+            {
+                await conn.ExecuteAsync(
+                    """
+                    UPDATE games SET global_id = @globalId
+                    WHERE id = @gameId AND NULLIF(TRIM(global_id), '') IS NULL;
+                    """,
+                    new { globalId = Guid.NewGuid().ToString("N"), gameId = row.GameId }, tx);
+            }
+
+            // ---- session 的同步字段：在"实体定型"这一刻补齐（会话结束之后它不再变化）----
+            var sessionGlobalId = string.IsNullOrWhiteSpace(row.GlobalId)
+                ? Guid.NewGuid().ToString("N")
+                : row.GlobalId!;
+            var sessionDeviceId = string.IsNullOrWhiteSpace(row.DeviceId) ? deviceId! : row.DeviceId!;
+            var startedAtUtc = string.IsNullOrWhiteSpace(row.StartedAtUtc)
+                ? DeviceSyncSchema.LocalToUtcIso(row.StartTime) ?? string.Empty
+                : row.StartedAtUtc!;
+
+            // ended_at_utc 必须在"结束事件确定"的这一刻写入。
+            var endTimeText = endTime.ToString("yyyy-MM-dd HH:mm:ss");
+            var endedAtUtc = DeviceSyncSchema.LocalToUtcIso(endTimeText)
+                ?? endTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
+            var timePrecision = string.IsNullOrWhiteSpace(row.TimePrecision)
+                ? TimePrecision.Exact
+                : row.TimePrecision!;
+
+            // ---- 尾段 daily_summary（逐字复刻 AddSessionDurationToDailyAsync 的语义）----
+            foreach (var delta in dailyDeltas)
+            {
+                await ApplyDailyDurationDeltaAsync(conn, tx, delta.Date, row.GameId, delta.DurationSeconds);
+            }
+
+            // ---- 结束会话 + 同步字段落地（一条 UPDATE，避免"会话已结束但 identity 还没写"的中间态）----
+            await conn.ExecuteAsync(
+                """
+                UPDATE sessions
+                SET end_time         = @endTime,
+                    duration_seconds = @durationSeconds,
+                    is_active        = 0,
+                    global_id        = @globalId,
+                    device_id        = @deviceId,
+                    started_at_utc   = @startedAtUtc,
+                    ended_at_utc     = @endedAtUtc,
+                    time_precision   = @timePrecision
+                WHERE id = @sessionId;
+                """,
+                new
+                {
+                    sessionId,
+                    endTime = endTimeText,
+                    durationSeconds,
+                    globalId = sessionGlobalId,
+                    deviceId = sessionDeviceId,
+                    startedAtUtc,
+                    endedAtUtc,
+                    timePrecision
+                },
+                tx);
+
+            // ---- session_count 重算（逐字复刻 EndSessionAsync 的既有口径）----
+            await RecomputeSessionCountAsync(conn, tx, sessionId, durationSeconds);
+
+            // ---- 用**事务内最终确定**的数据生成不可变 payload 快照 ----
+            // 特意从库里读回（而不是复用上面的局部变量）：这样 payload 与"最终提交的状态"天然一致，
+            // 任何"忘记同步某个字段"都会在这一步暴露，而不是悄悄写进队列。
+            var finalSession = await conn.QuerySingleAsync<SessionSyncRow>(
+                SessionSyncColumns + " WHERE id = @sessionId;", new { sessionId }, tx);
+
+            var gameGlobalId = await conn.QuerySingleOrDefaultAsync<string>(
+                "SELECT global_id FROM games WHERE id = @gameId;", new { gameId = finalSession.GameId }, tx);
+
+            var enqueued = false;
+
+            if (gameIsSyncable
+                && !string.IsNullOrWhiteSpace(finalSession.GlobalId)
+                && !string.IsNullOrWhiteSpace(gameGlobalId))
+            {
+                var payload = SyncPayloads.Serialize(new SessionSyncPayload
+                {
+                    GlobalId = finalSession.GlobalId!,
+                    GameGlobalId = gameGlobalId!,
+                    DeviceId = finalSession.DeviceId ?? string.Empty,
+                    ProcessName = finalSession.ProcessName ?? string.Empty,
+                    StartedAtUtc = finalSession.StartedAtUtc ?? string.Empty,
+                    EndedAtUtc = finalSession.EndedAtUtc,
+                    DurationSeconds = finalSession.DurationSeconds,
+                    TimePrecision = string.IsNullOrWhiteSpace(finalSession.TimePrecision)
+                        ? TimePrecision.Exact
+                        : finalSession.TimePrecision!
+                });
+
+                await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
+                {
+                    QueueId = Guid.NewGuid().ToString("N"),
+                    EntityType = nameof(SyncEntityType.Session),
+                    EntityGlobalId = finalSession.GlobalId!,
+                    Operation = SyncOperation.Create,
+                    BaseVersion = 1,
+                    Payload = payload,
+                    CreatedAtUtc = UtcNowIso(),
+                    Status = SyncQueueStatus.Pending
+                });
+
+                enqueued = true;
+            }
+            // 注：game 不可同步时（理论上不会发生——会话本身就让游戏具备同步资格）依旧完成本地结束，
+            // 只是不产生同步事实。**本地计时永远优先于同步。**
+
+            tx.Commit();
+
+            return new EndSessionOutboxResult(
+                true, enqueued, finalSession.GlobalId, gameGlobalId,
+                finalSession.DurationSeconds, finalSession.EndedAtUtc);
+        }
+        catch (Exception ex)
+        {
+            // 事务失败：using 未 Commit 即 Dispose = 整体 ROLLBACK（daily / sessions / sync_queue 三者一致回滚）。
+            // ⚠️ 这里**不回抛**：会话行保持 is_active = 1，既有的僵尸清理 / 启动恢复会把它接住；
+            //    绝不让一次本地写入失败升级成监听循环的异常。
+            AppLog.Error("[设备同步] 结束会话的原子写入失败（已整体回滚，会话仍可被恢复机制处理）", ex);
+            return new EndSessionOutboxResult(false, false, null, null, durationSeconds, null);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 把一笔增量落进 daily_summary。**逐字复刻** <see cref="AddSessionDurationToDailyAsync"/> 的语义
+    /// （含 session_count 的 CASE 口径与 <c>sync_status = 'pending'</c>），只是改成在调用方的事务里执行。
+    /// ⚠️ 不要在这里"顺手优化"口径 —— 它写出的值必须与心跳路径完全一致。
+    /// </summary>
+    private static async Task ApplyDailyDurationDeltaAsync(
+        SqliteConnection conn, SqliteTransaction tx, string date, int gameId, int durationSeconds)
+    {
+        if (durationSeconds <= 0) return;
+
+        var existing = await conn.QuerySingleOrDefaultAsync<dynamic>(
+            "SELECT id, duration_seconds FROM daily_summary WHERE date = @date AND game_id = @gameId;",
+            new { date, gameId }, tx);
+
+        if (existing != null)
+        {
+            var newSecs = (int)existing.duration_seconds + durationSeconds;
+            var newMins = newSecs / 60;
+
+            await conn.ExecuteAsync(
+                """
+                UPDATE daily_summary
+                SET duration_seconds = @newSecs,
+                    duration_minutes = @newMins,
+                    session_count    = CASE WHEN duration_minutes = 0 AND @newMins > 0 THEN 1 ELSE session_count END,
+                    sync_status      = 'pending'
+                WHERE id = @id;
+                """,
+                new { id = (long)existing.id, newSecs, newMins },
+                tx);
+        }
+        else
+        {
+            var mins = durationSeconds / 60;
+            var sessionCount = mins > 0 ? 1 : 0;
+
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status)
+                VALUES (@date, @gameId, @durationSeconds, @mins, @sessionCount, 'pending');
+                """,
+                new { date, gameId, durationSeconds, mins, sessionCount },
+                tx);
+        }
+    }
+
+    /// <summary>
+    /// 重算当日有效场次。**逐字复刻** <see cref="EndSessionAsync"/> 的既有口径：
+    /// 用 <c>substr(start_time,1,10)</c>（**日历日**，不是会计日）分组、只统计 ≥60 秒的会话、
+    /// 以及对"外部/Notion 手工录入时长"的 manualBonus 判定。
+    /// ⚠️ 这段口径是既有行为，不要"顺手修正"（改动会波及 Notion 同步的场次数字）。
+    /// </summary>
+    private static async Task RecomputeSessionCountAsync(
+        SqliteConnection conn, SqliteTransaction tx, int sessionId, int durationSeconds)
+    {
+        // 只有当会话时长 >= 60 秒时才计入有效游玩次数；低于 60 秒的微小启动忽略。
+        if (durationSeconds < 60) return;
+
+        var sessionRow = await conn.QuerySingleOrDefaultAsync<dynamic>(
+            "SELECT game_id, substr(start_time, 1, 10) AS session_date FROM sessions WHERE id = @sessionId;",
+            new { sessionId }, tx);
+
+        if (sessionRow is null) return;
+
+        int gameId = (int)sessionRow.game_id;
+        string date = (string)sessionRow.session_date;
+
+        var validSessionsCount = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM sessions
+            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date AND duration_seconds >= 60;
+            """,
+            new { gameId, date }, tx);
+
+        if (validSessionsCount <= 0) return;
+
+        var localSessionsTotalSecs = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COALESCE(SUM(duration_seconds), 0) FROM sessions
+            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date;
+            """,
+            new { gameId, date }, tx);
+
+        var dailyRow = await conn.QuerySingleOrDefaultAsync<DailyDurationCheck>(
+            "SELECT duration_seconds, session_count FROM daily_summary WHERE game_id = @gameId AND date = @date LIMIT 1;",
+            new { gameId, date }, tx);
+
+        int manualBonusSessions = 0;
+        if (dailyRow != null && dailyRow.duration_seconds > localSessionsTotalSecs + 60)
+        {
+            // 存在外部 / Notion 手动录入的时长（未通过本地进程捕获），计入该手动游玩次数
+            manualBonusSessions = 1;
+        }
+
+        int finalSessionCount = validSessionsCount + manualBonusSessions;
+
+        await conn.ExecuteAsync(
+            """
+            UPDATE daily_summary SET session_count = @finalSessionCount
+            WHERE game_id = @gameId AND date = @date;
+            """,
+            new { gameId, date, finalSessionCount }, tx);
+    }
+
     // ==================== 远端变更落地（数据 + 游标同一事务） ====================
 
     /// <summary>

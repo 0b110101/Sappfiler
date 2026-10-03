@@ -1,3 +1,4 @@
+using GameTimeTracker.Core.DeviceSync;
 using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 
@@ -190,16 +191,17 @@ public class GameSessionManager
             var totalDuration = (int)Math.Max(0, (end - session.StartTime).TotalSeconds);
             var deltaSeconds = (int)Math.Max(0, (end - lastFlush).TotalSeconds);
 
-            if (deltaSeconds > 0)
-            {
-                await FlushDurationToDailyAsync(lastFlush, end, session.GameId, deltaSeconds);
-            }
+            // 先算"尾段增量该落进哪些业务日期"（纯函数，跨结算点会拆两笔），
+            // 再交给**一个**原子方法完成：daily_summary + sessions + sync_queue 同事务提交。
+            // ⚠️ 不能像以前那样"先写 daily、再结束会话"分两次写库 —— 中间崩溃会留下
+            //    "会话已结束、daily 少算尾段增量"的不一致（Phase 2d 冻结的事务边界）。
+            var dailyDeltas = ComputeDailyDeltas(lastFlush, end, deltaSeconds, DailyCutoffHour);
 
             session.EndTime = end;
             session.DurationSeconds = totalDuration;
             session.IsActive = false;
 
-            await _repo.EndSessionAsync(session.Id, end, totalDuration);
+            await _repo.EndSessionWithOutboxAsync(session.Id, end, totalDuration, dailyDeltas);
             _gameSessions.Remove(gameId);
 
             SessionEnded?.Invoke(this, session);
@@ -247,35 +249,49 @@ public class GameSessionManager
     /// 将本次增量时间刷新至对应的每日汇总表中。
     /// 遵循 DailyCutoffHour 跨日结算点设定（24~30点）：
     /// 若跨越结算点，则精确将前一段与后一段的秒数分割写入对应的业务归属日期。
+    ///
+    /// ⚠️ 这是**心跳路径**：行为与 Phase 2d 之前**逐字一致**（只是把"算日期"抽成了纯函数，
+    /// SQLite 写入完全照旧）。正在运行的会话**只**落本地 daily_summary，**不进 outbox** ——
+    /// 绝不能变成每 5 秒往云端同步一次。
     /// </summary>
     private async Task FlushDurationToDailyAsync(DateTime lastFlush, DateTime current, int gameId, int deltaSeconds)
     {
-        if (deltaSeconds <= 0) return;
+        foreach (var delta in ComputeDailyDeltas(lastFlush, current, deltaSeconds, DailyCutoffHour))
+        {
+            await _repo.AddSessionDurationToDailyAsync(delta.Date, gameId, delta.DurationSeconds);
+        }
+    }
 
-        var date1 = AccountingDateHelper.GetAccountingDate(lastFlush, DailyCutoffHour);
-        var date2 = AccountingDateHelper.GetAccountingDate(current, DailyCutoffHour);
+    /// <summary>
+    /// 计算一次增量应写入的「业务归属日期 + 秒数」——**纯函数，不碰数据库**。
+    ///
+    /// 抽它的目的：结束会话时要把这几笔写入搬进"结束会话 + 写 Outbox"的同一个事务里，
+    /// 而心跳路径必须保持原样。两条路径共用**同一份**日期/拆分计算，
+    /// 避免两边算出不同的归属日期（那是很难查的数据错位）。
+    /// </summary>
+    public static IReadOnlyList<DailyDurationDelta> ComputeDailyDeltas(
+        DateTime lastFlush, DateTime current, int deltaSeconds, int cutoffHour)
+    {
+        if (deltaSeconds <= 0) return Array.Empty<DailyDurationDelta>();
+
+        var date1 = AccountingDateHelper.GetAccountingDate(lastFlush, cutoffHour);
+        var date2 = AccountingDateHelper.GetAccountingDate(current, cutoffHour);
 
         if (date1 == date2)
         {
             // 未跨越结算点，归入同一业务日期
-            await _repo.AddSessionDurationToDailyAsync(date1.ToString("yyyy-MM-dd"), gameId, deltaSeconds);
+            return new[] { new DailyDurationDelta(date1.ToString("yyyy-MM-dd"), deltaSeconds) };
         }
-        else
-        {
-            // 跨越了跨日结算点！精确分割分界点前后的秒数
-            var boundary = AccountingDateHelper.GetNextCutoffBoundary(lastFlush, DailyCutoffHour);
-            var prevDelta = (int)Math.Max(0, (boundary - lastFlush).TotalSeconds);
-            var nextDelta = (int)Math.Max(0, (current - boundary).TotalSeconds);
 
-            if (prevDelta > 0)
-            {
-                await _repo.AddSessionDurationToDailyAsync(date1.ToString("yyyy-MM-dd"), gameId, prevDelta);
-            }
-            if (nextDelta > 0)
-            {
-                await _repo.AddSessionDurationToDailyAsync(date2.ToString("yyyy-MM-dd"), gameId, nextDelta);
-            }
-        }
+        // 跨越了跨日结算点！精确分割分界点前后的秒数
+        var boundary = AccountingDateHelper.GetNextCutoffBoundary(lastFlush, cutoffHour);
+        var prevDelta = (int)Math.Max(0, (boundary - lastFlush).TotalSeconds);
+        var nextDelta = (int)Math.Max(0, (current - boundary).TotalSeconds);
+
+        var deltas = new List<DailyDurationDelta>(2);
+        if (prevDelta > 0) deltas.Add(new DailyDurationDelta(date1.ToString("yyyy-MM-dd"), prevDelta));
+        if (nextDelta > 0) deltas.Add(new DailyDurationDelta(date2.ToString("yyyy-MM-dd"), nextDelta));
+        return deltas;
     }
 }
 

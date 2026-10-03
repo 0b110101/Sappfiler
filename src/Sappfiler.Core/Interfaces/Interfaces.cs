@@ -1,3 +1,4 @@
+using GameTimeTracker.Core.DeviceSync;
 using GameTimeTracker.Core.Models;
 
 namespace GameTimeTracker.Core.Interfaces;
@@ -32,6 +33,25 @@ public interface IDatabaseRepository
     Task<IReadOnlyList<GameSession>> GetActiveSessionsAsync();
     Task UpdateSessionHeartbeatAsync(int sessionId, DateTime heartbeatTime, int durationSeconds);
     Task EndSessionAsync(int sessionId, DateTime endTime, int durationSeconds);
+
+    /// <summary>
+    /// **结束会话 + 落尾段每日时长 + 重算场次 + 生成同步 Outbox，全部在一个 SQLite 事务里**（Phase 2d）。
+    ///
+    /// 事务内顺序（用户 2026-10-03 冻结）：
+    /// 确保 game.global_id → 确保 session.global_id / device_id → 写 started/ended UTC
+    /// → 落尾段 daily_summary → 重算 session_count → 结束 session
+    /// → **用事务内最终确定的数据**生成 immutable payload 快照 → 写 sync_queue → COMMIT。
+    ///
+    /// 三条铁律：已存在的 global_id 绝不重新生成；payload 绝不能用事务前读到的旧数据生成；
+    /// 任一步失败 → 整体回滚，且会话仍由现有恢复机制处理（**本地计时永远优先于同步**）。
+    ///
+    /// ⚠️ 心跳路径不经过这里：运行中的会话只落本地 daily_summary，结束时才产生同步事实。
+    /// </summary>
+    Task<EndSessionOutboxResult> EndSessionWithOutboxAsync(
+        int sessionId,
+        DateTime endTime,
+        int durationSeconds,
+        IReadOnlyList<DailyDurationDelta> dailyDeltas);
     Task CleanupStaleSessionsAsync(TimeSpan staleThreshold);
 
     // Daily summaries & Stats
