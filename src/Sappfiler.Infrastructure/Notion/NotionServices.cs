@@ -79,44 +79,53 @@ internal static class DailyRecordTitle
     }
 
     /// <summary>
-    /// 用「游戏名 + 原标题里的时长文本」拼标题，保证中间一定有 ` · ` 分隔符。
-    /// 时长数值始终以 Notion 侧为权威，这里只动"呈现"，**绝不写「单次时长」属性**。
+    /// 用「游戏名 + 原标题里的时长」拼出**标准格式**标题：`名字 · X h`（小时、最多 2 位小数）。
     ///
-    /// 两条规则，按后缀的"出身"区分：
-    ///   ① **程序自己写的旧格式**「(42分)」→ 归一到当前标准形态「 · 0.7 h」，
-    ///      否则历史行里会永远混着两套写法（QA 反馈的"格式不统一"）。
-    ///   ② **用户手写的时长文本**「黑旗10.1h」「英灵神殿 2.2h」→ 只补 ` · ` 分隔符，
-    ///      数字与单位一字不动 —— 那是用户自己的呈现，不该被改写。
+    /// 时长数值始终以 Notion 侧为权威 —— 本方法只把原标题里的时长**文本**重新规范化，
+    /// 换算全程只用后缀自身携带的数字与单位，**绝不引用本地缓存值**，
+    /// 也**绝不写「单次时长」属性**（2026-09-19 那 786 条历史记录就是这么被写坏的）。
     ///
-    /// ⚠️ 为什么①必须有：<see cref="ExtractSuffix"/> 为了兼容手工格式，允许后缀**不带分隔符**，
-    /// 所以「黑旗10.1h」取出来是 `10.1h`。原实现直接 <c>displayName + originalSuffix</c>，
-    /// 于是写出「黑旗10.1h」—— 看起来就像漏了中间的 ·（2026-10 QA 反馈的正是这个）。
+    /// 为什么必须做（两件事叠加）：
+    ///   ① <see cref="ExtractSuffix"/> 为了兼容用户手工录入，允许后缀**不带分隔符**，
+    ///      所以「黑旗10.1h」取出的是 `10.1h`；原实现直接 <c>displayName + originalSuffix</c>，
+    ///      于是写出「黑旗10.1h」—— 看起来就像漏了中间的 ·（2026-10 QA 反馈的正是这个）。
+    ///   ② 用户的表里混着手写紧贴格式（`10.1h`）、空格格式（`2.2 h`）、程序旧括号格式（`(42分)`）
+    ///      三种写法，用户要求**统一成优雅的标准格式**（含数字与单位之间的空格）。
     ///
-    /// 已经带分隔符的标准形态（` · 0.7 h` / ` | 2.2h` / `- 2.2h` / `: 2.2h`）统一成 ` · `，
-    /// 因此对程序自己写出的标准标题是**幂等**的 —— 不会导致每轮重复 PATCH。
+    /// 后缀换算不出正数分钟时（例如「(0.001h)」会四舍五入成 0 分钟），退回
+    /// 「保留原文 + 补上 ` · `」而不做换算 —— **宁可不统一，也绝不把时长抹成 0**。
     /// </summary>
-    internal static string BuildWithPreservedSuffix(string gameName, string originalSuffix, int fallbackDurationMinutes)
+    internal static string BuildNormalizedTitle(string gameName, string originalSuffix, int fallbackDurationMinutes)
     {
+        var minutes = ParseSuffixMinutes(originalSuffix);
+        if (minutes.HasValue) return Build(gameName, minutes.Value);
+
         var body = StripSuffixSeparator(originalSuffix);
-        if (body.Length == 0) return Build(gameName, fallbackDurationMinutes);
-
-        var legacyMinutes = ParseLegacyParenMinutes(body);
-        if (legacyMinutes.HasValue) return Build(gameName, legacyMinutes.Value);
-
-        return $"{gameName} · {body}";
+        return body.Length > 0
+            ? $"{gameName} · {body}"
+            : Build(gameName, fallbackDurationMinutes);
     }
 
     /// <summary>
-    /// 解析程序旧格式的括号时长后缀「(42分)」「(42分钟)」「(2.5h)」「(2小时)」，返回**分钟数**。
-    /// 不是该形态、或换算后分钟数 ≤ 0（例如「(0.001h)」会四舍五入成 0 分钟）时返回 null ——
-    /// **宁可不归一，也绝不把时长抹成 0**。
-    /// 返回分钟数是为了直接复用 <see cref="Build"/>，保证输出与程序标准格式逐字节一致。
+    /// 解析时长后缀，返回**分钟数**。认 <see cref="SuffixRegex"/> 的全部形态：
+    /// 「 · 0.7 h」「10.1h」「2.2 h」「45min」「42分钟」「(42分)」「(2.5h)」「2小时」。
+    /// 认不出、或换算后 ≤ 0 分钟时返回 null（调用方退回"保留原文"）。
+    /// 返回分钟数是为了复用 <see cref="Build"/>，保证输出与程序标准格式逐字节一致；
+    /// 2 位小数的粒度是 0.6 分钟，所以标准标题「往返解析一次完全相等」→ 本方法对标准标题幂等。
     /// </summary>
-    private static int? ParseLegacyParenMinutes(string suffix)
+    private static int? ParseSuffixMinutes(string suffix)
     {
-        var m = LegacyParenSuffixRegex.Match(suffix);
-        if (!m.Success) return null;
+        var body = StripSuffixSeparator(suffix);
+        if (body.Length == 0) return null;
 
+        // 程序旧括号格式先脱括号（括号只表示"包起来"，单位仍在里面）
+        if (body.Length > 2 && body[0] == '(' && body[body.Length - 1] == ')')
+        {
+            body = body.Substring(1, body.Length - 2).Trim();
+        }
+
+        var m = SuffixCoreRegex.Match(body);
+        if (!m.Success) return null;
         if (!double.TryParse(
                 m.Groups["num"].Value,
                 System.Globalization.NumberStyles.Float,
@@ -126,17 +135,18 @@ internal static class DailyRecordTitle
             return null;
         }
 
-        var unit = m.Groups["unit"].Value;
-        var minutes = (int)Math.Round(unit.Contains('分') ? num : num * 60.0);
+        var unit = m.Groups["unit"].Value.ToLowerInvariant();
+        var isMinutes = unit is "min" or "mins" || unit.Contains('分');
+        var minutes = (int)Math.Round(isMinutes ? num : num * 60.0);
         return minutes > 0 ? minutes : null;
     }
 
     /// <summary>
-    /// 程序旧格式的括号时长后缀。单位只列 <see cref="SuffixRegex"/> 里出现过的那些，
-    /// 避免"能提取出来却解析不了"的两套规则漂移。
+    /// 时长后缀的"核心"部分（分隔符与括号已由调用方剥掉）。
+    /// 单位只列 <see cref="SuffixRegex"/> 里出现过的那些，避免"能提取却解析不了"的两套规则漂移。
     /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex LegacyParenSuffixRegex = new(
-        @"^\(\s*(?<num>\d+(?:\.\d+)?)\s*(?<unit>分|分钟|h|小时)\s*\)$",
+    private static readonly System.Text.RegularExpressions.Regex SuffixCoreRegex = new(
+        @"^(?<num>\d+(?:\.\d+)?)\s*(?<unit>min|mins|h|hr|hrs|小时|分钟|分)$",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase |
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
@@ -1509,7 +1519,7 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                        var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
                             displayName,
                             DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
                             item.DurationMinutes);
@@ -1680,12 +1690,11 @@ public class NotionSyncService : INotionSyncService
                 //
                 //    Notion 侧的历史数值是**权威**，本地只是缓存。回刷只负责"呈现"：
                 //    把游戏名换成总表的名字，时长文本原样保留。
-                // 有原标题 → 只把"游戏名"那一段换成总表的名字，时长文本原样保留。
-                // BuildWithPreservedSuffix 会顺带把缺失的 ` · ` 分隔符补上：用户手写的紧贴形态
-                // （如「黑旗10.1h」）取出的后缀是 `10.1h`，直接拼接就会写出没有 · 的标题。
+                // 有原标题 → 把"游戏名"换成总表的名字，并把原标题里的时长**文本**规范化成标准格式
+                // （见 DailyRecordTitle.BuildNormalizedTitle：它只用后缀自身携带的数字与单位换算）。
                 // 没有原标题可参考（老库升级）→ 只能按本地时长拼；
                 // 但依然**不写**「单次时长」属性，数值属性始终以 Notion 上的为准。
-                var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
                     displayName,
                     DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
                     item.DurationMinutes);
@@ -2113,7 +2122,7 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                        var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
                             displayName,
                             DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
                             item.DurationMinutes);
