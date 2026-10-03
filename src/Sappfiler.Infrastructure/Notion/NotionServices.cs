@@ -169,6 +169,16 @@ public class NotionClient : INotionClient
     private readonly int _maxRetries;
     private string? _lastGameMasterTitlePropName;
 
+    /// <summary>
+    /// 2j 属性探测：最近一次查询总表时，实际命中的「已忽略」属性名
+    /// （用户可能写成「已忽略」或「Ignored」，写回时必须用**他实际用的那个名字**）。
+    /// null / 空 = 该库没有这个属性 → 忽略状态同步**整段跳过**。
+    /// </summary>
+    private string? _lastGameMasterIgnoredPropName;
+
+    /// <summary>见 <see cref="INotionClient.SupportsGameIgnoredProperty"/>。</summary>
+    public bool SupportsGameIgnoredProperty => !string.IsNullOrWhiteSpace(_lastGameMasterIgnoredPropName);
+
     public NotionClient(string token, HttpClient? httpClient = null, int maxRetries = 3)
     {
         _token = token;
@@ -319,6 +329,13 @@ public class NotionClient : INotionClient
                     var aliases = ExtractMultiSelectOrText(props, "别名", "Aliases");
                     var idents = ExtractMultiSelectOrText(props, "游戏标识", "Identifiers", "Steam ID");
                     var genres = ExtractMultiSelectOrText(props, "类型", "游戏类型", "Genre", "Genres", "分类");
+                    // 2j：属性探测。「已忽略」Checkbox 不存在 → null（不是 false）→ 整段忽略同步跳过。
+                    var (ignored, ignoredPropName) = ExtractCheckbox(props, "已忽略", "Ignored");
+                    if (!string.IsNullOrWhiteSpace(ignoredPropName))
+                    {
+                        // 记住用户实际使用的属性名 —— 写回时必须用它，否则会 400。
+                        _lastGameMasterIgnoredPropName = ignoredPropName;
+                    }
                     var coverUrl = ExtractCoverUrl(page, props);
                     var (iconUrl, iconType) = ExtractPageIcon(page);
 
@@ -334,6 +351,7 @@ public class NotionClient : INotionClient
                             CoverUrl = coverUrl,
                             IconUrl = iconUrl,
                             IconType = iconType,
+                            IsIgnored = ignored,
                             LastSyncedAt = DateTime.UtcNow
                         });
                     }
@@ -674,6 +692,33 @@ public class NotionClient : INotionClient
     /// <summary>
     /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
     /// </summary>
+    /// <summary>
+    /// 2j：把总表页面的「已忽略」Checkbox 设为指定值。
+    ///
+    /// ⚠️ **属性探测**：该用户的总表没有「已忽略」属性时直接返回 false、绝不写入 ——
+    /// 这样"要不要用这个能力"完全由用户在自己库里加不加属性决定，老用户行为零变化。
+    /// </summary>
+    public async Task<bool> UpdateGameMasterIgnoredAsync(string pageId, bool ignored)
+    {
+        if (!SupportsGameIgnoredProperty) return false;
+        if (string.IsNullOrWhiteSpace(pageId)) return false;
+
+        var cleanPageId = pageId.Replace("-", "");
+        var propName = _lastGameMasterIgnoredPropName!;
+        using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", new
+        {
+            properties = new Dictionary<string, object>
+            {
+                [propName] = new { checkbox = ignored }
+            }
+        });
+        var res = await SendWithRetryAsync(req);
+        return res.TryGetProperty("id", out _);
+    }
+
+    /// <summary>
+    /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
+    /// </summary>
     public async Task<bool> IsPageDeletedAsync(string pageId)
     {
         if (string.IsNullOrWhiteSpace(pageId)) return true;
@@ -767,6 +812,28 @@ public class NotionClient : INotionClient
     /// 解析总表页面的 page icon。icon 是正方形小图，做 88px 方形封面比横幅 cover 合适。
     /// 返回 (url, type)；emoji 图标没有 url；页面未设图标时 type = null（可由程序写入）。
     /// </summary>
+    /// <summary>
+    /// 2j：读取 Checkbox 型属性，并回传**实际命中的属性名**（写回时要用同一个名字）。
+    /// 找不到该属性时返回 <c>(null, null)</c> —— "没有这个属性"与"用户没勾选(false)"必须严格区分。
+    /// </summary>
+    private static (bool? Value, string? PropertyName) ExtractCheckbox(JsonElement props, params string[] propertyNames)
+    {
+        foreach (var pName in propertyNames)
+        {
+            if (!props.TryGetProperty(pName, out var pObj)) continue;
+            if (!pObj.TryGetProperty("type", out var type)) continue;
+            if (type.GetString() != "checkbox") continue;
+            if (!pObj.TryGetProperty("checkbox", out var value)) continue;
+
+            var value2 = (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False)
+                ? (bool?)value.GetBoolean()
+                : null;
+            return (value2, pName);
+        }
+
+        return (null, null);
+    }
+
     private static (string? Url, string? Type) ExtractPageIcon(JsonElement page)
     {
         if (!page.TryGetProperty("icon", out var icon) || icon.ValueKind != JsonValueKind.Object)
@@ -1115,6 +1182,10 @@ public class NotionSyncService : INotionSyncService
             if (items != null && items.Count > 0)
             {
                 await _repo.UpsertCatalogItemsAsync(items);
+
+                // 2j：把总表「已忽略」落到本地（该库没有这个属性时整段跳过，老用户零影响）。
+                // 放在这里而不是 Pull 之后：被忽略的游戏不该先被拉出每日记录再被忽略。
+                await ApplyCatalogIgnoredStateAsync(items);
 
                 // 之前这里只增不删，导致总表删掉的条目、以及早期测试留下的假 page_id 一直沉淀在本地，
                 // 还会出现在手动绑定的候选列表里（选中就 404）。
@@ -1971,6 +2042,124 @@ public class NotionSyncService : INotionSyncService
         catch (Exception ex)
         {
             AppLog.Warn($"同步 page icon 失败（不影响其他同步）: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 2j：把总表的「已忽略」落到本地 <c>games.status</c>。
+    ///
+    /// 语义（保守，详见附录 M）：
+    ///   · 只做 **Notion true → 本地 ignored** 单向；Notion 的 false **不**反向覆盖本地
+    ///     —— 否则"本地刚忽略、写回尚未生效"就会被下一轮拉取抹掉；
+    ///   · 所有条目 <c>IsIgnored</c> 均为 null（该库没有「已忽略」属性）→ **整段跳过**，
+    ///     老用户行为零变化；
+    ///   · 只改 status，**绝不碰**时长 / 日期 / 绑定 / exe 路径。
+    ///
+    /// 为什么放在目录刷新之后：这一步依赖刚拉下来的总表快照，且必须在 Pull 之前
+    /// （否则被忽略的游戏会先被拉出每日记录、再被忽略，出现一轮多余的"复活"）。
+    /// </summary>
+    /// <summary>
+    /// 最近一次总表快照里"勾了忽略"的条目（2j）。
+    ///
+    /// 为什么要缓存：**新机首次恢复时，游戏行是 Pull 期间才被创建的** ——
+    /// 目录刷新那一步执行时本地还没有对象可标记。所以启动链必须在 Pull 之后再调用
+    /// 一次 <see cref="ApplyCatalogIgnoredStateAsync()"/>，否则"换机后忽略失效"这个
+    /// 我们要修的行为恰恰会在最需要它的场景（全新机器）下复现。
+    /// </summary>
+    private readonly List<NotionGameCatalogItem> _catalogIgnoredItems = new();
+
+    private async Task ApplyCatalogIgnoredStateAsync(IReadOnlyList<NotionGameCatalogItem> items)
+    {
+        _catalogIgnoredItems.Clear();
+        _catalogIgnoredItems.AddRange(
+            items.Where(i => i.IsIgnored == true && !string.IsNullOrWhiteSpace(i.PageId)));
+
+        await ApplyCatalogIgnoredStateAsync();
+    }
+
+    /// <summary>2j：用最近一次总表快照里的「已忽略」条目对齐本地状态。**幂等**，可在 Pull 之后再调用。</summary>
+    public async Task<int> ApplyCatalogIgnoredStateAsync()
+    {
+        try
+        {
+            var ignoredItems = _catalogIgnoredItems;
+
+            // 属性不存在（全 null）或无人勾选 → 什么都不做（零行为变化）。
+            if (ignoredItems.Count == 0) return 0;
+
+            var games = await _repo.GetAllGamesAsync();
+            var byPageId = new Dictionary<string, GameRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var g in games)
+            {
+                if (!string.IsNullOrWhiteSpace(g.NotionPageId))
+                {
+                    byPageId.TryAdd(NormalizePageId(g.NotionPageId), g);
+                }
+            }
+
+            int applied = 0;
+            foreach (var item in ignoredItems)
+            {
+                if (!byPageId.TryGetValue(NormalizePageId(item.PageId), out var game)) continue;
+                if (string.Equals(game.Status, "ignored", StringComparison.Ordinal)) continue;
+
+                await _repo.UpdateGameStatusAsync(game.Id, "ignored");
+                applied++;
+                AppLog.Info($"[Notion] 总表标记「已忽略」→ 本地同步忽略：「{game.Name}」");
+            }
+
+            if (applied > 0)
+            {
+                SyncStatusChanged?.Invoke(this, $"已按总表「已忽略」同步 {applied} 款游戏");
+            }
+
+            return applied;
+        }
+        catch (Exception ex)
+        {
+            // 旁路能力：失败绝不允许影响换机恢复主链，更不允许影响本地计时。
+            AppLog.Warn($"[Notion] 同步「已忽略」状态失败（不影响其他同步）：{ex.Message}");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// 2j：本地忽略/恢复后把状态写回总表。**fire-and-forget 调用，绝不上抛、绝不阻塞 UI。**
+    /// </summary>
+    public async Task<bool> PushGameIgnoredStateAsync(int gameId, bool ignored)
+    {
+        if (!_config.IsNotionConfigured) return false;
+
+        try
+        {
+            var game = await _repo.GetGameByIdAsync(gameId);
+            if (game is null) return false;
+
+            if (string.IsNullOrWhiteSpace(game.NotionPageId))
+            {
+                // 未绑定总表 = 没有可写的地方（未绑定游戏本就没有远端身份）。不是错误。
+                return false;
+            }
+
+            if (!_client.SupportsGameIgnoredProperty)
+            {
+                // 属性探测未命中（该库没有「已忽略」属性，或本轮尚未查过总表）→ 绝不写。
+                AppLog.Info("[Notion] 总表没有「已忽略」属性，跳过写回（正常降级）");
+                return false;
+            }
+
+            var ok = await _client.UpdateGameMasterIgnoredAsync(game.NotionPageId, ignored);
+            if (!ok)
+            {
+                AppLog.Warn($"[Notion] 写回「已忽略」失败：「{game.Name}」");
+            }
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            // 调用方是 UI 的 fire-and-forget 路径：本地状态已经生效，这里的失败不改变它。
+            AppLog.Warn($"[Notion] 写回「已忽略」异常（不影响本地状态）：{ex.Message}");
+            return false;
         }
     }
 

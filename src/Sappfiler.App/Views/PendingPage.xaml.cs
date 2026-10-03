@@ -159,6 +159,9 @@ public sealed partial class PendingPage : Page
         if (sender is Button { Tag: GameRecord game } && _repo != null)
         {
             await _repo.UpdateGameStatusAsync(game.Id, "ignored");
+            // 2j：忽略状态要跨机一致，否则换台电脑这个游戏又会开始计时。
+            // fire-and-forget：UI 不等待，失败只记日志（本地状态已经生效）。
+            _ = _syncService?.PushGameIgnoredStateAsync(game.Id, true);
             await LoadPendingGamesAsync();
 
             var undoBtn = new Button
@@ -170,6 +173,7 @@ public sealed partial class PendingPage : Page
             undoBtn.Click += async (s, args) =>
             {
                 await _repo.UpdateGameStatusAsync(game.Id, "active");
+                _ = _syncService?.PushGameIgnoredStateAsync(game.Id, false);
                 await LoadPendingGamesAsync();
                 StatusInfoBar.IsOpen = false;
             };
@@ -194,6 +198,7 @@ public sealed partial class PendingPage : Page
         if (sender is Button { Tag: GameRecord game } && _repo != null)
         {
             await _repo.UpdateGameStatusAsync(game.Id, "active");
+            _ = _syncService?.PushGameIgnoredStateAsync(game.Id, false);
             await LoadPendingGamesAsync();
 
             StatusInfoBar.Severity = InfoBarSeverity.Success;

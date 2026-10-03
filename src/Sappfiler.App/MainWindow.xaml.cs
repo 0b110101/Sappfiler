@@ -569,6 +569,10 @@ public sealed partial class MainWindow : Window
                     await _syncService.ReconcileNotionDeletionsAsync();
                     await _syncService.AutoLinkGamesFromCatalogAsync();
                     await _syncService.PullDailyRecordsFromNotionAsync();
+                    // 2j：新机首次恢复时，游戏行是**上面这行 Pull 期间**才被创建的 ——
+                    // 所以「已忽略」必须在 Pull 之后再应用一次，否则"换机后忽略失效"
+                    // 恰恰会在最需要它的场景（全新机器）下复现。幂等、不访问网络。
+                    await _syncService.ApplyCatalogIgnoredStateAsync();
                     await _syncService.BackfillRelationsAsync();
                     await _syncService.SyncPendingDailyRecordsAsync();
                     // 回刷必须在推送之后：这轮刚推上去的记录此时才有 notion_title 快照。

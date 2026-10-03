@@ -130,6 +130,17 @@ public class NotionGameCatalogItem
     /// <summary>page icon 的类型：external / file / emoji / null。null = 页面未设图标，可由程序写入。</summary>
     public string? IconType { get; set; }
 
+    /// <summary>
+    /// 总表「已忽略」Checkbox 的值（2j）。
+    ///
+    /// ⚠️ **null = 该用户的总表里没有这个属性**（属性探测未命中），不是"未忽略"。
+    /// 三态必须严格区分：
+    ///   · <c>null</c> → 整段 ignored 同步逻辑**跳过**，老用户行为完全不变；
+    ///   · <c>true</c>  → 本地该游戏置为 ignored（换机后不会再被重新计时）；
+    ///   · <c>false</c> → 不反向覆盖本地（见附录 M：忽略状态采用"ignored 单向优先"的保守语义）。
+    /// </summary>
+    public bool? IsIgnored { get; set; }
+
     public DateTime LastSyncedAt { get; set; } = DateTime.UtcNow;
 }
 

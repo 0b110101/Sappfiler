@@ -71,20 +71,22 @@ tests/Sappfiler.Tests/*
 !tests/Sappfiler.Tests/FakeNotionClient.cs
 !tests/Sappfiler.Tests/DeviceSync*.cs
 
+# —— 2j：Notion 换机恢复验收测试（针对性例外，**不**放开整个 Notion*.cs）——
+# 这条链路修的是真实行为错误（换机后被忽略的游戏重新开始计时），属产品验收而非临时调试，
+# 必须随仓库走，否则又退回"Agent 本机验证过、干净 clone 无法重现"。
+!tests/Sappfiler.Tests/NotionCrossDeviceRecoveryTests.cs
+
 # 内部报告与交接文档
+# ⚠️ 公开仓库边界（用户 2026-10-03 规则）：GitHub 只放**源代码 / 必要测试代码 / 公开文档 / 项目配置**。
+#    Agent 接管报告、阶段验收报告、测试报告、开发日志、内部设计记录、工作过程记录、私人笔记
+#    **一律本地保留**，不得 tracked / commit / push。
+#    （此前"针对性例外"已按该规则撤销；历史提交不作改写，但不再有 tracked 的内部资料。）
 /HANDOVER.md
 /CHANGELOG-QA.md
 /CLEANUP-REPORT.md
-/项目接管报告.md
+/项目接管报告*.md
 .workbuddy/
 .ai/*
-
-# —— 交接体系：针对性例外（2026-10-03 起纳入版本控制）——
-# 这些不是临时笔记，而是"为什么这么设计 / 冻结的技术决策 / 各 Phase 契约"，
-# 换 Agent 时必须能随仓库拿到。其余内部报告仍不上载至开源库。
-!.ai/多设备同步-方案确认-v1.md
-!/HANDOVER.md
-!/项目接管报告-2026-10-03.md
 
 # 本地封面缓存与根目录临时图片
 /cache/

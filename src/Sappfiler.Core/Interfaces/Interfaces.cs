@@ -163,6 +163,18 @@ public interface INotionClient
     Task<bool> SetPageIconAsync(string pageId, string imageUrl);
 
     /// <summary>
+    /// 2j 属性探测：该用户的总表里是否存在「已忽略」Checkbox 属性。
+    /// 只有成功查询过总表之后才有意义；<c>false</c> = 不存在 → 忽略状态同步**整段跳过**。
+    /// </summary>
+    bool SupportsGameIgnoredProperty { get; }
+
+    /// <summary>
+    /// 2j：把总表页面的「已忽略」Checkbox 设为指定值。
+    /// 属性不存在时**直接返回 false，绝不写入**（老用户零影响）。
+    /// </summary>
+    Task<bool> UpdateGameMasterIgnoredAsync(string pageId, bool ignored);
+
+    /// <summary>
     /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
     /// 用于对账时二次确权，防止因为 Notion 索引延迟或查询过滤导致本地记录被误删。
     /// </summary>
@@ -194,6 +206,19 @@ public interface INotionSyncService
     Task<int> RefreshDailyTitlesFromMasterAsync();
     Task<int> AutoLinkGamesFromCatalogAsync();
     Task RefreshGameCatalogCacheAsync();
+
+    /// <summary>
+    /// 2j：把最近一次总表快照里的「已忽略」应用到本地（幂等、不访问网络）。
+    /// **必须在 Pull 之后也调用一次**：新机首次恢复时游戏行是 Pull 期间才创建的。
+    /// </summary>
+    Task<int> ApplyCatalogIgnoredStateAsync();
+
+    /// <summary>
+    /// 2j：本地忽略/恢复后，把状态写回总表的「已忽略」Checkbox。
+    /// 设计为 **fire-and-forget** 调用（UI 不等待）；失败只记日志、绝不上抛，
+    /// 游戏未绑定总表或该库没有此属性时返回 false（这是正常的降级，不是错误）。
+    /// </summary>
+    Task<bool> PushGameIgnoredStateAsync(int gameId, bool ignored);
     Task LinkGameRelationAsync(int gameId, string notionPageId);
     Task<string> CreateGameMasterAndLinkAsync(int gameId, string gameName);
 
