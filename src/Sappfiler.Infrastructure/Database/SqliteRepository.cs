@@ -208,11 +208,18 @@ public partial class SqliteRepository : IDatabaseRepository
         }
         catch { }
 
-        // 启动时自动检查并合并同名/同总表关联的分裂游戏条目及同日时长记录
-        DeduplicateGamesAndDailySummaries(conn);
+        // 同步身份基础设施必须在去重**之前**就绪：
+        //   · 去重要读 games.global_id —— 列不存在时 Dapper 的 SELECT * 会**静默忽略**（不抛异常）
+        //     → 继承/墓碑逻辑无声失效，日志里也看不出来；
+        //   · 去重要写 sync_tombstones —— 表不存在会直接抛异常 → 整次去重被外层 catch 跳过。
+        // 返回 false = 没就绪 → 去重退回纯旧行为，绝不因同步能力缺失而让去重失效。
+        var syncIdentityReady = DeviceSyncSchema.EnsurePrerequisitesForDeduplication(conn);
 
-        // 多设备同步（Phase 1）：同步身份列 + 同步元数据表。
-        // 实现**全部**在 DeviceSyncSchema.cs，这里只保留一行调用 —— 本文件与
+        // 启动时自动检查并合并同名/同总表关联的分裂游戏条目及同日时长记录
+        DeduplicateGamesAndDailySummaries(conn, syncIdentityReady);
+
+        // 多设备同步（Phase 1/2）：同步身份列 + 同步元数据表。
+        // 实现**全部**在 DeviceSyncSchema.cs，这里只保留少量调用 —— 本文件与
         // feature/multi-backend-sync 分支都会改动，把改动面压到最小以免合并时冲突。
         DeviceSyncSchema.Ensure(conn);
     }
@@ -225,8 +232,16 @@ public partial class SqliteRepository : IDatabaseRepository
 
     /// <summary>
     /// 自动合并重复游戏条目（同 notion_page_id 或同名），将 sessions 与 daily_summary 汇总迁移并清理冗余游戏行。
+    ///
+    /// 多设备同步（Phase 2b）在此基础上追加了 **identity 一致性**处理（冻结契约）：
+    ///   ① 写入前拍快照 → ② sessions 迁移 → ③ daily_summary 合并 → ④ canonical global_id 继承
+    ///   → ⑤ 删除重复行 → ⑥ 为被丢弃的同步身份写墓碑，**整段是一个事务**。
+    /// 分组规则 / 评分 / 字段继承 / 合并口径 / 日志格式**全部保持原样**。
+    ///
+    /// <paramref name="syncIdentityReady"/> 为 false（同步基础设施未就绪）时，
+    /// 本方法退回**纯旧行为** —— 绝不因为同步能力缺失而让去重失效。
     /// </summary>
-    private void DeduplicateGamesAndDailySummaries(SqliteConnection conn)
+    private void DeduplicateGamesAndDailySummaries(SqliteConnection conn, bool syncIdentityReady = false)
     {
         try
         {
@@ -285,6 +300,11 @@ public partial class SqliteRepository : IDatabaseRepository
                 var canonical = group.OrderByDescending(Score).ThenBy(g => g.Id).First();
                 var duplicates = group.Where(g => g.Id != canonical.Id).ToList();
 
+                // ① 拍快照（本次去重的**决策依据**）：必须在任何写入之前。
+                //    一旦 sessions 被搬到 canonical，dup 就不再"存在关联 sessions"，
+                //    再用 SyncableGame 规则判定会把它误判成纯幽灵 → 漏写墓碑 → 云端 identity 永久残留。
+                var snapshots = TakeDedupSnapshot(conn, group);
+
                 string? bestNotionId = canonical.NotionPageId;
                 string? bestCoverUrl = canonical.CoverUrl;
                 string bestExe = canonical.Executable;
@@ -306,7 +326,52 @@ public partial class SqliteRepository : IDatabaseRepository
                     }
                 }
 
-                conn.Execute("""
+                // ④ canonical 的 global_id（冻结契约 1~4）：
+                //    已有 → 永远保留（它是权威 identity）；没有 → 继承 duplicates 中**第一个**有效值；
+                //    全组都没有 → 保持 NULL，交给下次启动的自愈回填补。
+                //    ⚠️ 绝不做"删完重复行再给剩余行重新生成 UUID"。
+                string? bestGlobalId = syncIdentityReady ? snapshots[canonical.Id].GlobalId : null;
+                if (syncIdentityReady && string.IsNullOrWhiteSpace(bestGlobalId))
+                {
+                    foreach (var dup in duplicates)
+                    {
+                        var inherited = snapshots[dup.Id].GlobalId;
+                        if (!string.IsNullOrWhiteSpace(inherited))
+                        {
+                            bestGlobalId = inherited;
+                            break;
+                        }
+                    }
+                }
+
+                // 本次 group 的合并是**一个原子变更**（冻结契约第 7 条）：
+                //   ② sessions → canonical、③ daily_summary 合并、④ canonical identity 继承、
+                //   ⑤ DELETE duplicate games、⑥ 写 sync_tombstones。
+                // 任一步抛异常 → using 未 Commit 即 Dispose = ROLLBACK，
+                // 绝不会留下"sessions 已迁移 + games 已删除 + 墓碑没写"这种中间态。
+                using var tx = conn.BeginTransaction();
+
+                // ④-a 先把 identity 从"即将被合并掉的行"身上摘下来。
+                //     ⚠️ 必需：唯一索引不允许同一个 global_id 同时挂在两行上。canonical 要继承的那个
+                //     identity 此刻还在被合并行身上，若不先摘下，下一步的继承会直接撞
+                //     `UNIQUE constraint failed: games.global_id` → 整组回滚（行为"安全"但永远合并不了）。
+                //     摘除只是把状态先归零，任一步失败都会随事务回滚，identity 不会真的丢。
+                if (syncIdentityReady && duplicates.Count > 0)
+                {
+                    conn.Execute("""
+                        UPDATE games
+                        SET global_id = NULL
+                        WHERE id IN @dupIds
+                          AND NULLIF(TRIM(global_id), '') IS NOT NULL;
+                        """,
+                        new { dupIds = duplicates.Select(d => d.Id).ToList() },
+                        tx);
+                }
+
+                // global_id 列不存在时（同步基础设施未就绪）不碰它 —— 去重必须照常工作。
+                var globalIdSetClause = syncIdentityReady ? "global_id = @bestGlobalId," : string.Empty;
+
+                conn.Execute($"""
                     UPDATE games
                     SET notion_page_id = @bestNotionId,
                         cover_url = @bestCoverUrl,
@@ -314,25 +379,27 @@ public partial class SqliteRepository : IDatabaseRepository
                         executable_path = @bestExePath,
                         platform = @bestPlatform,
                         platform_id = @bestPlatformId,
+                        {globalIdSetClause}
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = @id;
                     """,
-                    new { bestNotionId, bestCoverUrl, bestExe, bestExePath, bestPlatform, bestPlatformId, id = canonical.Id });
+                    new { bestNotionId, bestCoverUrl, bestExe, bestExePath, bestPlatform, bestPlatformId, bestGlobalId, id = canonical.Id },
+                    tx);
 
                 foreach (var dup in duplicates)
                 {
                     conn.Execute("UPDATE sessions SET game_id = @canonicalId WHERE game_id = @dupId;",
-                        new { canonicalId = canonical.Id, dupId = dup.Id });
+                        new { canonicalId = canonical.Id, dupId = dup.Id }, tx);
 
                     var dupSummaries = conn.Query<DailySummaryRow>(
                         "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE game_id = @dupId;",
-                        new { dupId = dup.Id }).ToList();
+                        new { dupId = dup.Id }, tx).ToList();
 
                     foreach (var ds in dupSummaries)
                     {
                         var targetRow = conn.QueryFirstOrDefault<DailySummaryRow>(
                             "SELECT id AS Id, date AS Date, game_id AS GameId, duration_seconds AS DurationSeconds, duration_minutes AS DurationMinutes, session_count AS SessionCount, sync_status AS SyncStatus, notion_page_id AS NotionPageId, notion_title AS NotionTitle, notion_icon_url AS NotionIconUrl FROM daily_summary WHERE date = @date AND game_id = @canonicalId LIMIT 1;",
-                            new { date = ds.Date, canonicalId = canonical.Id });
+                            new { date = ds.Date, canonicalId = canonical.Id }, tx);
 
                         if (targetRow != null)
                         {
@@ -357,18 +424,40 @@ public partial class SqliteRepository : IDatabaseRepository
 
                                 DELETE FROM daily_summary WHERE id = @dupDailyId;
                                 """,
-                                new { combinedSecs, combinedMins, combinedSessions, finalPageId, finalTitle, finalIcon, finalStatus, targetId = targetRow.Id, dupDailyId = ds.Id });
+                                new { combinedSecs, combinedMins, combinedSessions, finalPageId, finalTitle, finalIcon, finalStatus, targetId = targetRow.Id, dupDailyId = ds.Id },
+                                tx);
                         }
                         else
                         {
                             conn.Execute("UPDATE daily_summary SET game_id = @canonicalId WHERE id = @id;",
-                                new { canonicalId = canonical.Id, id = ds.Id });
+                                new { canonicalId = canonical.Id, id = ds.Id }, tx);
                         }
                     }
 
-                    conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id });
+                    // ⑤ 删除重复游戏行 → ⑥ 再为"被真正丢弃的同步身份"写墓碑（顺序即冻结契约的 ⑤→⑥）。
+                    //
+                    // 丢弃集合 = {快照里有 global_id 的行} \ {canonical 最终持有的 global_id}，
+                    // 且仅限**删除前 isSyncable == true** 的行（契约第 5 条）。
+                    // 判定必须用**快照**而非当前库状态 —— 此刻该行的 sessions 已经搬走了。
+                    // 墓碑只认 global_id，与 notion_page_id 无关（第 6 条）：即使两行共用同一个
+                    // notion_page_id 也要写，因为**多写墓碑幂等无害、漏写是不可逆的身份残留**。
+                    var discarded = snapshots[dup.Id];
+
+                    conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id }, tx);
+
+                    if (syncIdentityReady &&
+                        discarded.IsSyncable &&
+                        !string.IsNullOrWhiteSpace(discarded.GlobalId) &&
+                        !string.Equals(discarded.GlobalId, bestGlobalId, StringComparison.Ordinal))
+                    {
+                        WriteGameTombstone(conn, tx, discarded.GlobalId!);
+                        AppLog.Info($"[设备同步] 已为被合并掉的游戏 identity 写墓碑：global_id={discarded.GlobalId}（原「{dup.Name}」id={dup.Id}）");
+                    }
+
                     AppLog.Info($"[维护] 自动合并重复游戏记录：「{canonical.Name}」(保留 id={canonical.Id}, 清理重复 id={dup.Id})");
                 }
+
+                tx.Commit();
             }
         }
         catch (Exception ex)

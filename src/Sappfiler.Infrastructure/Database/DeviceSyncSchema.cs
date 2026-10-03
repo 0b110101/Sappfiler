@@ -1,5 +1,6 @@
 using System.Globalization;
 using Dapper;
+using GameTimeTracker.Core.DeviceSync;
 using GameTimeTracker.Core.Models;
 using Microsoft.Data.Sqlite;
 
@@ -27,12 +28,48 @@ internal static class DeviceSyncSchema
         {
             EnsureSyncTables(conn);
             EnsureSessionsSyncColumns(conn);
+
+            // migration 002：games.global_id。
+            // DDL 的主要调用点其实在「启动去重**之前**」（见 SqliteRepository.InitializeDatabase），
+            // 这里再调一次只是保证幂等完备 —— 将来那行若被挪走，也不会漏建列。
+            EnsureGamesIdentityColumn(conn);
+            BackfillGameSyncIdentity(conn);
+
             EnsureLocalDevice(conn);
         }
         catch (Exception ex)
         {
             // 迁移失败绝不能让程序起不来：同步是附加能力，本地计时/统计必须照常工作。
             AppLog.Error("[设备同步] 表结构初始化失败，本次跳过（本地功能不受影响）", ex);
+        }
+    }
+
+    /// <summary>
+    /// 启动**去重之前**必须就绪的部分：同步元数据表（去重要写 <c>sync_tombstones</c>）、
+    /// <c>games.global_id</c>（去重要读它来决定 identity 是继承还是丢弃）、
+    /// 本机设备身份（墓碑要记 <c>device_id</c>）。
+    ///
+    /// ⚠️ 为什么单独开一个入口：默认的 <see cref="Ensure"/> 跑在去重**之后**，而：
+    ///   · 去重需要读 <c>games.global_id</c> —— 列不存在时 Dapper 的 <c>SELECT *</c> 会**静默忽略**
+    ///     （不抛异常）→ 继承/墓碑逻辑无声失效，日志里也看不出来；
+    ///   · 去重需要写 <c>sync_tombstones</c> —— 表不存在会直接抛异常 → 整次去重被外层 catch 跳过。
+    ///
+    /// 全部幂等，且**失败不抛**：返回 false 表示同步身份基础设施没准备好，
+    /// 此时去重必须退回"纯旧行为"（不继承 global_id、不写墓碑），绝不能让去重本身失效。
+    /// </summary>
+    public static bool EnsurePrerequisitesForDeduplication(SqliteConnection conn)
+    {
+        try
+        {
+            EnsureSyncTables(conn);
+            EnsureGamesIdentityColumn(conn);
+            EnsureLocalDevice(conn);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[设备同步] 去重前置的同步基础设施未就绪，本次不处理 identity/墓碑（去重照常进行）：{ex.Message}");
+            return false;
         }
     }
 
@@ -217,6 +254,104 @@ internal static class DeviceSyncSchema
             INSERT INTO schema_migrations (version, applied_at_utc) VALUES (1, @now)
             ON CONFLICT(version) DO NOTHING;
             """, new { now = UtcNowIso() });
+    }
+
+    /// <summary>
+    /// migration 002（DDL 部分）：<c>games.global_id</c> —— 跨设备的 Game identity。
+    ///
+    /// ⚠️ **必须在 <c>DeduplicateGamesAndDailySummaries</c> 之前调用**：
+    /// 去重要读 global_id 才能决定"继承还是丢弃 + 要不要写墓碑"，
+    /// 而 Dapper 的 <c>SELECT *</c> 在列不存在时**静默忽略**（不抛异常）→ 逻辑会无声失效。
+    ///
+    /// SQLite 兼容性同 sessions（见 <see cref="EnsureSessionsSyncColumns"/>）：
+    /// ADD COLUMN 不能加"NOT NULL 且无默认值"的列、也不能加 UNIQUE，
+    /// 所以做法是「列可空 → 事后建唯一索引 → 非空由应用层保证」。
+    /// SQLite 的唯一索引允许多个 NULL，所以幽灵行可以一直保持 NULL。
+    /// </summary>
+    public static void EnsureGamesIdentityColumn(SqliteConnection conn)
+    {
+        if (!ColumnExists(conn, "games", "global_id"))
+        {
+            try
+            {
+                conn.Execute("ALTER TABLE games ADD COLUMN global_id TEXT;");
+            }
+            catch (Exception ex)
+            {
+                // 与项目既有惯例一致：加列失败视为"已存在"，但留日志便于排查。
+                AppLog.Warn($"[设备同步] 追加 games.global_id 失败（可能已存在）：{ex.Message}");
+            }
+        }
+
+        try
+        {
+            conn.Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_games_global_id ON games(global_id);");
+        }
+        catch (Exception ex)
+        {
+            // ⚠️ 索引失败**绝不能**拖累回填：否则 games 永远拿不到身份，而且没人会察觉。
+            AppLog.Warn($"[设备同步] 创建 idx_games_global_id 失败（不影响回填）：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// migration 002（回填部分）：**只给"可同步"的游戏**分配 <c>global_id</c>。
+    ///
+    /// 为什么只给可同步的：纯幽灵行（无 exe、无 session）永远不该进入同步体系，
+    /// 给它们分配身份只会制造无意义的云端墓碑 —— 这就是"纯幽灵行不污染云端"的机制本身。
+    /// 判定式复用 <see cref="GameSyncEligibility.SqlPredicate"/>，不另写一份。
+    ///
+    /// 为什么"每次启动补齐"而不是"一次性标记"：与 sessions 的回填同款**自愈** ——
+    /// 期间新出现的可同步游戏（用户手加 exe / Notion 拉取 / 库扫描发现）也必须拿到身份，
+    /// 一次性标记会让它们**永远**拿不到 global_id（Phase 1 就是被回归测试抓到过这个坑）。
+    ///
+    /// 幂等：只更新 <c>global_id</c> 仍为空的行 → 重复执行不会产生第二套 UUID。
+    /// 注：不动 <c>updated_at</c> —— 这不是用户可见的修改，没必要平白搅动其他逻辑。
+    /// </summary>
+    private static void BackfillGameSyncIdentity(SqliteConnection conn)
+    {
+        var ids = conn.Query<int>($"""
+            SELECT games.id
+            FROM games
+            WHERE NULLIF(TRIM(global_id), '') IS NULL
+              AND {GameSyncEligibility.SqlPredicate};
+            """).ToList();
+
+        if (ids.Count > 0)
+        {
+            using var tx = conn.BeginTransaction();
+            foreach (var id in ids)
+            {
+                conn.Execute("""
+                    UPDATE games
+                    SET global_id = @globalId
+                    WHERE id = @id AND NULLIF(TRIM(global_id), '') IS NULL;
+                    """,
+                    new { globalId = NewId(), id },
+                    tx);
+            }
+            tx.Commit();
+
+            AppLog.Info($"[设备同步] 已为 {ids.Count} 个可同步游戏分配 global_id");
+        }
+
+        conn.Execute("""
+            INSERT INTO schema_migrations (version, applied_at_utc) VALUES (2, @now)
+            ON CONFLICT(version) DO NOTHING;
+            """, new { now = UtcNowIso() });
+    }
+
+    /// <summary>列是否存在（用于幂等 ALTER TABLE）。</summary>
+    private static bool ColumnExists(SqliteConnection conn, string table, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table});";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     /// <summary>

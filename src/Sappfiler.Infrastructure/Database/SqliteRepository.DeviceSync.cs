@@ -207,21 +207,33 @@ public partial class SqliteRepository
         try
         {
             using var conn = CreateConnection();
-            await conn.ExecuteAsync(
-                """
-                INSERT INTO sync_tombstones
-                    (tombstone_id, entity_type, entity_global_id, device_id, deleted_at_utc, created_at_utc)
-                VALUES
-                    (@TombstoneId, @EntityType, @EntityGlobalId, @DeviceId, @DeletedAtUtc, @CreatedAtUtc)
-                ON CONFLICT(entity_type, entity_global_id) DO UPDATE SET
-                    deleted_at_utc = excluded.deleted_at_utc;
-                """,
-                tombstone);
+            AddTombstoneCore(conn, null, tombstone);
         }
         finally
         {
             _writeLock.Release();
         }
+    }
+
+    /// <summary>
+    /// 墓碑的核心写入，供"同事务"场景复用（<paramref name="tx"/> 为 null 即自动提交）。
+    ///
+    /// 用同步实现而非 async：启动去重必须在**它自己的那个事务里**写墓碑，不能另开连接、另起事务。
+    /// （Microsoft.Data.Sqlite 的 async 命令内部就是同步执行的，行为等价，已有测试覆盖。）
+    /// </summary>
+    private static void AddTombstoneCore(SqliteConnection conn, SqliteTransaction? tx, SyncTombstone tombstone)
+    {
+        conn.Execute(
+            """
+            INSERT INTO sync_tombstones
+                (tombstone_id, entity_type, entity_global_id, device_id, deleted_at_utc, created_at_utc)
+            VALUES
+                (@TombstoneId, @EntityType, @EntityGlobalId, @DeviceId, @DeletedAtUtc, @CreatedAtUtc)
+            ON CONFLICT(entity_type, entity_global_id) DO UPDATE SET
+                deleted_at_utc = excluded.deleted_at_utc;
+            """,
+            tombstone,
+            tx);
     }
 
     public async Task<IReadOnlyList<SyncTombstone>> GetTombstonesAsync(int limit = SyncOutboxPolicy.PullBatchSize)
@@ -343,6 +355,75 @@ public partial class SqliteRepository
         {
             _writeLock.Release();
         }
+    }
+
+    // ==================== 启动去重的 identity 支撑 ====================
+
+    /// <summary>
+    /// 启动去重的**决策快照**：必须在任何写入之前采集。
+    ///
+    /// 为什么不能等做完再判定：现有去重顺序是「sessions 迁到 canonical → DELETE duplicate games」，
+    /// 一旦 sessions 被搬走，那个 dup 就**不再"存在关联 sessions"**，再用 SyncableGame 规则
+    /// 重新判定会把它误判成纯幽灵 → 漏写墓碑 → 云端 identity 永久残留（C3 明令禁止）。
+    /// </summary>
+    private sealed record DedupGameSnapshot(int Id, string? GlobalId, bool IsSyncable);
+
+    /// <summary>快照里用到的 sessions 计数行。</summary>
+    private sealed class GameSessionCount
+    {
+        public int GameId { get; set; }
+        public int Cnt { get; set; }
+    }
+
+    /// <summary>
+    /// 按 group 一次性查出每行的 sessions 数量并合成快照（不逐行往返查库）。
+    /// 判定式复用 <see cref="GameSyncEligibility.IsSyncable"/>，与 DB 侧 SQL 是同一套规则。
+    /// </summary>
+    private static Dictionary<int, DedupGameSnapshot> TakeDedupSnapshot(SqliteConnection conn, List<GameRecord> group)
+    {
+        var ids = group.Select(g => g.Id).ToList();
+
+        var counts = conn.Query<GameSessionCount>(
+                "SELECT game_id AS GameId, COUNT(*) AS Cnt FROM sessions WHERE game_id IN @ids GROUP BY game_id;",
+                new { ids })
+            .ToDictionary(r => r.GameId, r => r.Cnt);
+
+        return group.ToDictionary(
+            g => g.Id,
+            g => new DedupGameSnapshot(
+                g.Id,
+                string.IsNullOrWhiteSpace(g.GlobalId) ? null : g.GlobalId,
+                GameSyncEligibility.IsSyncable(
+                    g.Executable,
+                    g.ExecutablePath,
+                    counts.TryGetValue(g.Id, out var c) ? c : 0)));
+    }
+
+    /// <summary>
+    /// 在**调用方的事务内**为被丢弃的游戏 identity 写一条墓碑。
+    ///
+    /// 墓碑只认 <c>global_id</c>（Sappfiler 多设备同步身份），与 <c>notion_page_id</c> 无关：
+    /// 两行即使共用同一个 notion_page_id，只要被丢弃的 identity 曾经可同步，就要写墓碑 ——
+    /// **多写墓碑是幂等无害的，漏写是不可逆的身份残留**。
+    /// device_id 取本机（Phase 1 的 EnsureLocalDevice 已保证存在）。
+    /// </summary>
+    private static void WriteGameTombstone(SqliteConnection conn, SqliteTransaction? tx, string gameGlobalId)
+    {
+        var deviceId = conn.QuerySingleOrDefault<string>(
+            "SELECT value FROM settings WHERE key = @k;",
+            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx) ?? string.Empty;
+
+        var now = UtcNowIso();
+
+        AddTombstoneCore(conn, tx, new SyncTombstone
+        {
+            TombstoneId = Guid.NewGuid().ToString("N"),
+            EntityType = nameof(SyncEntityType.Game),
+            EntityGlobalId = gameGlobalId,
+            DeviceId = deviceId,
+            DeletedAtUtc = now,
+            CreatedAtUtc = now
+        });
     }
 
     // ============================ 私有工具 ============================

@@ -21,6 +21,18 @@ public class GameRecord : System.ComponentModel.INotifyPropertyChanged
     public string Executable { get; set; } = string.Empty;
     public string ExecutablePath { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 跨设备的 Game identity（migration 002 引入）。
+    ///
+    /// ⚠️ 与 <see cref="NotionPageId"/> 语义**不同**，不要把两者混用：
+    ///   · <c>NotionPageId</c> 是 **Notion 这个 Provider 的远端身份**；
+    ///   · <c>global_id</c> 才是 **Sappfiler 多设备同步身份**。
+    /// 删除墓碑、去重时的 identity 取舍**只认 global_id**，与 notion_page_id 无关。
+    ///
+    /// 纯幽灵行为 NULL（不分配、不进 outbox、不产生墓碑）。
+    /// </summary>
+    public string? GlobalId { get; set; }
+
     public string? NotionPageId
     {
         get => _notionPageId;
