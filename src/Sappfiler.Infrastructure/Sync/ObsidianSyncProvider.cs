@@ -239,14 +239,17 @@ public sealed class ObsidianSyncProvider : ISyncProvider
         const string endMarker = "<!-- Sappfiler End -->";
 
         string body = existingContent;
+        string? existingFmText = null;
 
-        // 若已有 frontmatter，先剥离它以避免生成重复 frontmatter
+        // 若已有 frontmatter，先剥离它以避免生成重复 frontmatter。
+        // 注意：剥离下来的原文要留着 —— 用户写在顶部的自定义属性必须原样合并回去。
         if (existingContent.TrimStart().StartsWith("---"))
         {
             var trimmed = existingContent.TrimStart();
             var secondDash = trimmed.IndexOf("\n---", 3, StringComparison.Ordinal);
             if (secondDash >= 0)
             {
+                existingFmText = trimmed.Substring(3, secondDash - 3);
                 var endOfFm = secondDash + 4;
                 if (endOfFm < trimmed.Length && trimmed[endOfFm] == '\r') endOfFm++;
                 if (endOfFm < trimmed.Length && trimmed[endOfFm] == '\n') endOfFm++;
@@ -271,8 +274,71 @@ public sealed class ObsidianSyncProvider : ISyncProvider
                 : generatedSection + "\n\n" + body.TrimStart();
         }
 
-        return frontmatter + "\n\n" + mergedBody.Trim() + "\n";
+        // 只覆盖 Sappfiler 自己管理的那几个键（generated_by / date / total_duration / game_count），
+        // 用户手写的其它 frontmatter 属性一律保留。
+        // 原实现直接丢弃整段旧 frontmatter，用户记录会在下次同步时静默消失，与
+        // README「用户手写内容 100% 保留」的承诺不符。
+        var mergedFrontmatter = MergeFrontmatter(existingFmText, frontmatter, _ => false);
+
+        return mergedFrontmatter + "\n\n" + mergedBody.Trim() + "\n";
     }
+
+    /// <summary>
+    /// 合并 frontmatter：以 <paramref name="generatedFrontmatter"/>（Sappfiler 生成的键）为准，
+    /// 其余用户原有行原样追加保留；<paramref name="isForeignManagedKey"/> 用于丢弃
+    /// 属于 Sappfiler 命名空间但本次未重新生成的旧键（例如历史遗留的 sappfiler-* 行）。
+    ///
+    /// 按「整行」而非「key: value 字典」处理 —— 这样 YAML 列表（<c>aliases:</c> + <c>- Foo</c>）、
+    /// 多行块值与注释都不会被压平或丢掉。
+    /// </summary>
+    private static string MergeFrontmatter(
+        string? existingFmText,
+        string generatedFrontmatter,
+        Func<string, bool> isForeignManagedKey)
+    {
+        if (string.IsNullOrWhiteSpace(existingFmText)) return generatedFrontmatter;
+
+        var generatedInner = SplitLines(generatedFrontmatter.Trim())
+            .Where(l => l.Trim() != "---")
+            .ToList();
+
+        var managedKeys = generatedInner
+            .Select(FrontmatterKeyOf)
+            .Where(k => k.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var result = new List<string>(generatedInner);
+        foreach (var line in SplitLines(existingFmText))
+        {
+            var raw = line.TrimEnd();
+            if (raw.Length == 0) continue;
+
+            var key = FrontmatterKeyOf(raw);
+            if (key.Length > 0 && (managedKeys.Contains(key) || isForeignManagedKey(key))) continue;
+
+            result.Add(raw);
+        }
+
+        return "---\n" + string.Join("\n", result) + "\n---";
+    }
+
+    /// <summary>
+    /// 取 frontmatter 行的键名；不是 <c>key: value</c> 形式（如列表项 <c>- Foo</c>）时返回空串，
+    /// 这些行会被原样保留。
+    /// </summary>
+    private static string FrontmatterKeyOf(string line)
+    {
+        var idx = line.IndexOf(':');
+        if (idx <= 0) return string.Empty;
+
+        var key = line.Substring(0, idx).Trim();
+        if (key.Length == 0) return string.Empty;
+        if (key.StartsWith("-", StringComparison.Ordinal)) return string.Empty;
+        return key;
+    }
+
+    private static List<string> SplitLines(string text)
+        => text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n').ToList();
 
     public async Task<string> CreateGameEntryAsync(GameRecord game)
     {
@@ -353,8 +419,8 @@ public sealed class ObsidianSyncProvider : ISyncProvider
         const string startMarker = "<!-- ⚠️ 以下内容由 Sappfiler 自动生成";
         const string endMarker = "<!-- Sappfiler End -->";
 
-        var customProps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string body = existingContent;
+        string? existingFmText = null;
 
         if (existingContent.TrimStart().StartsWith("---"))
         {
@@ -362,44 +428,32 @@ public sealed class ObsidianSyncProvider : ISyncProvider
             var secondDash = trimmed.IndexOf("\n---", 3, StringComparison.Ordinal);
             if (secondDash >= 0)
             {
-                var fmText = trimmed.Substring(3, secondDash - 3);
+                existingFmText = trimmed.Substring(3, secondDash - 3);
                 var endOfFm = secondDash + 4;
                 if (endOfFm < trimmed.Length && trimmed[endOfFm] == '\r') endOfFm++;
                 if (endOfFm < trimmed.Length && trimmed[endOfFm] == '\n') endOfFm++;
                 body = trimmed.Substring(endOfFm);
-
-                var lines = fmText.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-                foreach (var line in lines)
-                {
-                    var idx = line.IndexOf(':');
-                    if (idx > 0)
-                    {
-                        var k = line.Substring(0, idx).Trim();
-                        var v = line.Substring(idx + 1).Trim();
-                        customProps[k] = v;
-                    }
-                }
             }
         }
 
-        customProps["sappfiler-game-id"] = game.Id.ToString();
-        customProps["sappfiler-platform"] = game.Platform;
+        // 只写自己的 sappfiler-* 命名空间。用户手填的 genre / rating / status / aliases 等
+        // 由 MergeFrontmatter 按整行原样保留 —— 原来的实现把 frontmatter 解析成
+        // Dictionary<string,string>，YAML 列表（`aliases:` + `- Foo`）会被压成空值。
+        var sappfilerProps = new List<string>
+        {
+            $"sappfiler-game-id: {game.Id}",
+            $"sappfiler-platform: {game.Platform}"
+        };
         if (!string.IsNullOrWhiteSpace(game.PlatformId))
         {
-            customProps["sappfiler-platform-id"] = $"\"{game.PlatformId}\"";
+            sappfilerProps.Add($"sappfiler-platform-id: \"{game.PlatformId}\"");
         }
-        customProps["sappfiler-total-playtime"] = stats.FormattedTotalDuration;
-        customProps["sappfiler-total-hours"] = stats.TotalHours.ToString("0.#");
-        customProps["sappfiler-last-played"] = stats.LastPlayedDate ?? "";
-        customProps["sappfiler-total-sessions"] = stats.TotalSessions.ToString();
+        sappfilerProps.Add($"sappfiler-total-playtime: {stats.FormattedTotalDuration}");
+        sappfilerProps.Add($"sappfiler-total-hours: {stats.TotalHours.ToString("0.#")}");
+        sappfilerProps.Add($"sappfiler-last-played: {stats.LastPlayedDate ?? ""}");
+        sappfilerProps.Add($"sappfiler-total-sessions: {stats.TotalSessions}");
 
-        var sbFm = new StringBuilder();
-        sbFm.AppendLine("---");
-        foreach (var (k, v) in customProps)
-        {
-            sbFm.AppendLine($"{k}: {v}");
-        }
-        sbFm.Append("---");
+        var generatedFrontmatter = "---\n" + string.Join("\n", sappfilerProps) + "\n---";
 
         var sbSummary = new StringBuilder();
         sbSummary.AppendLine("<!-- ⚠️ 以下内容由 Sappfiler 自动生成，手动修改将在下次同步时被覆盖 -->");
@@ -437,7 +491,12 @@ public sealed class ObsidianSyncProvider : ISyncProvider
                 : generatedSection + "\n\n" + body.TrimStart();
         }
 
-        return sbFm.ToString() + "\n\n" + mergedBody.Trim() + "\n";
+        var mergedFrontmatter = MergeFrontmatter(
+            existingFmText,
+            generatedFrontmatter,
+            key => key.StartsWith("sappfiler-", StringComparison.OrdinalIgnoreCase));
+
+        return mergedFrontmatter + "\n\n" + mergedBody.Trim() + "\n";
     }
 
     public async Task<IReadOnlyList<RemoteGameCandidate>> GetRemoteCatalogAsync(CancellationToken cancellationToken = default)

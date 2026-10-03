@@ -413,65 +413,200 @@ public sealed class SiYuanSyncProvider : ISyncProvider
         };
     }
 
+    /// <summary>
+    /// 在思源「每日打卡」属性视图中查找「同日期 + 同游戏」的既有行。
+    ///
+    /// ⚠️ 必须同时匹配日期与游戏。原实现是
+    /// <c>SELECT id FROM blocks WHERE root_id = avId AND content LIKE '%date%' LIMIT 1</c>，
+    /// 参数 <paramref name="gameBlockId"/> 被完全忽略 —— 同一天的第二款游戏会命中
+    /// 第一款游戏那一行并被覆盖写入，属于**数据损坏**级别的问题（同一天多款游戏是常态）。
+    ///
+    /// 匹配规则：该行的某个单元格的 relation blockIDs 含 <paramref name="gameBlockId"/>，
+    /// 且某个单元格的文本形态里出现 <paramref name="date"/>。
+    /// 拿不准时**返回 null**（宁可新插一行，也绝不误改别人那一行）。
+    /// </summary>
     private async Task<string?> QueryDailyRowIdAsync(SiYuanProviderConfig config, string avId, string date, string gameBlockId)
     {
+        if (string.IsNullOrWhiteSpace(gameBlockId)) return null;
+
         try
         {
-            var sql = $"SELECT id FROM blocks WHERE root_id = '{avId}' AND content LIKE '%{date}%' LIMIT 1;";
-            using var req = CreateRequest(config, HttpMethod.Post, "/api/query/sql", new { stmt = sql });
+            using var req = CreateRequest(config, HttpMethod.Post, "/api/av/renderAttributeView", new { id = avId });
             using var resp = await _httpClient.SendAsync(req);
             if (!resp.IsSuccessStatusCode) return null;
 
             var json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("data", out var data) &&
-                data.ValueKind == JsonValueKind.Array &&
-                data.GetArrayLength() > 0)
+            if (!doc.RootElement.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("view", out var view) ||
+                !view.TryGetProperty("rows", out var rows) ||
+                rows.ValueKind != JsonValueKind.Array)
             {
-                var first = data[0];
-                if (first.TryGetProperty("id", out var idProp))
+                return null;
+            }
+
+            foreach (var row in rows.EnumerateArray())
+            {
+                var rowId = row.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+                if (string.IsNullOrWhiteSpace(rowId)) continue;
+                if (!row.TryGetProperty("cells", out var cells) || cells.ValueKind != JsonValueKind.Array) continue;
+
+                bool gameMatched = false;
+                bool dateMatched = false;
+                foreach (var cell in cells.EnumerateArray())
                 {
-                    return idProp.GetString();
+                    if (!cell.TryGetProperty("value", out var val)) continue;
+                    if (!gameMatched && ContainsBlockId(val, gameBlockId)) gameMatched = true;
+                    if (!dateMatched && ContainsDateText(val, date)) dateMatched = true;
+                    if (gameMatched && dateMatched) return rowId;
                 }
             }
+
+            AppLog.Warn($"[思源] 每日打卡数据库中未找到 {date} / 游戏 {gameBlockId} 的既有行，将新建一行");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[思源] 查询每日打卡行失败：{ex.GetType().Name}: {ex.Message}");
+        }
 
         return null;
     }
 
-    private async Task SetAttrViewCellAsync(SiYuanProviderConfig config, string avId, string rowId, string keyId, object value)
+    /// <summary>relation 单元格的 blockIDs 里是否包含指定块 ID。</summary>
+    private static bool ContainsBlockId(JsonElement value, string blockId)
     {
-        try
+        if (value.ValueKind == JsonValueKind.Object &&
+            value.TryGetProperty("blockIDs", out var ids) && ids.ValueKind == JsonValueKind.Array)
         {
-            var payload = new
+            foreach (var x in ids.EnumerateArray())
             {
-                avID = avId,
-                keyID = keyId,
-                rowID = rowId,
-                value
-            };
-            using var req = CreateRequest(config, HttpMethod.Post, "/api/av/setAttrViewBlockAttr", payload);
-            using var resp = await _httpClient.SendAsync(req);
+                if (x.ValueKind == JsonValueKind.String &&
+                    string.Equals(x.GetString(), blockId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
         }
-        catch { }
+
+        return false;
     }
 
-    private async Task SetAttrViewRelationAsync(SiYuanProviderConfig config, string avId, string rowId, string keyId, string targetBlockId)
+    private static readonly string[] TextLikePropNames = { "content", "formattedContent", "text", "name" };
+
+    /// <summary>
+    /// 单元格值里是否出现了该日期文本。思源的日期列可能是字符串，也可能是
+    /// 时间戳（content 为数字）或 formattedContent，这里逐个尽力识别。
+    /// </summary>
+    private static bool ContainsDateText(JsonElement value, string date)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.String:
+                return value.GetString()?.Contains(date, StringComparison.Ordinal) == true;
+
+            case JsonValueKind.Object:
+                foreach (var name in TextLikePropNames)
+                {
+                    if (value.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String &&
+                        p.GetString()?.Contains(date, StringComparison.Ordinal) == true)
+                    {
+                        return true;
+                    }
+                }
+
+                if (value.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Number &&
+                    c.TryGetInt64(out var raw))
+                {
+                    // 13 位按毫秒、10 位按秒（思源两种历史形态都出现过）
+                    var ms = raw > 100_000_000_000L ? raw : raw * 1000L;
+                    try
+                    {
+                        return DateTimeOffset.FromUnixTimeMilliseconds(ms).LocalDateTime
+                            .ToString("yyyy-MM-dd") == date;
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                }
+                break;
+        }
+
+        return false;
+    }
+
+    private Task SetAttrViewCellAsync(SiYuanProviderConfig config, string avId, string rowId, string keyId, object value)
+        => SendAttrViewAttrAsync(
+            config,
+            new { avID = avId, keyID = keyId, rowID = rowId, value },
+            $"keyID={keyId}, rowID={rowId}");
+
+    private Task SetAttrViewRelationAsync(SiYuanProviderConfig config, string avId, string rowId, string keyId, string targetBlockId)
+        => SendAttrViewAttrAsync(
+            config,
+            new { avID = avId, keyID = keyId, rowID = rowId, value = new { blockIDs = new[] { targetBlockId } } },
+            $"relation keyID={keyId}, rowID={rowId}");
+
+    /// <summary>
+    /// 调 /api/av/setAttrViewBlockAttr 写属性，并把失败暴露到日志。
+    ///
+    /// 原实现完全丢弃响应，而思源**即使逻辑失败也可能返回 HTTP 200 + <c>{"code":-1,"msg":"..."}</c>**
+    /// （例如 keyID 传的是列名而不是列的块 ID 时）→ 表现为"同步成功但思源里什么都没有"，极难排查。
+    /// 这里只做观测增强：仍然不抛异常，避免单个单元格失败中断整条同步。
+    /// </summary>
+    private async Task SendAttrViewAttrAsync(SiYuanProviderConfig config, object payload, string describe)
     {
         try
         {
-            var payload = new
-            {
-                avID = avId,
-                keyID = keyId,
-                rowID = rowId,
-                value = new { blockIDs = new[] { targetBlockId } }
-            };
             using var req = CreateRequest(config, HttpMethod.Post, "/api/av/setAttrViewBlockAttr", payload);
             using var resp = await _httpClient.SendAsync(req);
+            var body = await SafeReadAsync(resp);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                AppLog.Warn($"[思源] 写入属性失败 ({describe}, HTTP={(int)resp.StatusCode})：{Truncate(body)}");
+                return;
+            }
+
+            if (TryGetSiYuanCode(body, out var code, out var msg) && code != 0)
+            {
+                AppLog.Warn($"[思源] 写入属性被拒绝 ({describe}, code={code})：{msg}");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[思源] 写入属性异常 ({describe})：{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static async Task<string> SafeReadAsync(HttpResponseMessage resp)
+    {
+        try { return await resp.Content.ReadAsStringAsync(); }
+        catch { return string.Empty; }
+    }
+
+    private static string Truncate(string s)
+        => string.IsNullOrEmpty(s) ? string.Empty : (s.Length <= 300 ? s : s[..300]);
+
+    private static bool TryGetSiYuanCode(string json, out int code, out string msg)
+    {
+        code = 0;
+        msg = string.Empty;
+        if (string.IsNullOrWhiteSpace(json)) return false;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.Number)
+            {
+                code = c.GetInt32();
+                msg = doc.RootElement.TryGetProperty("msg", out var m) ? (m.GetString() ?? string.Empty) : string.Empty;
+                return true;
+            }
         }
         catch { }
+
+        return false;
     }
 
     private async Task<string?> QueryDocIdByHPathAsync(SiYuanProviderConfig config, string hpath)
