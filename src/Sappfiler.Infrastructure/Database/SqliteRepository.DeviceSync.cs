@@ -1131,6 +1131,230 @@ public partial class SqliteRepository
         }
     }
 
+    // ==================== Deferred 台账重处理（2e 步骤 7） ====================
+
+    /// <summary>
+    /// 重处理 Deferred 台账里**尚未解决**的条目。
+    ///
+    /// <code>
+    /// 取 unresolved（resolved_at_utc IS NULL）
+    ///   → 从**台账 payload 快照**重建当时的远端变更（不重新拉取、不按本地当前状态重造）
+    ///   → 重新执行**现有**规则引擎 / 身份对账
+    ///   → 有明确结论 → 写 resolved_at_utc + resolution（**不删除台账行**）
+    ///   → 仍无法确定 → 保持 unresolved，**本批次结束**
+    /// </code>
+    ///
+    /// ⚠️ 三条硬约束（用户 2026-10-03 冻结）：
+    ///   ① **只重跑既有规则**，绝不引入第二套冲突规则 —— 不做 max duration、不做"最新胜"、
+    ///      不做本地/远端优先、不自动选 Notion Page、不自动覆盖 exe/path、不自动复活 ignored。
+    ///   ② **不做无限循环**：单次调用只跑**一遍**且受 <paramref name="batchLimit"/> 限制；
+    ///      仍 unresolved 的条目留在台账里等下一次调用（启动时）再试，**不在这里自旋**。
+    ///   ③ **不删除台账行**：resolved 只写 <c>resolved_at_utc</c> + <c>resolution</c>，
+    ///      这样才能长期回答"为什么曾经被延后 / 什么时候重处理 / 最后怎么解决"。
+    ///
+    /// ⚠️ 本方法**不接应用生命周期**：2e 只交付"判断 / 收敛 / 记录"能力，
+    ///   `startup → SyncEngine → Push/Pull → Apply → Reconcile` 的接线属于集成阶段。
+    ///
+    /// ⚠️ 锁：本方法内部**不持有** <c>_writeLock</c> 去调用对账（那些方法各自会取锁），
+    ///   否则会自死锁。
+    /// </summary>
+    public async Task<ReconciliationSummary> ReconcileDeferredChangesAsync(
+        int batchLimit = SyncOutboxPolicy.ReconcileBatchSize,
+        CancellationToken cancellationToken = default)
+    {
+        var pending = new List<DeferredSyncChange>();
+
+        using (var conn = CreateConnection())
+        {
+            pending = (await conn.QueryAsync<DeferredSyncChange>(
+                """
+                SELECT * FROM sync_deferred_changes
+                WHERE resolved_at_utc IS NULL
+                ORDER BY id ASC
+                LIMIT @limit;
+                """,
+                new { limit = batchLimit })).ToList();
+        }
+
+        var resolutions = new List<string>();
+        int resolved = 0, stillDeferred = 0, skippedTombstoned = 0, noPayload = 0, unsupported = 0;
+
+        foreach (var row in pending)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // 没有 payload 快照 → 永远无法重处理：收敛掉，否则每次启动都白跑。
+            if (string.IsNullOrWhiteSpace(row.Payload))
+            {
+                await MarkDeferredResolvedAsync(row.ChangeId, ReconciliationResolutions.LegacyNoPayload);
+                resolutions.Add(ReconciliationResolutions.LegacyNoPayload);
+                noPayload++;
+                continue;
+            }
+
+            // 本地已有墓碑 = 用户删过这个实体。**绝不**在这里尝试收敛或落地 —— 那是"复活已删除实体"。
+            if (string.Equals(row.Reason, DeferredReasons.TombstonedLocal, StringComparison.Ordinal))
+            {
+                skippedTombstoned++;
+                continue;
+            }
+
+            string? resolution = row.EntityType switch
+            {
+                nameof(SyncEntityType.Game) => await ReconcileOneDeferredGameAsync(row, cancellationToken),
+                nameof(SyncEntityType.Session) => await ReconcileOneDeferredSessionAsync(row, cancellationToken),
+                _ => null   // GameMapping / 未知类型：2e 不覆盖 → 保持 unresolved
+            };
+
+            if (resolution is null)
+            {
+                if (row.EntityType is not (nameof(SyncEntityType.Game) or nameof(SyncEntityType.Session)))
+                {
+                    unsupported++;
+                }
+                else
+                {
+                    stillDeferred++;
+                }
+                continue;
+            }
+
+            await MarkDeferredResolvedAsync(row.ChangeId, resolution);
+            resolutions.Add(resolution);
+            resolved++;
+        }
+
+        if (resolved > 0 || stillDeferred > 0 || skippedTombstoned > 0 || noPayload > 0)
+        {
+            AppLog.Info($"[设备同步] Deferred 重处理：扫描 {pending.Count}、已解决 {resolved}、"
+                + $"仍待处理 {stillDeferred}、跳过（本地已墓碑）{skippedTombstoned}、"
+                + $"无 payload {noPayload}、不支持的类型 {unsupported}");
+        }
+
+        return new ReconciliationSummary(
+            pending.Count, resolved, stillDeferred, skippedTombstoned, noPayload, unsupported, resolutions);
+    }
+
+    /// <summary>从台账行**重建**当时的远端变更（唯一输入是台账快照）。</summary>
+    private static SyncChange BuildChangeFromLedger(DeferredSyncChange row) => new()
+    {
+        ChangeId = row.ChangeId,
+        EntityType = row.EntityType,
+        EntityGlobalId = row.EntityGlobalId,
+        Operation = row.Operation,
+        Payload = row.Payload ?? string.Empty,
+        DeviceId = row.DeviceId ?? string.Empty,
+        // 台账不存 CreatedAtUtc（对账不需要它）；审计要看时间请用 first_seen_at_utc。
+        CreatedAtUtc = row.FirstSeenAtUtc
+    };
+
+    private async Task<string?> ReconcileOneDeferredGameAsync(
+        DeferredSyncChange row, CancellationToken cancellationToken)
+    {
+        var outcome = await ReconcileRemoteGameAsync(BuildChangeFromLedger(row), null, cancellationToken);
+
+        return outcome.Result switch
+        {
+            GameReconcileResult.Merged => ReconciliationResolutions.MergedLocalIdentity,
+            // 本地原本没有 identity、继承了远端的 —— 对台账而言同样是"身份已并入本地权威行"。
+            GameReconcileResult.IdentityContinued => ReconciliationResolutions.MergedLocalIdentity,
+            GameReconcileResult.AlreadyKnown => ReconciliationResolutions.RedirectedToCanonical,
+            GameReconcileResult.Blocked when outcome.Reason == IdentityDecisionReasons.LocalIgnored
+                => ReconciliationResolutions.LocalIgnoredProtected,
+            GameReconcileResult.Blocked => ReconciliationResolutions.BlockedStrongKeyConflict,
+            GameReconcileResult.InvalidPayload => ReconciliationResolutions.LegacyNoPayload,
+            // Deferred / NoLocalCandidate：结论不明确（或本地根本没有候选）→ 保持 unresolved。
+            _ => null
+        };
+    }
+
+    private async Task<string?> ReconcileOneDeferredSessionAsync(
+        DeferredSyncChange row, CancellationToken cancellationToken)
+    {
+        var outcome = await ReconcileRemoteSessionAsync(BuildChangeFromLedger(row), cancellationToken);
+
+        if (outcome.Result == SessionReconcileResult.NoLocalCandidate
+            && string.Equals(row.Reason, DeferredReasons.DependencyMissing, StringComparison.Ordinal))
+        {
+            // 当初因为"依赖的游戏还没到"没落地；现在依赖可能已就绪。
+            // ⚠️ 这里用的是 **2c 的既有落地规则**（ApplyRemoteSession 一字未改），
+            //    不是第二套冲突解决 —— 只是把当初做不成的那一步再试一次。
+            var applied = await TryApplySingleChangeAsync(BuildChangeFromLedger(row), cancellationToken);
+            return applied ? ReconciliationResolutions.DependencyResolved : null;
+        }
+
+        return outcome.Result switch
+        {
+            SessionReconcileResult.Converged => ReconciliationResolutions.Converged,
+            SessionReconcileResult.AlreadyKnown => ReconciliationResolutions.AlreadyPresent,
+            SessionReconcileResult.Blocked => ReconciliationResolutions.BlockedImmutableFactMismatch,
+            SessionReconcileResult.InvalidPayload => ReconciliationResolutions.LegacyNoPayload,
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// 用 **2c 的既有落地规则**尝试落地单独一条远端变更（**不动游标** —— 游标早就越过它了）。
+    ///
+    /// 只服务于 Deferred 重处理：当初因为依赖缺失没能落地的条目，现在依赖可能已就绪。
+    /// 规则与 2c 完全一致（墓碑优先 → 类型分派），**没有新增任何冲突语义**。
+    /// </summary>
+    private async Task<bool> TryApplySingleChangeAsync(SyncChange change, CancellationToken cancellationToken)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            var alreadyTombstoned = conn.ExecuteScalar<int>(
+                "SELECT COUNT(*) FROM sync_tombstones WHERE entity_type = @type AND entity_global_id = @gid;",
+                new { type = change.EntityType, gid = change.EntityGlobalId }, tx) > 0;
+
+            if (alreadyTombstoned) return false;
+
+            var (reason, _) = change.EntityType switch
+            {
+                nameof(SyncEntityType.Game) => ApplyRemoteGame(conn, tx, change),
+                nameof(SyncEntityType.Session) => ApplyRemoteSession(conn, tx, change),
+                _ => (DeferredReasons.UnsupportedEntityType, 0)
+            };
+
+            if (reason is not null) return false;
+
+            tx.Commit();
+            return true;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 记录处理结论。只写**尚未解决**的行（<c>WHERE resolved_at_utc IS NULL</c>），
+    /// 保证已有结论**永不**被覆盖 —— 台账是审计资料。
+    /// </summary>
+    private async Task MarkDeferredResolvedAsync(string changeId, string resolution)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync(
+                """
+                UPDATE sync_deferred_changes
+                SET resolved_at_utc = @now, resolution = @resolution
+                WHERE change_id = @changeId AND resolved_at_utc IS NULL;
+                """,
+                new { changeId, resolution, now = UtcNowIso() });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     // ==================== Session 身份对账（2e 步骤 6） ====================
 
     private sealed class SessionReconcileRow
@@ -1712,3 +1936,16 @@ public sealed record SessionReconcileOutcome(
     int? CanonicalLocalId,
     string? CanonicalGlobalId,
     string Reason);
+
+/// <summary>
+/// Deferred 台账重处理结果（2e 步骤 7）。
+/// <paramref name="StillDeferred"/> 的条目**保持 unresolved**，等下一次调用再试 —— 不在这里自旋。
+/// </summary>
+public sealed record ReconciliationSummary(
+    int Scanned,
+    int Resolved,
+    int StillDeferred,
+    int SkippedTombstoned,
+    int NoPayload,
+    int UnsupportedType,
+    IReadOnlyList<string> Resolutions);

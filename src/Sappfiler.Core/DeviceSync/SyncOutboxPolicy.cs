@@ -18,6 +18,14 @@ public static class SyncOutboxPolicy
     /// <summary>一次 Pull 最多拉取多少条变更。</summary>
     public const int PullBatchSize = 200;
 
+    /// <summary>
+    /// 一次 Deferred 重处理最多扫多少条（2e 步骤 7）。
+    ///
+    /// ⚠️ 这是**单遍上限**，不是"循环到清空"：本批结束后仍 unresolved 的条目留在台账里，
+    /// 等下一次调用（启动时）再试。绝不能在这里自旋成一个隐性死循环。
+    /// </summary>
+    public const int ReconcileBatchSize = 200;
+
     /// <summary>已完成（收到服务器 ACK）的 Outbox 记录保留时长，过期即清理。</summary>
     public static readonly TimeSpan CompletedRetention = TimeSpan.FromDays(7);
 
