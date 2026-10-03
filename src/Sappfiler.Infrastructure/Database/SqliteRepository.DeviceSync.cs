@@ -148,6 +148,31 @@ public partial class SqliteRepository
     }
 
     /// <summary>
+    /// 标记为**终态失败（死信）**：服务端明确拒绝且重试没有意义
+    /// （典型情形：该实体云端已有墓碑，再推多少次都会被拒）。
+    /// 不会再被 <see cref="GetPendingOutboxAsync"/> 取出重试，但记录留在库里便于排查。
+    /// </summary>
+    public async Task<int> MarkOutboxFailedAsync(string queueId, string error)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            return await conn.ExecuteAsync(
+                """
+                UPDATE sync_queue
+                SET status = @failed, last_error = @error, next_retry_at_utc = NULL
+                WHERE queue_id = @queueId;
+                """,
+                new { queueId, error, failed = (int)SyncQueueStatus.Failed });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
     /// 启动时调用：把上次进程被杀/崩溃时停在 InFlight 的记录放回 Pending。
     /// 之所以敢无条件重置：推送以 <c>entity_global_id</c> 为幂等键，重复推送不会产生重复数据。
     /// </summary>
@@ -193,6 +218,244 @@ public partial class SqliteRepository
         {
             _writeLock.Release();
         }
+    }
+
+    /// <summary>
+    /// 把待推送的记录标记为 InFlight（推送状态机 <c>Pending → InFlight → ACK → Completed</c>）。
+    /// 只动仍是 Pending 的行 —— 避免把已经被别的循环改过的记录覆盖掉。
+    /// </summary>
+    public async Task<int> MarkOutboxInFlightAsync(IReadOnlyList<string> queueIds)
+    {
+        if (queueIds.Count == 0) return 0;
+
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            return await conn.ExecuteAsync(
+                """
+                UPDATE sync_queue
+                SET status = @inFlight
+                WHERE queue_id IN @ids AND status = @pending;
+                """,
+                new
+                {
+                    ids = queueIds,
+                    inFlight = (int)SyncQueueStatus.InFlight,
+                    pending = (int)SyncQueueStatus.Pending
+                });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    // ==================== 远端变更落地（数据 + 游标同一事务） ====================
+
+    private enum RemoteApplyOutcome
+    {
+        Applied,
+        Deferred
+    }
+
+    /// <summary>
+    /// 把远端变更应用到本地。
+    ///
+    /// ⚠️ **本阶段刻意不实现"通用 LWW"**：Game / Session / GameMapping / Tombstone 的冲突语义
+    /// 完全不同，一句 <c>if (remote.updated_at &gt; local.updated_at)</c> 套到所有实体上，
+    /// 只会把真正的冲突解决问题藏起来。所以这里的规则是保守的：
+    ///   · 本地已有同 identity 的实体 → **跳过**（不覆盖）；
+    ///   · 业务键（platform + platform_id）已被**另一个** identity 占用 → 跳过（这需要身份对账，
+    ///     不是简单覆盖能解决的）；
+    ///   · 不认识的实体类型 / payload schema → 跳过；
+    ///   · 本地已有墓碑 → 跳过（墓碑优先，旧数据不能把已删除实体复活）。
+    /// 被跳过的条目全部计入 <c>Deferred</c> 并写日志 —— **不静默丢弃**，
+    /// 留给后续"身份对账 / 冲突解决"阶段处理。
+    ///
+    /// 为什么游标一定要和落地在**同一个事务**里：
+    /// 若先推进游标再写数据，崩溃就会出现"云端认为已消费、本地却没写"的**永久丢数据**。
+    /// 现在的语义是：崩溃只会导致下次重复拉取同一批，而落地是幂等的（按 global_id 判存在）。
+    /// </summary>
+    public async Task<RemoteApplyResult> ApplyRemoteChangesWithCursorAsync(
+        string backend,
+        string accountId,
+        IReadOnlyList<SyncChange> changes,
+        string? nextCursor,
+        string localDeviceId,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            int applied = 0, deferred = 0, tombstonesPropagated = 0;
+
+            foreach (var change in changes)
+            {
+                var alreadyTombstoned = conn.ExecuteScalar<int>(
+                    "SELECT COUNT(*) FROM sync_tombstones WHERE entity_type = @type AND entity_global_id = @gid;",
+                    new { type = change.EntityType, gid = change.EntityGlobalId }, tx) > 0;
+
+                if (change.Operation == SyncOperation.Delete)
+                {
+                    // 删除同步：把墓碑落到本地（幂等 —— 同一实体只会有一条墓碑）。
+                    AddTombstoneCore(conn, tx, new SyncTombstone
+                    {
+                        TombstoneId = Guid.NewGuid().ToString("N"),
+                        EntityType = change.EntityType,
+                        EntityGlobalId = change.EntityGlobalId,
+                        DeviceId = string.IsNullOrWhiteSpace(change.DeviceId) ? localDeviceId : change.DeviceId,
+                        DeletedAtUtc = string.IsNullOrWhiteSpace(change.CreatedAtUtc) ? UtcNowIso() : change.CreatedAtUtc,
+                        CreatedAtUtc = UtcNowIso()
+                    });
+
+                    tombstonesPropagated++;
+                    continue;
+                }
+
+                // 墓碑优先：已删除的实体，旧的 Create/Update 一律不落地。
+                if (alreadyTombstoned)
+                {
+                    deferred++;
+                    continue;
+                }
+
+                var outcome = change.EntityType switch
+                {
+                    nameof(SyncEntityType.Game) => ApplyRemoteGame(conn, tx, change),
+                    nameof(SyncEntityType.Session) => ApplyRemoteSession(conn, tx, change),
+                    _ => RemoteApplyOutcome.Deferred
+                };
+
+                if (outcome == RemoteApplyOutcome.Applied) applied++;
+                else deferred++;
+            }
+
+            // 游标与数据同事务提交 —— 这一行必须在同一个 tx 里，不能提前。
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO sync_state (backend, account_id, cursor, last_sync_at_utc, last_error)
+                VALUES (@backend, @accountId, @cursor, @now, NULL)
+                ON CONFLICT(backend, account_id) DO UPDATE SET
+                    cursor           = excluded.cursor,
+                    last_sync_at_utc = excluded.last_sync_at_utc,
+                    last_error       = NULL;
+                """,
+                new { backend, accountId, cursor = nextCursor ?? string.Empty, now = UtcNowIso() },
+                tx);
+
+            tx.Commit();
+
+            return new RemoteApplyResult(applied, deferred, tombstonesPropagated);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private static RemoteApplyOutcome ApplyRemoteGame(SqliteConnection conn, SqliteTransaction tx, SyncChange change)
+    {
+        if (!SyncPayloads.TryParseGame(change.Payload, out var payload, out _))
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        var game = payload!;
+
+        // 同 identity 已存在 → 跳过（重复 Pull 不产生重复实体）。
+        if (conn.ExecuteScalar<int>(
+                "SELECT COUNT(*) FROM games WHERE global_id = @gid;",
+                new { gid = game.GlobalId }, tx) > 0)
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        // 业务键已被另一个 identity 占用 → 需要身份对账（不是覆盖能解决的），本阶段不猜。
+        if (conn.ExecuteScalar<int>(
+                """
+                SELECT COUNT(*) FROM games
+                WHERE LOWER(platform) = LOWER(@platform) AND LOWER(platform_id) = LOWER(@platformId);
+                """,
+                new { platform = game.Platform, platformId = game.PlatformId }, tx) > 0)
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        conn.Execute(
+            """
+            INSERT INTO games (platform, platform_id, name, executable, executable_path, status, global_id)
+            VALUES (@platform, @platformId, @name, @executable, @executablePath, 'active', @globalId);
+            """,
+            new
+            {
+                platform = game.Platform,
+                platformId = game.PlatformId,
+                name = game.Name,
+                executable = game.Executable,
+                executablePath = game.ExecutablePath,
+                globalId = game.GlobalId
+            },
+            tx);
+
+        return RemoteApplyOutcome.Applied;
+    }
+
+    private static RemoteApplyOutcome ApplyRemoteSession(SqliteConnection conn, SqliteTransaction tx, SyncChange change)
+    {
+        if (!SyncPayloads.TryParseSession(change.Payload, out var payload, out _))
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        var session = payload!;
+
+        if (conn.ExecuteScalar<int>(
+                "SELECT COUNT(*) FROM sessions WHERE global_id = @gid;",
+                new { gid = session.GlobalId }, tx) > 0)
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        // 依赖：sessions.game_id NOT NULL，远端会话必须挂在本地已存在的 game 上。
+        // 游戏还没到 → 延后（下次 Pull 会再拉到；我们的推送顺序本身是 Game 先于 Session）。
+        var gameId = conn.QuerySingleOrDefault<int?>(
+            "SELECT id FROM games WHERE global_id = @gid LIMIT 1;",
+            new { gid = session.GameGlobalId }, tx);
+
+        if (gameId is null)
+        {
+            return RemoteApplyOutcome.Deferred;
+        }
+
+        conn.Execute(
+            """
+            INSERT INTO sessions (game_id, pid, process_name, start_time, end_time, last_heartbeat,
+                                  duration_seconds, is_active, global_id, device_id,
+                                  started_at_utc, ended_at_utc, time_precision)
+            VALUES (@gameId, 0, @processName, @startTime, @endTime, @startTime,
+                    @durationSeconds, 0, @globalId, @deviceId,
+                    @startedAtUtc, @endedAtUtc, @precision);
+            """,
+            new
+            {
+                gameId = gameId.Value,
+                processName = session.ProcessName,
+                startTime = session.StartedAtUtc,
+                endTime = session.EndedAtUtc,
+                durationSeconds = session.DurationSeconds,
+                globalId = session.GlobalId,
+                deviceId = session.DeviceId,
+                startedAtUtc = session.StartedAtUtc,
+                endedAtUtc = session.EndedAtUtc,
+                precision = session.TimePrecision
+            },
+            tx);
+
+        return RemoteApplyOutcome.Applied;
     }
 
     // ============================ 删除墓碑 ============================
@@ -433,3 +696,10 @@ public partial class SqliteRepository
     private static string UtcNowIso(DateTime utc)
         => utc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 }
+
+/// <summary>
+/// 远端变更的落地结果计数。
+/// <paramref name="Deferred"/> = 本轮**没有**落地的条目（已存在 / 需要身份对账 / 依赖缺失 /
+/// payload 版本不认识）。它不是"丢弃"—— 会计入日志，留给后续冲突解决与身份对账阶段。
+/// </summary>
+public sealed record RemoteApplyResult(int Applied, int Deferred, int TombstonesPropagated);
