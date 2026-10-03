@@ -79,24 +79,66 @@ internal static class DailyRecordTitle
     }
 
     /// <summary>
-    /// 用「游戏名 + 原标题里的时长文本」拼标题，**保证中间带 ` · ` 分隔符**，
-    /// 且**不改数字与单位**（时长数值仍以 Notion 侧为权威，这里只动"呈现"）。
+    /// 用「游戏名 + 原标题里的时长文本」拼标题，保证中间一定有 ` · ` 分隔符。
+    /// 时长数值始终以 Notion 侧为权威，这里只动"呈现"，**绝不写「单次时长」属性**。
     ///
-    /// ⚠️ 为什么必须归一：<see cref="ExtractSuffix"/> 认三种后缀形态，其中**用户手写的紧贴格式**
-    /// 「黑旗10.1h」取出来是 `10.1h`（不带分隔符）。原实现直接 <c>displayName + originalSuffix</c>，
+    /// 两条规则，按后缀的"出身"区分：
+    ///   ① **程序自己写的旧格式**「(42分)」→ 归一到当前标准形态「 · 0.7 h」，
+    ///      否则历史行里会永远混着两套写法（QA 反馈的"格式不统一"）。
+    ///   ② **用户手写的时长文本**「黑旗10.1h」「英灵神殿 2.2h」→ 只补 ` · ` 分隔符，
+    ///      数字与单位一字不动 —— 那是用户自己的呈现，不该被改写。
+    ///
+    /// ⚠️ 为什么①必须有：<see cref="ExtractSuffix"/> 为了兼容手工格式，允许后缀**不带分隔符**，
+    /// 所以「黑旗10.1h」取出来是 `10.1h`。原实现直接 <c>displayName + originalSuffix</c>，
     /// 于是写出「黑旗10.1h」—— 看起来就像漏了中间的 ·（2026-10 QA 反馈的正是这个）。
-    /// 归一后得到「黑旗 · 10.1h」，并且下一次同步会自然把已有脏标题一并修正。
     ///
-    /// 已经带分隔符的形态（` · 0.7 h` / ` | 2.2h` / `- 2.2h` / `: 2.2h`）统一成 ` · `，
-    /// 因此对程序自己写出的标准标题是**幂等**的 —— 不会因为这次改动导致每轮都重复 PATCH。
+    /// 已经带分隔符的标准形态（` · 0.7 h` / ` | 2.2h` / `- 2.2h` / `: 2.2h`）统一成 ` · `，
+    /// 因此对程序自己写出的标准标题是**幂等**的 —— 不会导致每轮重复 PATCH。
     /// </summary>
     internal static string BuildWithPreservedSuffix(string gameName, string originalSuffix, int fallbackDurationMinutes)
     {
         var body = StripSuffixSeparator(originalSuffix);
-        return body.Length > 0
-            ? $"{gameName} · {body}"
-            : Build(gameName, fallbackDurationMinutes);
+        if (body.Length == 0) return Build(gameName, fallbackDurationMinutes);
+
+        var legacyMinutes = ParseLegacyParenMinutes(body);
+        if (legacyMinutes.HasValue) return Build(gameName, legacyMinutes.Value);
+
+        return $"{gameName} · {body}";
     }
+
+    /// <summary>
+    /// 解析程序旧格式的括号时长后缀「(42分)」「(42分钟)」「(2.5h)」「(2小时)」，返回**分钟数**。
+    /// 不是该形态、或换算后分钟数 ≤ 0（例如「(0.001h)」会四舍五入成 0 分钟）时返回 null ——
+    /// **宁可不归一，也绝不把时长抹成 0**。
+    /// 返回分钟数是为了直接复用 <see cref="Build"/>，保证输出与程序标准格式逐字节一致。
+    /// </summary>
+    private static int? ParseLegacyParenMinutes(string suffix)
+    {
+        var m = LegacyParenSuffixRegex.Match(suffix);
+        if (!m.Success) return null;
+
+        if (!double.TryParse(
+                m.Groups["num"].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var num))
+        {
+            return null;
+        }
+
+        var unit = m.Groups["unit"].Value;
+        var minutes = (int)Math.Round(unit.Contains('分') ? num : num * 60.0);
+        return minutes > 0 ? minutes : null;
+    }
+
+    /// <summary>
+    /// 程序旧格式的括号时长后缀。单位只列 <see cref="SuffixRegex"/> 里出现过的那些，
+    /// 避免"能提取出来却解析不了"的两套规则漂移。
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex LegacyParenSuffixRegex = new(
+        @"^\(\s*(?<num>\d+(?:\.\d+)?)\s*(?<unit>分|分钟|h|小时)\s*\)$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+        System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>剥掉后缀开头的分隔符（· | - :）与空白，得到裸的「数值+单位」文本；空后缀返回空串。</summary>
     internal static string StripSuffixSeparator(string suffix)
