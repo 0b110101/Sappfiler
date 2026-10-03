@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>Sappfiler.Tests</AssemblyName>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    tests/ 是两条分支共享的**本地目录**（被 .gitignore 排除，不随分支切换而变），
+    但其中 MultiBackendSyncTests.cs / GameIdentityMappingTests.cs 只用到三后端
+    （feature/multi-backend-sync）才有的类型（Infrastructure.Sync、SyncModels 等）。
+    main 上没有这些类型 → 测试工程编译失败 → publish.ps1 的「跑测试」步骤会中止打包。
+
+    这里按「三后端源文件是否存在」自动把这几个文件从编译里摘掉，让测试工程在两条分支上
+    都能构建、都能跑测试。文件存在 = feature 分支；不存在 = main 分支。
+
+    ⚠️ 不要改用 #if MULTIBACKEND 包住文件内容：这些测试里有大量 C# raw string 字面量，
+       内含以 `##` 开头的 Markdown 标题；被跳过的区域里词法器不认字符串上下文，
+       会把它们当成预处理指令报 CS1024（2026-10-03 实测踩过）。
+  -->
+  <ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\..\src\Sappfiler.Core\Interfaces\ISyncProvider.cs')">
+    <Compile Remove="MultiBackendSyncTests.cs" />
+    <Compile Remove="GameIdentityMappingTests.cs" />
+  </ItemGroup>
+
+  <!--
+    同理反方向：DeviceSync*Tests 只存在于 feature/multi-device-sync 分支
+    （依赖 Core/Models/DeviceSyncModels.cs 与 Infrastructure/Database/DeviceSyncSchema.cs）。
+    在这条分支之外（main / feature/multi-backend-sync）把它们从编译里摘掉。
+  -->
+  <ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\..\src\Sappfiler.Core\Models\DeviceSyncModels.cs')">
+    <Compile Remove="DeviceSync*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="FluentAssertions" Version="8.11.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Sappfiler.Core\Sappfiler.Core.csproj" />
+    <ProjectReference Include="..\..\src\Sappfiler.Infrastructure\Sappfiler.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
