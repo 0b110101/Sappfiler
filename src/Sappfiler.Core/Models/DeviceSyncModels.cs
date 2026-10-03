@@ -1,0 +1,187 @@
+using System.Text.Json.Serialization;
+
+namespace GameTimeTracker.Core.Models;
+
+/// <summary>
+/// 多设备同步的领域模型（Device Sync Domain）。
+///
+/// ⚠️ **术语（不要混）**：
+///   · <b>Provider</b> = 笔记后端（Notion / Obsidian / 思源）—— 对外展示层，见 <c>SyncModels.cs</c>。
+///   · <b>Backend</b>  = 设备同步的存储后端（Cloudflare / WebDAV）—— 跨设备传输层，见本文件。
+///   两者完全解耦：同步引擎不认识 Provider，笔记同步也不认识 Backend。
+///
+/// ⚠️ **跨设备身份一律用 global_id（UUID），绝不能把本地 INTEGER id 放进同步协议。**
+///   同一台机器上 `sessions.id = 1827`，另一台也可能是 `1827`，两者毫无关系。
+/// </summary>
+public static class DeviceSyncConstants
+{
+    /// <summary>
+    /// 同步载荷的 schema 版本。payload 结构任何变化都要 +1；
+    /// 服务端遇到不认识的版本必须**拒绝同步并提示客户端升级**，不要静默损坏数据。
+    /// </summary>
+    public const int CurrentSchemaVersion = 1;
+
+    /// <summary>本机设备 ID 在 <c>settings</c> 表里的键（权威来源）。</summary>
+    public const string SettingKeyDeviceId = "device_id";
+}
+
+/// <summary>需要跨设备同步的实体类型。</summary>
+public enum SyncEntityType
+{
+    Session = 1,
+    Game = 2,
+    GameMapping = 3
+}
+
+/// <summary>同步操作。DELETE 走 tombstone，不做物理删除。</summary>
+public enum SyncOperation
+{
+    Create = 1,
+    Update = 2,
+    Delete = 3
+}
+
+/// <summary>Outbox 记录状态。</summary>
+public enum SyncQueueStatus
+{
+    Pending = 0,
+    InFlight = 1,
+    Completed = 2,
+    Failed = 3
+}
+
+/// <summary>设备状态。Revoked 后禁止同步，但**不删除**任何历史数据。</summary>
+public enum SyncDeviceStatus
+{
+    Active = 0,
+    Inactive = 1,
+    Revoked = 2
+}
+
+/// <summary>
+/// 时间精度标记。历史数据是由"本地时间字符串"近似换算出来的，
+/// **不能假装它精确**（既有实现只存墙上时间，时区信息从未保存过）。
+/// </summary>
+public static class TimePrecision
+{
+    /// <summary>由本地时区近似换算而来：迁移之前就存在的历史数据。</summary>
+    public const string Estimated = "estimated";
+
+    /// <summary>写入时就是严格 UTC：迁移之后产生的新数据。</summary>
+    public const string Exact = "exact";
+}
+
+/// <summary>一台设备（本机或远端）。device_id 一经生成永不改变，改名只改 device_name。</summary>
+public sealed class DeviceRecord
+{
+    public string DeviceId { get; set; } = "";
+
+    /// <summary>显示名，用户可改。设备身份永远看 device_id，不看名字。</summary>
+    public string DeviceName { get; set; } = "Windows Computer";
+
+    public string Platform { get; set; } = "windows";
+    public string AppVersion { get; set; } = "";
+    public string CreatedAtUtc { get; set; } = "";
+    public string? LastSeenAtUtc { get; set; }
+    public string? LastSyncAtUtc { get; set; }
+    public SyncDeviceStatus Status { get; set; } = SyncDeviceStatus.Active;
+
+    /// <summary>本机标记。**只在本机数据库里为 true，不上传**（远端设备由各自判定）。</summary>
+    public bool IsThisDevice { get; set; }
+}
+
+/// <summary>
+/// Outbox 记录（还没成功送出去的变更）。
+///
+/// **保存 payload 快照**（用户明确要求）：队列存的是"变更发生那一刻的实体状态"，
+/// 而不是"等推送时再去业务表读一次"。否则 10:00 写下的变更到 10:05 才推送时
+/// 会被读成 10:01 之后的新状态 —— 中间发生过的状态在同步层彻底消失。
+///
+/// 同时它**不是历史表**：收到服务器 ACK 后置 <see cref="SyncQueueStatus.Completed"/>，
+/// 由定期清理删除（真正的跨设备历史保存在云端 change feed）。
+/// </summary>
+public sealed class SyncQueueItem
+{
+    public string QueueId { get; set; } = "";
+
+    /// <summary>实体类型名（可读，便于排查）。</summary>
+    public string EntityType { get; set; } = "";
+
+    /// <summary>⚠️ 一律是 <b>global_id</b>（跨设备身份），绝不是本地 INTEGER id。</summary>
+    public string EntityGlobalId { get; set; } = "";
+
+    public SyncOperation Operation { get; set; }
+
+    /// <summary>业务实体版本号，供服务端做冲突判定（**不要用本地时间判冲突**）。</summary>
+    public long BaseVersion { get; set; }
+
+    /// <summary>JSON 快照，内含 <c>schema_version</c>。</summary>
+    public string Payload { get; set; } = "";
+
+    public string CreatedAtUtc { get; set; } = "";
+    public int RetryCount { get; set; }
+    public string? NextRetryAtUtc { get; set; }
+    public SyncQueueStatus Status { get; set; } = SyncQueueStatus.Pending;
+    public string? LastError { get; set; }
+}
+
+/// <summary>
+/// 删除墓碑：告诉其它设备"这个同步实体已被删除"。
+/// 与 <c>deleted_archive</c>（本机删除审计）**职责不同**，两张表都要写，但语义独立。
+/// 墓碑不能立即物理清除：长期离线的设备上线后若看不到墓碑，
+/// 会把这条数据当成"新数据"重新上传。第一版至少保留 30 天。
+/// </summary>
+public sealed class SyncTombstone
+{
+    public string TombstoneId { get; set; } = "";
+    public string EntityType { get; set; } = "";
+    public string EntityGlobalId { get; set; } = "";
+    public string DeviceId { get; set; } = "";
+    public string DeletedAtUtc { get; set; } = "";
+    public string CreatedAtUtc { get; set; } = "";
+}
+
+/// <summary>
+/// 每个 Backend 独立维护的同步游标。
+/// 切换后端时**绝不复用游标**（Cloudflare 的 cursor 与 WebDAV 的 cursor 毫无关系）。
+/// </summary>
+public sealed class SyncStateRecord
+{
+    public string Backend { get; set; } = "";
+    public string AccountId { get; set; } = "";
+    public string Cursor { get; set; } = "";
+    public string? LastSyncAtUtc { get; set; }
+    public string? LastError { get; set; }
+}
+
+/// <summary>
+/// 同步载荷信封。所有出网载荷都走它，保证
+/// <c>schema_version</c> / <c>client_version</c> / <c>device_id</c> 一定存在。
+/// </summary>
+public sealed class SyncEnvelope
+{
+    [JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; set; } = DeviceSyncConstants.CurrentSchemaVersion;
+
+    [JsonPropertyName("client_version")]
+    public string ClientVersion { get; set; } = "";
+
+    [JsonPropertyName("device_id")]
+    public string DeviceId { get; set; } = "";
+
+    [JsonPropertyName("entity_type")]
+    public string EntityType { get; set; } = "";
+
+    [JsonPropertyName("entity_global_id")]
+    public string EntityGlobalId { get; set; } = "";
+
+    [JsonPropertyName("operation")]
+    public string Operation { get; set; } = "";
+
+    [JsonPropertyName("base_version")]
+    public long BaseVersion { get; set; }
+
+    /// <summary>实体快照。序列化后即 <c>payload</c> 字段。</summary>
+    [JsonPropertyName("payload")]
+    public object? Payload { get; set; }
+}

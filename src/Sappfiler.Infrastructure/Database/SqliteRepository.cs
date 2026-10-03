@@ -208,6 +208,11 @@ public class SqliteRepository : IDatabaseRepository
 
         // 启动时自动检查并合并同名/同总表关联的分裂游戏条目及同日时长记录
         DeduplicateGamesAndDailySummaries(conn);
+
+        // 多设备同步（Phase 1）：同步身份列 + 同步元数据表。
+        // 实现**全部**在 DeviceSyncSchema.cs，这里只保留一行调用 —— 本文件与
+        // feature/multi-backend-sync 分支都会改动，把改动面压到最小以免合并时冲突。
+        DeviceSyncSchema.Ensure(conn);
     }
 
 
