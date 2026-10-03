@@ -77,6 +77,34 @@ internal static class DailyRecordTitle
         var m = SuffixRegex.Match(rawTitle);
         return m.Success ? m.Value : string.Empty;
     }
+
+    /// <summary>
+    /// 用「游戏名 + 原标题里的时长文本」拼标题，**保证中间带 ` · ` 分隔符**，
+    /// 且**不改数字与单位**（时长数值仍以 Notion 侧为权威，这里只动"呈现"）。
+    ///
+    /// ⚠️ 为什么必须归一：<see cref="ExtractSuffix"/> 认三种后缀形态，其中**用户手写的紧贴格式**
+    /// 「黑旗10.1h」取出来是 `10.1h`（不带分隔符）。原实现直接 <c>displayName + originalSuffix</c>，
+    /// 于是写出「黑旗10.1h」—— 看起来就像漏了中间的 ·（2026-10 QA 反馈的正是这个）。
+    /// 归一后得到「黑旗 · 10.1h」，并且下一次同步会自然把已有脏标题一并修正。
+    ///
+    /// 已经带分隔符的形态（` · 0.7 h` / ` | 2.2h` / `- 2.2h` / `: 2.2h`）统一成 ` · `，
+    /// 因此对程序自己写出的标准标题是**幂等**的 —— 不会因为这次改动导致每轮都重复 PATCH。
+    /// </summary>
+    internal static string BuildWithPreservedSuffix(string gameName, string originalSuffix, int fallbackDurationMinutes)
+    {
+        var body = StripSuffixSeparator(originalSuffix);
+        return body.Length > 0
+            ? $"{gameName} · {body}"
+            : Build(gameName, fallbackDurationMinutes);
+    }
+
+    /// <summary>剥掉后缀开头的分隔符（· | - :）与空白，得到裸的「数值+单位」文本；空后缀返回空串。</summary>
+    internal static string StripSuffixSeparator(string suffix)
+    {
+        var s = suffix.Trim();
+        if (s.Length == 0) return string.Empty;
+        return s[0] is '·' or '|' or '-' or ':' ? s.Substring(1).TrimStart() : s;
+    }
 }
 
 public class NotionClient : INotionClient
@@ -1439,10 +1467,10 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
-                        var expectedTitle = originalSuffix.Length > 0
-                            ? displayName + originalSuffix
-                            : DailyRecordTitle.Build(displayName, item.DurationMinutes);
+                        var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                            displayName,
+                            DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
+                            item.DurationMinutes);
 
                         // writeDuration: false —— 回填 relation 与呈现，绝不修改远端时长数值
                         await _client.UpdateDailyRecordAsync(
@@ -1610,13 +1638,15 @@ public class NotionSyncService : INotionSyncService
                 //
                 //    Notion 侧的历史数值是**权威**，本地只是缓存。回刷只负责"呈现"：
                 //    把游戏名换成总表的名字，时长文本原样保留。
-                var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
-                var expectedTitle = originalSuffix.Length > 0
-                    // 有原标题 → 只把"游戏名"那一段换成总表的名字，时长文本**原样保留**
-                    ? displayName + originalSuffix
-                    // 没有原标题可参考（老库升级）→ 只能按本地时长拼；
-                    // 但依然**不写**「单次时长」属性，数值属性始终以 Notion 上的为准。
-                    : DailyRecordTitle.Build(displayName, item.DurationMinutes);
+                // 有原标题 → 只把"游戏名"那一段换成总表的名字，时长文本原样保留。
+                // BuildWithPreservedSuffix 会顺带把缺失的 ` · ` 分隔符补上：用户手写的紧贴形态
+                // （如「黑旗10.1h」）取出的后缀是 `10.1h`，直接拼接就会写出没有 · 的标题。
+                // 没有原标题可参考（老库升级）→ 只能按本地时长拼；
+                // 但依然**不写**「单次时长」属性，数值属性始终以 Notion 上的为准。
+                var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                    displayName,
+                    DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
+                    item.DurationMinutes);
 
                 // 标题与图标**都要**比对。只比标题的话，"总表设了图标"会让每一轮都判定
                 // 需要更新（因为 iconUrl 非空 ≠ 页面图标不对），于是所有历史记录被反复 PATCH，
@@ -2041,10 +2071,10 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var originalSuffix = DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty);
-                        var expectedTitle = originalSuffix.Length > 0
-                            ? displayName + originalSuffix
-                            : DailyRecordTitle.Build(displayName, item.DurationMinutes);
+                        var expectedTitle = DailyRecordTitle.BuildWithPreservedSuffix(
+                            displayName,
+                            DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
+                            item.DurationMinutes);
 
                         // writeDuration: false —— 这里只是在补 relation 与改标题，
                         // 时长以 Notion 上的为准，不能用本地缓存去覆盖（2026-09-19 事故的教训）。
