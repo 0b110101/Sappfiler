@@ -29,7 +29,7 @@ public sealed partial class SettingsPage : Page
         base.OnNavigatedTo(e);
 
         // 版本号来自 AssemblyInformationalVersion（由仓库根 Directory.Build.props 统一注入）。
-        // 形如 "0.3.1-alpha.3"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
+        // 形如 "0.3.2-alpha.3"（SemVer；正式确认后去掉 -alpha.N），展示时补上 "v" 前缀。
         VersionText.Text = $"Sappfiler v{GetAppVersion()}";
 
         if (e.Parameter is ValueTuple<IDatabaseRepository, TrackerConfig, INotionClient, INotionSyncService> t4)
