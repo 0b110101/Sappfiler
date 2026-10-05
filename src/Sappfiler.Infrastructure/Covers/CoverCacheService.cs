@@ -86,16 +86,31 @@ public class CoverCacheService
         return null;
     }
 
+    /// <summary>
+    /// **封面缓存版本**。算法一变就 +1，缓存根目录随之变成 <c>…\covers\v{N}\</c>，旧目录自然失效。
+    ///
+    /// <para>
+    /// 为什么必须有（2026-10-05 用户提出）：Sappfiler 已是长期运行的工具，封面来源与优先级会持续演进
+    ///（exe 图标 / 目录 logo / 总表 icon / cover / Steam CDN …）。没有版本号时，每修一次封面逻辑
+    /// 都要让用户手工删 <c>%LocalAppData%\Sappfiler\cache\covers</c>，否则错误封面会一直留着；
+    /// 有了版本号，改版本 = 全局失效，且**不删除任何旧文件**（旧目录原地保留，只是不再被读取）。
+    /// </para>
+    ///
+    /// <para>v2：exe 图标降级为**占位图**（不再覆盖总表/Steam 正规封面），并排除反作弊/启动器组件。</para>
+    /// </summary>
+    public const int CacheVersion = 2;
+
     public CoverCacheService(string? cacheDir = null, HttpClient? httpClient = null)
     {
         if (cacheDir != null)
         {
+            // 显式传入的目录（测试用）保持原样，不追加版本号
             _cacheDirectory = cacheDir;
         }
         else
         {
             // 封面缓存与数据库同处一个数据目录（默认 %LocalAppData%\Sappfiler，可自定义）
-            _cacheDirectory = GameTimeTracker.Core.Services.AppPaths.CoversDir;
+            _cacheDirectory = Path.Combine(GameTimeTracker.Core.Services.AppPaths.CoversDir, $"v{CacheVersion}");
         }
 
         if (!Directory.Exists(_cacheDirectory))
@@ -106,7 +121,40 @@ public class CoverCacheService
         _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
     }
 
+    /// <summary>
+    /// **显示用**封面路径。优先级（这是修复 Halo/EAC 那类问题的关键）：
+    /// <code>
+    /// 正规封面（总表 icon / cover / Steam CDN 的 .png|.jpg）
+    ///     ↓ 没有
+    /// 占位图（从 exe / 目录 logo 抠出来的 .exeicon.png）
+    ///     ↓ 没有
+    /// 该游戏"应当"写在哪的默认路径（可能还不存在）
+    /// </code>
+    ///
+    /// ⚠️ 旧行为是"exe 抠出来的 .png 优先于总表/Steam 的 .jpg"，于是任何被误认的 exe
+    ///（例如反作弊组件）都能把它的 logo 盖在正经封面上 —— 见 Halo MCC 实测。
+    /// </summary>
     public string GetCoverPath(string platform, string platformId)
+        => FindRealCover(platform, platformId)
+           ?? FindPlaceholderIcon(platform, platformId)
+           ?? DefaultRealCoverPath(platform, platformId);
+
+    private static (string SafePlatform, string SafeId) Normalize(string platform, string platformId)
+        => (platform.ToLowerInvariant(),
+            string.Join("_", platformId.ToLowerInvariant().Split(Path.GetInvalidFileNameChars())));
+
+    /// <summary>该游戏"应当"写正规封面的路径（不一定已存在）。</summary>
+    private string DefaultRealCoverPath(string platform, string platformId)
+    {
+        var (safePlatform, safeId) = Normalize(platform, platformId);
+        return Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId}.png");
+    }
+
+    /// <summary>
+    /// **正规封面**（总表 icon / cover / Steam 官方封面）的现存文件；没有则 null。
+    /// 这里的查找顺序与扩展名兼容规则**与修复前逐字一致**，只是不再兜底返回不存在的路径。
+    /// </summary>
+    private string? FindRealCover(string platform, string platformId)
     {
         var safePlatform = platform.ToLowerInvariant();
         var safeId = string.Join("_", platformId.ToLowerInvariant().Split(Path.GetInvalidFileNameChars()));
@@ -146,7 +194,29 @@ public class CoverCacheService
             if (File.Exists(legacyPng) && new FileInfo(legacyPng).Length > 0) return legacyPng;
         }
 
-        return Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId}.png");
+        return null;
+    }
+
+    /// <summary>占位图（exe 图标 / 目录 logo，<c>*.exeicon.png</c>）的现存文件；没有则 null。</summary>
+    private string? FindPlaceholderIcon(string platform, string platformId)
+    {
+        var (safePlatform, safeId) = Normalize(platform, platformId);
+
+        var candidates = new List<string> { Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId}.exeicon.png") };
+
+        // 与写入侧保持一致：platformId 自带平台前缀时还会写一份"去掉前缀"的副本
+        if (safeId.StartsWith(safePlatform + "_"))
+        {
+            var strippedId = safeId.Substring(safePlatform.Length + 1);
+            candidates.Add(Path.Combine(_cacheDirectory, $"{safePlatform}_{strippedId}.exeicon.png"));
+        }
+
+        foreach (var path in candidates)
+        {
+            if (File.Exists(path) && new FileInfo(path).Length > 0) return path;
+        }
+
+        return null;
     }
 
     public string? GetSplashBackgroundPath(string? exePath)
@@ -203,11 +273,15 @@ public class CoverCacheService
         return null;
     }
 
+    /// <summary>
+    /// 是否已有**正规封面**（总表 icon / cover / Steam 官方封面）。
+    ///
+    /// ⚠️ 刻意**不把 exe 占位图算作"有封面"**：<see cref="EnsureLibraryCoversAsync"/> 用它决定
+    /// "要不要去取正经封面"。若把占位图算进去，就会出现修复前那种行为 ——
+    /// 只要抠出过一张 exe 图标，就再也不会去取总表/Steam 的正经封面了。
+    /// </summary>
     public bool HasCover(string platform, string platformId)
-    {
-        var p = GetCoverPath(platform, platformId);
-        return HasCoverFile(p);
-    }
+        => HasCoverFile(FindRealCover(platform, platformId));
 
     /// <summary>
     /// 判断本地是否已存在可用的封面文件。
@@ -228,11 +302,22 @@ public class CoverCacheService
             return false;
         }
 
+        // ⚠️ 防御层（与 GameLibraryManager 的守卫同源）：反作弊 / 启动器 / 辅助进程的 exe
+        // **永远不作为封面来源**。这类 exe 的 logo 与游戏毫无关系，而它们偏偏常常住在游戏目录里
+        //（Halo MCC 实测：显示成了 Easy Anti-Cheat 的图标）。判据复用 ProcessFilter，避免两处漂移。
+        if (GameTimeTracker.Infrastructure.Process.ProcessFilter.IsEcosystemComponent(exePath))
+        {
+            return false;
+        }
+
         try
         {
             var safePlatform = platform.ToLowerInvariant();
             var safeId = string.Join("_", platformId.ToLowerInvariant().Split(Path.GetInvalidFileNameChars()));
-            var pngPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId}.png");
+
+            // ⚠️ 写的是 **占位图**（`.exeicon.png`），不是正规封面（`.png`/`.jpg`）：
+            // exe 图标只配当"没有正经封面时的兜底"，绝不能盖过总表 icon / Steam 官方封面。
+            var pngPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId}.exeicon.png");
 
             // 已有封面就复用（必须幂等，否则会引发无限递归，见 HasCoverFile 注释）。
             // 若分辨率不足、且本次运行尚未尝试过升级，则继续往下走一次，尝试换成更大的图标。
@@ -281,7 +366,7 @@ public class CoverCacheService
                             File.Copy(logoFile, pngPath, true);
                             if (safeId.StartsWith(safePlatform + "_"))
                             {
-                                var altPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId.Substring(safePlatform.Length + 1)}.png");
+                                var altPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId.Substring(safePlatform.Length + 1)}.exeicon.png");
                                 try { File.Copy(logoFile, altPath, true); } catch { }
                             }
                             CoverDownloaded?.Invoke(this, platformId);
@@ -299,7 +384,7 @@ public class CoverCacheService
                             File.Copy(bestLogo, pngPath, true);
                             if (safeId.StartsWith(safePlatform + "_"))
                             {
-                                var altPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId.Substring(safePlatform.Length + 1)}.png");
+                                var altPath = Path.Combine(_cacheDirectory, $"{safePlatform}_{safeId.Substring(safePlatform.Length + 1)}.exeicon.png");
                                 try { File.Copy(bestLogo, altPath, true); } catch { }
                             }
                             CoverDownloaded?.Invoke(this, platformId);
@@ -354,22 +439,17 @@ public class CoverCacheService
 
     public async Task<string?> EnsureCoverAsync(string platform, string platformId, string? exePath = null)
     {
-        var currentPath = GetCoverPath(platform, platformId);
-        if (HasCoverFile(currentPath))
-        {
-            return currentPath;
-        }
+        // 已有**正规封面** → 直接返回（占位图不算，见 HasCover 注释）
+        if (FindRealCover(platform, platformId) is { } existing) return existing;
 
-        // 1. Try extracting desktop icon or folder logo first
+        // 1. 先落一张**占位图**（exe 图标 / 目录 logo）：有它至少不是空白，
+        //    但它不会被当成"已有封面"，所以下面仍会继续去取正经封面。
         if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath))
         {
-            if (ExtractAndSaveExecutableIcon(exePath, platform, platformId))
-            {
-                return GetCoverPath(platform, platformId);
-            }
+            ExtractAndSaveExecutableIcon(exePath, platform, platformId);
         }
 
-        // 2. Try Steam CDN if it's a Steam game
+        // 2. 正规封面：Steam 官方 CDN（steam + 纯数字 AppID）
         if (string.Equals(platform, "steam", StringComparison.OrdinalIgnoreCase) && platformId.All(char.IsDigit))
         {
             var jpg = await DownloadToCacheAsync(platform, platformId,
@@ -381,7 +461,8 @@ public class CoverCacheService
             }
         }
 
-        return HasCoverFile(currentPath) ? currentPath : null;
+        // 3. 没有正规封面 → 退回占位图（有就显示，没有就 null，让 UI 走无封面分支）
+        return FindPlaceholderIcon(platform, platformId);
     }
 
     /// <summary>

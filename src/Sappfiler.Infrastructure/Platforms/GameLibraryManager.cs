@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using GameTimeTracker.Infrastructure.Process;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -79,9 +80,28 @@ public sealed class GameLibraryManager
     public InstalledGame? MatchExe(string exePath)
     {
         if (string.IsNullOrWhiteSpace(exePath)) return null;
+
         return _processCache.GetOrAdd(
             exePath.ToLowerInvariant(),
-            path => FindMatchingGame(path));
+            path =>
+            {
+                // ⚠️ **反作弊 / 启动器 / 辅助进程永远不算游戏本体**。
+                // 它们常常就住在游戏安装目录里（例如 <game>\EasyAntiCheat\EasyAntiCheat.exe），
+                // 或与游戏同时运行（例如 C:\Program Files (x86)\EasyAntiCheat_EOS），
+                // 只按"安装目录前缀"匹配就会把它们认成这款游戏，并让它们的 exe 路径
+                // 进入游戏身份（games.executable_path）—— 后果是游戏图标变成反作弊的 logo：
+                // Halo: The Master Chief Collection 真机实测（2026-10-05）即为该现象。
+                //
+                // 判据复用 ProcessFilter（与进程黑名单同一批关键字，避免两处漂移）。
+                // 放在缓存回调里执行 ⇒ 同一路径每次库刷新只记一条日志，不会每轮刷屏。
+                if (ProcessFilter.IsEcosystemComponent(path))
+                {
+                    AppLog.Info($"[平台检索] 忽略非游戏组件：{path}");
+                    return (InstalledGame?)null;
+                }
+
+                return FindMatchingGame(path);
+            });
     }
 
     /// <summary>

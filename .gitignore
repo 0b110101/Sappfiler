@@ -71,6 +71,11 @@ tests/Sappfiler.Tests/*
 !tests/Sappfiler.Tests/FakeNotionClient.cs
 !tests/Sappfiler.Tests/DeviceSync*.cs
 
+# 封面优先级 / exe 挑选的回归测试（图标误认类缺陷，2026-10-05）
+# ⚠️ 刻意只放行**这一个**文件：用 Cover*.cs 会连带暴露仓库里既有的
+#    CoverIconPriorityTests.cs（它从未被跟踪），那是另一个决定，不该由本次修复顺手做掉。
+!tests/Sappfiler.Tests/CoverExePriorityTests.cs
+
 # 内部报告与交接文档
 # ⚠️ 公开仓库边界（用户 2026-10-03 规则）：GitHub 只放**源代码 / 必要测试代码 / 公开文档 / 项目配置**。
 #    Agent 接管报告、阶段验收报告、测试报告、开发日志、内部设计记录、工作过程记录、私人笔记
