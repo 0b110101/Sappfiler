@@ -148,13 +148,28 @@ public sealed partial class HeatmapControl : UserControl
 
         // 3. Setup Columns dynamically
         int totalWeeks = Math.Max(52, data.Cells.Max(c => c.WeekIndex) + 1);
-        for (int c = 0; c < totalWeeks; c++)
+
+        // 月份标签层右侧需要追加的"空列"数 —— **只有标签层加，矩阵列数严格不变**。
+        // 追加列会真实计入 MonthHeaderGrid 的期望宽度（Grid 期望宽 = Σ列宽），
+        // 因而是"结构性"地扩大 ScrollViewer content width，不依赖 Margin / 溢出渲染的具体实现。
+        int headerExtraCols = ComputeMonthHeaderTrailingColumns(data.MonthMarkers, totalWeeks);
+        int headerCols = totalWeeks + headerExtraCols;
+
+        for (int c = 0; c < headerCols; c++)
         {
             MonthHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_currentStep) });
+        }
+
+        // 矩阵层列数必须等于 totalWeeks（不给矩阵加无意义的右侧空白）
+        for (int c = 0; c < totalWeeks; c++)
+        {
             MatrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_currentStep) });
         }
 
-        // 3. Render Month Headers (ColumnSpan 4 ensures 10月, 11月, 12月 never truncate)
+        // 3. Render Month Headers
+        // ⚠️ marker.ColumnIndex **绝不修改** —— 它同时决定标签左缘与相邻月份间距；
+        //    最后一个月（如 10月）落在最后一列时，靠上面追加的空列取得完整绘制宽度，
+        //    既不左移、也不会与上一个月标签重叠。
         foreach (var marker in data.MonthMarkers)
         {
             if (marker.ColumnIndex >= 0 && marker.ColumnIndex < totalWeeks)
@@ -168,7 +183,8 @@ public sealed partial class HeatmapControl : UserControl
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 Grid.SetColumn(tb, marker.ColumnIndex);
-                Grid.SetColumnSpan(tb, 4);
+                // 可用列数 = 从本列到标签层最右（含追加空列），上限仍是 4 列
+                Grid.SetColumnSpan(tb, Math.Min(4, headerCols - marker.ColumnIndex));
                 MonthHeaderGrid.Children.Add(tb);
             }
         }
@@ -243,6 +259,57 @@ public sealed partial class HeatmapControl : UserControl
         {
             HeatmapScroll.ChangeView(HeatmapScroll.ScrollableWidth, null, null, true);
         });
+    }
+
+    /// <summary>
+    /// 月份标签层右侧需要追加的**空列数**（仅标签层，矩阵不加）。
+    ///
+    /// <para>背景（2026-10-07）：当月 marker 会落在最后一列 —— 例：10 月的首个周日 10/4 正好是
+    /// 尾列的周日 ⇒ <c>ColumnIndex == totalWeeks - 1</c>。渲染层给它 <c>ColumnSpan = 4</c>，
+    /// 但 Grid 会把 span 截到"已存在的列数"✗ ⇒ 最末月份标签只剩 1 列宽（≈12.5~26px），
+    /// 而「10月」需要 ≈27px ⇒ 末尾字符被硬裁。</para>
+    ///
+    /// <para>这里**不移动任何 marker**（左移会与上一个月标签重叠），改为在标签层右侧追加空列，
+    /// 使所需绘制宽度**真实存在于 ScrollViewer 的 content 内**。</para>
+    ///
+    /// <para>宽度来源：对所有标签做实测 —— WinUI 允许对尚未入树的元素调用
+    /// <c>Measure(infinity, infinity)</c>，其 <c>DesiredSize.Width</c> 即文本自然宽度。
+    /// 若测量不可用（返回 0，例如字体尚未解析）则退回 <b>3 × FontSize</b> 的保守值：
+    /// 「10月」= 2 个数字 + 1 个全角字 ≈ 0.62em×2 + 1em ≈ 2.3em ⇒ 3em 是安全上界。</para>
+    /// </summary>
+    private int ComputeMonthHeaderTrailingColumns(
+        IReadOnlyList<ActivityHeatmapMonthMarker> markers, int totalWeeks)
+    {
+        if (markers.Count == 0) return 0;
+
+        double fontSize = _currentStep <= 13.5 ? 9 : 10;
+        double maxTextWidth = 0;
+
+        foreach (var marker in markers)
+        {
+            if (marker.ColumnIndex < 0 || marker.ColumnIndex >= totalWeeks) continue;
+
+            var probe = new TextBlock
+            {
+                Text = marker.MonthLabel,
+                FontSize = fontSize,
+                TextWrapping = TextWrapping.NoWrap
+            };
+            probe.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (probe.DesiredSize.Width > maxTextWidth) maxTextWidth = probe.DesiredSize.Width;
+        }
+
+        // 测量不可用 ⇒ 保守值 3em（不依赖具体字体度量）
+        if (maxTextWidth <= 0) maxTextWidth = fontSize * 3.0;
+
+        const double safetyPx = 8.0;   // 少量安全余量：抗 DPI 缩放与栅格舍入
+        double needed = maxTextWidth + safetyPx;
+
+        // 最坏情况：标签落在最后一列 ⇒ 原本可用 1 列，其余靠追加列补足
+        int neededCols = (int)Math.Ceiling(needed / Math.Max(1.0, _currentStep));
+        int extra = neededCols - 1;
+
+        return Math.Max(0, Math.Min(extra, 8));   // 上限保护：最多 8 列
     }
 
     public static Brush GetThemeBrush(int level, FrameworkElement? context = null)
