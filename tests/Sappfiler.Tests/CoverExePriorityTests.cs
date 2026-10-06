@@ -52,25 +52,28 @@ public class CoverExePriorityTests
         => ProcessFilter.IsEcosystemComponent(exePath).Should().BeFalse(
             $"{System.IO.Path.GetFileName(exePath)} 是游戏本体，必须照常识别");
 
-    // ==================== ② 优先级：exe 占位图不得盖过正规封面 ====================
+    // ==================== ② 优先级：本地已发现图标 > 本地正规封面 > 历史/远端封面 ====================
+    // 2026-10-07 产品取向变更（v3 "本地优先"）：本段断言已按新语义更新。
+    // 旧语义（v2）是"正规封面永远赢"，导致本地已成功提取的 exe 图标永远显示不出来（Halo 实测）。
 
     [Fact]
-    public void PlaceholderIcon_DoesNotOverrideRealCover()
+    public void LocalDiscoveredIcon_WinsOverRegularCover()
     {
         var dir = NewTempDir();
         try
         {
             var service = new CoverCacheService(dir);
 
-            // 正规封面（总表 icon / Steam 官方封面走的是 .jpg）
+            // ② 本地正规封面（.jpg）
             var realCover = Path.Combine(dir, "steam_976730.jpg");
             File.WriteAllBytes(realCover, new byte[] { 1, 2, 3, 4 });
 
-            // 以及一张 exe/目录 logo 抠出来的占位图
-            File.WriteAllBytes(Path.Combine(dir, "steam_976730.exeicon.png"), new byte[] { 9, 9, 9 });
+            // ① 本地已发现的游戏图标（exe / 安装目录 logo 抠出来的 .exeicon.png）
+            var localIcon = Path.Combine(dir, "steam_976730.exeicon.png");
+            File.WriteAllBytes(localIcon, new byte[] { 9, 9, 9 });
 
-            service.GetCoverPath("steam", "976730").Should().Be(realCover,
-                "正规封面必须赢（修复前是 exe 抠出的 .png 反过来盖住 .jpg —— Halo/EAC 就是这么来的）");
+            service.GetCoverPath("steam", "976730").Should().Be(localIcon,
+                "2026-10-07 起：本地已发现的游戏图标优先于本地正规封面（此前是反过来的）");
         }
         finally
         {
@@ -79,20 +82,21 @@ public class CoverExePriorityTests
     }
 
     [Fact]
-    public void PlaceholderIcon_IsUsedOnlyWhenNoRealCover()
+    public void LocalIcon_IsUsedWhenNoOtherCover()
     {
         var dir = NewTempDir();
         try
         {
             var service = new CoverCacheService(dir);
-            var placeholder = Path.Combine(dir, "steam_976730.exeicon.png");
-            File.WriteAllBytes(placeholder, new byte[] { 9, 9, 9 });
+            var localIcon = Path.Combine(dir, "steam_976730.exeicon.png");
+            File.WriteAllBytes(localIcon, new byte[] { 9, 9, 9 });
 
-            service.GetCoverPath("steam", "976730").Should().Be(placeholder,
-                "没有任何正规封面时，占位图仍要能用（不能让 UI 变空白）");
+            service.GetCoverPath("steam", "976730").Should().Be(localIcon,
+                "没有其它封面时，本地已发现的图标仍要能用（不能让 UI 变空白）");
 
-            service.HasCover("steam", "976730").Should().BeFalse(
-                "占位图**不算**「有封面」—— 否则 EnsureLibraryCoversAsync 会永远不去取总表/Steam 的正经封面");
+            service.HasCover("steam", "976730").Should().BeTrue(
+                "2026-10-07 起：本地已发现的图标**算作**「已有可显示封面」—— " +
+                "编排器因此不再去取远端封面（旧语义相反，正是 Halo 的成因）");
         }
         finally
         {

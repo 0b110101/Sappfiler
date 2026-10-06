@@ -1896,6 +1896,23 @@ public class SqliteRepository : IDatabaseRepository, GameTimeTracker.Core.Notion
     }
 
     /// <summary>
+    /// 按 <c>sessions.process_name</c> 统计次数 —— 本体裁决的历史证据。
+    /// **只读**：不写库、不改 schema（2026-10-07 C2）。
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, int>> GetSessionProcessCountsAsync()
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<(string ProcessName, int Cnt)>(
+            "SELECT process_name AS ProcessName, COUNT(*) AS Cnt FROM sessions GROUP BY process_name;");
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, cnt) in rows)
+        {
+            if (!string.IsNullOrWhiteSpace(name)) map[name] = cnt;
+        }
+        return map;
+    }
+
+    /// <summary>
     /// 删除一个 settings 键。用于「封面 → FileUpload 映射」失效时清掉旧值，让下次同步重新上传。
     /// </summary>
     public async Task DeleteSettingAsync(string key)

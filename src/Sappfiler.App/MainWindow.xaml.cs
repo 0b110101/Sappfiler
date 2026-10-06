@@ -677,6 +677,31 @@ public sealed partial class MainWindow : Window
                 // 1. Scan running processes
                 var processes = await _processMonitor.ScanRunningProcessesAsync();
 
+                // 1.5 本体裁决（2026-10-07 C1/C2/C3）：把本 tick 的**全部**候选一次性交给裁决器，
+                //     先裁决完再执行写入 —— 否则启动器会"先到先得"，把本体挤掉（Halo/mcclauncher 实测）。
+                try
+                {
+                    var candidates = processes
+                        .Where(p => !string.IsNullOrWhiteSpace(p.ExecutablePath))
+                        .Select(p => new GameTimeTracker.Infrastructure.Platforms.ProcessExeCandidate(
+                            p.ExecutablePath!, p.ProcessName, p.Pid))
+                        .ToList();
+
+                    var sessionCounts = await _repo.GetSessionProcessCountsAsync();
+                    var allGamesForPrimary = await _repo.GetAllGamesAsync();
+                    var knownPrimary = allGamesForPrimary
+                        .Where(g => !string.IsNullOrWhiteSpace(g.ExecutablePath))
+                        .GroupBy(g => (g.Platform + "/" + g.PlatformId).ToLowerInvariant())
+                        .ToDictionary(grp => grp.Key, grp => (string?)grp.First().ExecutablePath,
+                                      StringComparer.OrdinalIgnoreCase);
+
+                    _gameLibrary.BeginScanTick(candidates, sessionCounts, knownPrimary);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[本体裁决] 本轮批量裁决失败，退化为旧行为: {ex.Message}");
+                }
+
                 // 2. Identify active games
                 var activePids = new HashSet<int>();
                 foreach (var proc in processes)
@@ -704,7 +729,8 @@ public sealed partial class MainWindow : Window
                         var game = await _repo.GetOrCreateGameAsync(identity);
 
                         // Ensure cover cache is triggered
-                        _ = _coverCache.EnsureCoverAsync(identity.Platform, identity.PlatformId, identity.ExecutablePath);
+                        // trusted: true —— 该 exe 已由本体裁决确认为 PRIMARY（允许其触发一次性升级重写）
+                        _ = _coverCache.EnsureCoverAsync(identity.Platform, identity.PlatformId, identity.ExecutablePath, trusted: true);
 
                         // Start or heartbeat session
                         if (!_sessionManager.IsPidActive(proc.Pid))

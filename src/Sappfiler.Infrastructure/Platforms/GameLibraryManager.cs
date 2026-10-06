@@ -115,6 +115,20 @@ public sealed class GameLibraryManager
         var installed = MatchExe(process.ExecutablePath);
         if (installed != null)
         {
+            // 本体裁决门（2026-10-07）：Deferred/Downgraded/Denied 的 exe **绝不能**成为游戏本体。
+            // 这样 mcclauncher.exe 这类启动器不会再被"安装目录前缀匹配"认领。
+            var key = (installed.Platform + "/" + installed.PlatformId).ToLowerInvariant();
+            if (_tickVerdicts.TryGetValue(key, out var verdict))
+            {
+                var isPrimary = verdict.Decisions.Any(d =>
+                    d.IsPrimary && string.Equals(d.ExePath, process.ExecutablePath, StringComparison.OrdinalIgnoreCase));
+                if (!isPrimary)
+                {
+                    AppLog.Info($"[本体裁决] 忽略非本体进程：{process.ExecutablePath}");
+                    return null;
+                }
+            }
+
             return new GameTimeTracker.Core.Models.GameIdentity(
                 installed.Platform,
                 installed.PlatformId,
@@ -259,6 +273,82 @@ public sealed class GameLibraryManager
 
         _processCache.Clear();
         return game;
+    }
+
+    // ── 本体裁决（C1/C2，2026-10-07）───────────────────────────────────────
+
+    /// <summary>本 exe **连续**被观察到的 tick 数（5s/轮）。纯内存状态 —— 绝不由历史 session 反推。</summary>
+    private readonly ConcurrentDictionary<string, int> _exeTickStreak = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>本 tick 每个游戏（platform/platformId）的裁决结果。</summary>
+    private readonly ConcurrentDictionary<string, GroupVerdict> _tickVerdicts = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 由扫描循环在**每轮扫描开始时**调用一次：把本 tick 的全部候选**一次性**交给裁决器。
+    /// </summary>
+    /// <remarks>
+    /// 为什么必须"一次性"：否则先被处理的候选会先写 DB/先抠图，后到的本体候选再正确也晚了
+    /// —— 这正是 mcclauncher.exe 抢先的成因。
+    /// </remarks>
+    public void BeginScanTick(
+        IReadOnlyList<ProcessExeCandidate> candidates,
+        IReadOnlyDictionary<string, int>? historicalSessionCounts = null,
+        IReadOnlyDictionary<string, string?>? knownPrimaryByGameKey = null)
+    {
+        if (candidates == null) return;
+
+        // 1) 更新"连续 tick"证据（内存）
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in candidates)
+        {
+            if (!string.IsNullOrWhiteSpace(c.ExePath)) seen.Add(c.ExePath);
+        }
+        foreach (var exe in seen)
+        {
+            _exeTickStreak.AddOrUpdate(exe, 1, (_, v) => v + 1);
+        }
+        foreach (var exe in _exeTickStreak.Keys.ToList())
+        {
+            if (!seen.Contains(exe)) _exeTickStreak.TryRemove(exe, out _);
+        }
+
+        // 2) 按游戏分组（先沿用目录前缀认领，随后由裁决过滤）
+        _tickVerdicts.Clear();
+        var groups = new Dictionary<string, (InstalledGame Game, List<ProcessExeCandidate> Items)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(c.ExePath)) continue;
+            var game = FindMatchingGame(c.ExePath.ToLowerInvariant());
+            if (game is null || string.IsNullOrWhiteSpace(game.InstallDir)) continue;
+
+            var key = (game.Platform + "/" + game.PlatformId).ToLowerInvariant();
+            if (!groups.TryGetValue(key, out var g))
+            {
+                g = (game, new List<ProcessExeCandidate>());
+                groups[key] = g;
+            }
+            g.Items.Add(c);
+        }
+
+        // 3) 逐组裁决（同 tick、同视图内整体判定）
+        foreach (var (key, g) in groups)
+        {
+            var verdict = PrimaryExeResolver.Resolve(
+                g.Items,
+                knownPrimaryByGameKey != null && knownPrimaryByGameKey.TryGetValue(key, out var kp) ? kp : null,
+                exe => historicalSessionCounts != null &&
+                       historicalSessionCounts.TryGetValue(Path.GetFileNameWithoutExtension(exe), out var n) ? n : 0,
+                exe => _exeTickStreak.TryGetValue(exe, out var s) ? s : 0,
+                g.Game.Name);
+
+            _tickVerdicts[key] = verdict;
+
+            foreach (var d in verdict.Decisions)
+            {
+                var tag = d.IsPrimary ? "PRIMARY" : d.Tier.ToString();
+                AppLog.Info($"[本体裁决] {tag} {d.ExePath} — {d.Reason}");
+            }
+        }
     }
 
     // ── 私有辅助 ────────────────────────────────────────────────────────────

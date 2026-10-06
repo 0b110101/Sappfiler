@@ -70,6 +70,11 @@ public interface IDatabaseRepository
 
     /// <summary>删除一个 settings 键（用于让失效的「封面 → FileUpload」映射能重新上传）。</summary>
     Task DeleteSettingAsync(string key);
+
+    /// <summary>
+    /// 按 <c>sessions.process_name</c> 统计次数（本体裁决的**历史证据**，只读，不做任何写入、不改 schema）。
+    /// </summary>
+    Task<IReadOnlyDictionary<string, int>> GetSessionProcessCountsAsync();
 }
 
 public interface IProcessMonitor
