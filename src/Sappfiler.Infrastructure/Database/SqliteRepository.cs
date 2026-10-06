@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace GameTimeTracker.Infrastructure.Database;
 
-public class SqliteRepository : IDatabaseRepository
+public class SqliteRepository : IDatabaseRepository, GameTimeTracker.Core.Notion.INotionIconMappingStore
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -1893,6 +1893,25 @@ public class SqliteRepository : IDatabaseRepository
         using var conn = CreateConnection();
         return await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT value FROM settings WHERE key = @key;", new { key });
+    }
+
+    /// <summary>
+    /// 删除一个 settings 键。用于「封面 → FileUpload 映射」失效时清掉旧值，让下次同步重新上传。
+    /// </summary>
+    public async Task DeleteSettingAsync(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return;
+
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync("DELETE FROM settings WHERE key = @key;", new { key });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public async Task SetSettingAsync(string key, string value)

@@ -38,15 +38,57 @@ internal sealed class FakeNotionClient : INotionClient
 
     public Task<string> CreateDailyRecordAsync(
         string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId,
-        string? iconUrl = null)
+        string? iconUrl = null, string? iconFileUploadId = null)
     {
         CreatedDailyRecordTitles.Add(gameName);
         CreatedDailyRecordIcons.Add(iconUrl);
+        CreatedDailyRecordIconUploadIds.Add(iconFileUploadId);
         return Task.FromResult("created-page");
     }
 
     /// <summary>每次 CreateDailyRecordAsync 收到的 page icon，用于断言"顺带设了总表图标"。</summary>
     public List<string?> CreatedDailyRecordIcons { get; } = new();
+
+    /// <summary>每次 CreateDailyRecordAsync 收到的 file_upload id（Daily 新链路）。</summary>
+    public List<string?> CreatedDailyRecordIconUploadIds { get; } = new();
+
+    // ---------------- Daily Icon = file_upload 链路（2026-10-06） ----------------
+
+    /// <summary>被创建的 File Upload（文件名 / content type）。</summary>
+    public List<(string FileName, string ContentType)> FileUploadCreates { get; } = new();
+
+    /// <summary>被发送内容的 File Upload（id / 本地路径）。</summary>
+    public List<(string Id, string Path)> FileUploadSends { get; } = new();
+
+    /// <summary>Notion 侧"已知存在"的 file_upload id；查询不在集合里即视为不可用。</summary>
+    public HashSet<string> KnownFileUploadIds { get; } = new();
+
+    /// <summary>设为 true 时创建 File Upload 返回 null（模拟上传失败）。</summary>
+    public bool FailFileUploadCreate { get; set; }
+
+    /// <summary>设为 true 时 /send 返回 false（模拟创建成功但发送失败）。</summary>
+    public bool FailFileUploadSend { get; set; }
+
+    private int _fileUploadSeq;
+
+    public Task<string?> CreateFileUploadAsync(string filename, string contentType)
+    {
+        FileUploadCreates.Add((filename, contentType));
+        if (FailFileUploadCreate) return Task.FromResult<string?>(null);
+
+        var id = $"file-upload-{++_fileUploadSeq}";
+        KnownFileUploadIds.Add(id);
+        return Task.FromResult<string?>(id);
+    }
+
+    public Task<bool> SendFileUploadAsync(string fileUploadId, string filePath, string contentType)
+    {
+        FileUploadSends.Add((fileUploadId, filePath));
+        return Task.FromResult(!FailFileUploadSend);
+    }
+
+    public Task<string?> GetFileUploadStatusAsync(string fileUploadId)
+        => Task.FromResult(KnownFileUploadIds.Contains(fileUploadId) ? "uploaded" : null);
 
     /// <summary>只有 writeDuration=true 时才登记 —— 用来断言"这条路径不许改 Notion 上的时长"。</summary>
     public List<(string PageId, int DurationMinutes)> UpdatedPages { get; } = new();
@@ -57,9 +99,13 @@ internal sealed class FakeNotionClient : INotionClient
     /// <summary>每次 UpdateDailyRecordAsync 收到的 page icon。</summary>
     public List<string?> UpdatedIcons { get; } = new();
 
+    /// <summary>每次 UpdateDailyRecordAsync 收到的 file_upload id（Daily 新链路）。</summary>
+    public List<string?> UpdatedIconUploadIds { get; } = new();
+
     public Task<bool> UpdateDailyRecordAsync(
         string pageId, int durationMinutes, string? gamePageId, string? gameName = null,
-        string? iconUrl = null, bool writeDuration = false, string? titleOverride = null)
+        string? iconUrl = null, bool writeDuration = false, string? titleOverride = null,
+        string? iconFileUploadId = null)
     {
         if (writeDuration)
         {
@@ -67,6 +113,7 @@ internal sealed class FakeNotionClient : INotionClient
         }
         UpdatedTitles.Add(titleOverride ?? gameName);
         UpdatedIcons.Add(iconUrl);
+        UpdatedIconUploadIds.Add(iconFileUploadId);
         return Task.FromResult(true);
     }
 

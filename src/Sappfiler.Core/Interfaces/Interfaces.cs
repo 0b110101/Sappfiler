@@ -67,6 +67,9 @@ public interface IDatabaseRepository
     // App Settings
     Task<string?> GetSettingAsync(string key);
     Task SetSettingAsync(string key, string value);
+
+    /// <summary>删除一个 settings 键（用于让失效的「封面 → FileUpload」映射能重新上传）。</summary>
+    Task DeleteSettingAsync(string key);
 }
 
 public interface IProcessMonitor
@@ -98,7 +101,7 @@ public interface INotionClient
     /// 新建每日记录。gameName 是**游戏名**（不是拼好的标题），标题由实现方按
     /// 「gameName · X h」拼装；iconUrl 非空时同时设置页面 icon。
     /// </summary>
-    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId, string? iconUrl = null);
+    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId, string? iconUrl = null, string? iconFileUploadId = null);
 
     /// <summary>
     /// 更新每日记录。iconUrl 非空时一并把该页面 icon 设为 external 图片；
@@ -118,7 +121,7 @@ public interface INotionClient
     /// <param name="titleOverride">
     /// 可选的完整标题。若传入则直接使用，不按 gameName + durationMinutes 重拼（用于回刷保留原有时长后缀）。
     /// </param>
-    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null, bool writeDuration = false, string? titleOverride = null);
+    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null, bool writeDuration = false, string? titleOverride = null, string? iconFileUploadId = null);
 
     /// <summary>
     /// **只**改每日记录的标题（以及可选图标）—— 绝不碰「单次时长」「日期」这类数据属性。
@@ -141,6 +144,25 @@ public interface INotionClient
 
     /// <summary>把总表页面的 page icon 设置为 external 图片链接（仅对未设图标的页面调用）。</summary>
     Task<bool> SetPageIconAsync(string pageId, string imageUrl);
+
+    /// <summary>
+    /// 新建 Notion File Upload（<c>POST /v1/file_uploads</c>，single_part）。
+    /// 返回 <c>file_upload_id</c>；失败返回 null。
+    /// </summary>
+    /// <remarks>2026-10-06 实测：在 Notion-Version <c>2022-06-28</c> 下即可用，**无需升级 API pin**。</remarks>
+    Task<string?> CreateFileUploadAsync(string filename, string contentType);
+
+    /// <summary>
+    /// 把本地文件内容发送到该 File Upload（<c>POST /v1/file_uploads/{id}/send</c>，
+    /// multipart/form-data，字段名固定 <c>file</c>）。返回是否最终 <c>status = uploaded</c>。
+    /// </summary>
+    Task<bool> SendFileUploadAsync(string fileUploadId, string filePath, string contentType);
+
+    /// <summary>
+    /// 查询 File Upload 状态（<c>GET /v1/file_uploads/{id}</c>）。
+    /// 查询失败或对象不存在时返回 null —— 调用方据此判定"该映射已不可用"。
+    /// </summary>
+    Task<string?> GetFileUploadStatusAsync(string fileUploadId);
 
     /// <summary>
     /// 检查指定 page_id 的页面是否已在 Notion 侧被删除（移入回收站或已不存在）。
