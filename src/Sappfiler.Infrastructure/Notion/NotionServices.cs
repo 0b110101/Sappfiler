@@ -2172,7 +2172,8 @@ public class NotionSyncService : INotionSyncService
     {
         var allGames = await _repo.GetAllGamesAsync();
         var unlinked = allGames
-            .Where(g => string.IsNullOrEmpty(g.NotionPageId) && g.Status != "ignored")
+            .Where(g => string.IsNullOrEmpty(g.NotionPageId) && g.Status != "ignored"
+                        && !GameTimeTracker.Core.DeviceSync.GameStatuses.IsArchived(g.Status))
             .ToList();
         if (unlinked.Count == 0) return 0;
 

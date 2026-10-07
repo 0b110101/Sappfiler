@@ -246,7 +246,9 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         try
         {
-            var allGames = conn.Query<GameRecord>("SELECT * FROM games ORDER BY id ASC;").ToList();
+            // 归档（已删除）的 Game 不参与启动去重的合并候选 —— 它只为历史 FK 存在。
+            var allGames = conn.Query<GameRecord>(
+                $"SELECT * FROM games WHERE {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} ORDER BY id ASC;").ToList();
             if (allGames.Count <= 1) return;
 
             var groups = new List<List<GameRecord>>();
@@ -446,17 +448,20 @@ public partial class SqliteRepository : IDatabaseRepository
             using var conn = CreateConnection();
             // 1. Match by platform and platform_id
             var existing = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                "SELECT * FROM games WHERE LOWER(platform) = LOWER(@Platform) AND LOWER(platform_id) = LOWER(@PlatformId) ORDER BY (CASE WHEN notion_page_id IS NOT NULL AND notion_page_id != '' THEN 0 ELSE 1 END), id ASC;",
+                "SELECT * FROM games WHERE LOWER(platform) = LOWER(@Platform) AND LOWER(platform_id) = LOWER(@PlatformId) "
+                + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} "
+                + "ORDER BY (CASE WHEN notion_page_id IS NOT NULL AND notion_page_id != '' THEN 0 ELSE 1 END), id ASC;",
                 new { identity.Platform, identity.PlatformId });
 
             // 2. Fallback: match by executable path or executable name
             if (existing == null && (!string.IsNullOrEmpty(identity.ExecutablePath) || !string.IsNullOrEmpty(identity.Executable)))
             {
                 existing = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                    """
+                    $"""
                     SELECT * FROM games 
-                    WHERE (LOWER(executable_path) = LOWER(@ExecutablePath) AND @ExecutablePath != '') 
-                       OR (LOWER(executable) = LOWER(@Executable) AND @Executable != '')
+                    WHERE ((LOWER(executable_path) = LOWER(@ExecutablePath) AND @ExecutablePath != '') 
+                       OR (LOWER(executable) = LOWER(@Executable) AND @Executable != ''))
+                      AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate}
                     ORDER BY (CASE WHEN notion_page_id IS NOT NULL AND notion_page_id != '' THEN 0 ELSE 1 END), id ASC;
                     """,
                     new { identity.ExecutablePath, identity.Executable });
@@ -466,9 +471,10 @@ public partial class SqliteRepository : IDatabaseRepository
             if (existing == null && !string.IsNullOrWhiteSpace(identity.Name))
             {
                 existing = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                    """
+                    $"""
                     SELECT * FROM games 
                     WHERE LOWER(name) = LOWER(@Name)
+                      AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate}
                     ORDER BY (CASE WHEN notion_page_id IS NOT NULL AND notion_page_id != '' THEN 0 ELSE 1 END), (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC;
                     """,
                     new { identity.Name });
@@ -582,7 +588,9 @@ public partial class SqliteRepository : IDatabaseRepository
     public async Task<IReadOnlyList<GameRecord>> GetAllGamesAsync()
     {
         using var conn = CreateConnection();
-        var list = await conn.QueryAsync<GameRecord>("SELECT * FROM games ORDER BY name;");
+        // 「正常 Game」作用域：归档（用户已删除）的行不得出现在正常业务列表里（用户 2026-10-07 要求 5）。
+        var list = await conn.QueryAsync<GameRecord>(
+            $"SELECT * FROM games WHERE {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} ORDER BY name;");
         return list.ToList();
     }
 
@@ -598,18 +606,84 @@ public partial class SqliteRepository : IDatabaseRepository
     public async Task<IReadOnlyList<GameRecord>> GetPendingGamesAsync()
     {
         using var conn = CreateConnection();
+        // 归档（已删除）的 Game 不允许再进入 Notion 待推送候选。
         var list = await conn.QueryAsync<GameRecord>(
-            "SELECT * FROM games WHERE notion_page_id IS NULL OR notion_page_id = '' ORDER BY created_at DESC;");
+            "SELECT * FROM games WHERE (notion_page_id IS NULL OR notion_page_id = '') "
+            + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} ORDER BY created_at DESC;");
         return list.ToList();
     }
 
+    /// <summary>
+    /// 删除一个 Game 条目 —— ⚠️ **删除 Game ≠ 删除历史事实**（用户 2026-10-07 批准，C5 / C-2）。
+    ///
+    /// <para>
+    /// 原实现是裸 <c>DELETE FROM games</c> ✗：而 <c>sessions</c> 与 <c>daily_summary</c> 的 FK
+    /// 都是 <c>ON DELETE CASCADE</c>（且 <c>PRAGMA foreign_keys=ON</c>）⇒ 会**连带抹掉全部历史** ✗。
+    /// </para>
+    ///
+    /// <para>
+    /// 现在改为「历史归档」：保留 <c>games</c> 行（继续作为历史 Session / daily_summary 的 FK 目标），
+    /// 只把 status 置为 <see cref="GameStatuses.Archived"/>；同时写删除墓碑（<c>sync_tombstones</c>），
+    /// 表达"这个 Game 已被用户删除"这一事实。历史数据**一个字节都不改**。
+    /// </para>
+    /// </summary>
     public async Task DeleteGameAsync(int gameId)
     {
         await _writeLock.WaitAsync();
         try
         {
             using var conn = CreateConnection();
-            await conn.ExecuteAsync("DELETE FROM games WHERE id = @gameId;", new { gameId });
+            using var tx = conn.BeginTransaction();
+
+            var snapshot = conn.QuerySingleOrDefault<dynamic>(
+                """
+                SELECT id, global_id, name, platform, platform_id, executable, executable_path, notion_page_id
+                FROM games WHERE id = @gameId;
+                """,
+                new { gameId }, tx);
+
+            if (snapshot is null)
+            {
+                tx.Commit();
+                return;
+            }
+
+            string? globalId = (string?)snapshot.global_id;
+            globalId = string.IsNullOrWhiteSpace(globalId) ? null : globalId!.Trim();
+
+            await conn.ExecuteAsync(
+                """
+                UPDATE games
+                SET status = @archived, updated_at = CURRENT_TIMESTAMP
+                WHERE id = @gameId AND LOWER(COALESCE(status, '')) <> @archived;
+                """,
+                new { archived = GameTimeTracker.Core.DeviceSync.GameStatuses.Archived, gameId }, tx);
+
+            // 墓碑 + Delete 变更只认 global_id（跨设备身份）；没有 global_id 的纯本地行无需传播。
+            if (globalId is not null)
+            {
+                WriteGameTombstone(conn, tx, globalId);
+
+                // 删除事实入队（同一个事务 ⇒ 与本地归档状态一起提交，不会出现"归档了但没传播"）。
+                // Payload 沿用与 Create 相同的 Game 快照（含 schema_version，保证 push 侧可校验）；
+                // 接收端在 Delete 分支只读 EntityType/EntityGlobalId，不会用 payload 回写任何字段。
+                await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
+                {
+                    QueueId = Guid.NewGuid().ToString("N"),
+                    EntityType = nameof(SyncEntityType.Game),
+                    EntityGlobalId = globalId,
+                    Operation = SyncOperation.Delete,
+                    BaseVersion = 1,
+                    Payload = SyncPayloadFactory.Game(
+                        globalId, (string)snapshot.name, (string)snapshot.platform,
+                        (string)snapshot.platform_id, (string)snapshot.executable,
+                        (string)snapshot.executable_path, (string?)snapshot.notion_page_id),
+                    CreatedAtUtc = UtcNowIso(),
+                    Status = SyncQueueStatus.Pending
+                });
+            }
+
+            tx.Commit();
         }
         finally
         {
@@ -1190,7 +1264,8 @@ public partial class SqliteRepository : IDatabaseRepository
             if (!string.IsNullOrEmpty(item.GameMasterPageId))
             {
                 game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                    "SELECT * FROM games WHERE notion_page_id = @pageId LIMIT 1;",
+                    "SELECT * FROM games WHERE notion_page_id = @pageId "
+                    + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("games")} LIMIT 1;",
                     new { pageId = item.GameMasterPageId });
 
                 if (game == null)
@@ -1255,14 +1330,17 @@ public partial class SqliteRepository : IDatabaseRepository
                         // （比如之前手动注册过、或另一条总表条目解析出同一 AppID）。
                         // 必须复用而不是撞 UNIQUE —— SQLite Error 19 就是这么来的。
                         game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                            "SELECT * FROM games WHERE platform = @platform AND platform_id = @platformId LIMIT 1;",
+                            "SELECT * FROM games WHERE platform = @platform AND platform_id = @platformId "
+                            + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} LIMIT 1;",
                             new { platform, platformId });
 
                         if (game == null)
                         {
                             // 优先查找同名已有游戏行（不限是否已绑定，避免分身）
                             game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                                "SELECT * FROM games WHERE LOWER(name) = LOWER(@name) ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
+                                "SELECT * FROM games WHERE LOWER(name) = LOWER(@name) "
+                                + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} "
+                                + "ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
                                 new { name = catItem.Name })
                                 ?? await FindUnboundGameByNameAsync(conn, catItem.Name);
 
@@ -1293,7 +1371,9 @@ public partial class SqliteRepository : IDatabaseRepository
             if (game == null && !string.IsNullOrEmpty(item.GameTitle))
             {
                 game = await conn.QueryFirstOrDefaultAsync<GameRecord>(
-                    "SELECT * FROM games WHERE LOWER(name) = LOWER(@title) ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
+                    "SELECT * FROM games WHERE LOWER(name) = LOWER(@title) "
+                    + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate} "
+                    + "ORDER BY (CASE WHEN executable_path != '' THEN 0 ELSE 1 END), id ASC LIMIT 1;",
                     new { title = item.GameTitle })
                     ?? await FindUnboundGameByNameAsync(conn, item.GameTitle);
 

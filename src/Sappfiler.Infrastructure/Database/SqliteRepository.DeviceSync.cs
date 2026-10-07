@@ -341,7 +341,10 @@ public partial class SqliteRepository
 
             // ---- 确保 game.global_id：可同步的游戏必须拥有 identity（已有则绝不重新生成）----
             var gameIsSyncable = await conn.ExecuteScalarAsync<int>(
-                $"SELECT COUNT(*) FROM games WHERE id = @gameId AND {GameSyncEligibility.SqlPredicate};",
+                // 「已删除（archived）」的 Game 不得再进入同步候选（用户 2026-10-07 要求：不许出现
+                // "UI 看不到但后台仍当活跃 Game"的半完成状态）。
+                $"SELECT COUNT(*) FROM games WHERE id = @gameId AND {GameSyncEligibility.SqlPredicate} "
+                + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("games")};",
                 new { gameId = row.GameId }, tx) > 0;
 
             if (gameIsSyncable)
@@ -375,7 +378,7 @@ public partial class SqliteRepository
             // ---- 尾段 daily_summary（逐字复刻 AddSessionDurationToDailyAsync 的语义）----
             foreach (var delta in dailyDeltas)
             {
-                await ApplyDailyDurationDeltaAsync(conn, tx, delta.Date, row.GameId, delta.DurationSeconds);
+                ApplyDailyDurationDelta(conn, tx, delta.Date, row.GameId, delta.DurationSeconds);
             }
 
             // ---- 结束会话 + 同步字段落地（一条 UPDATE，避免"会话已结束但 identity 还没写"的中间态）----
@@ -406,7 +409,7 @@ public partial class SqliteRepository
                 tx);
 
             // ---- session_count 重算（逐字复刻 EndSessionAsync 的既有口径）----
-            await RecomputeSessionCountAsync(conn, tx, sessionId, durationSeconds);
+            RecomputeSessionCount(conn, tx, sessionId, durationSeconds);
 
             // ---- 用**事务内最终确定**的数据生成不可变 payload 快照 ----
             // 特意从库里读回（而不是复用上面的局部变量）：这样 payload 与"最终提交的状态"天然一致，
@@ -423,6 +426,43 @@ public partial class SqliteRepository
                 && !string.IsNullOrWhiteSpace(finalSession.GlobalId)
                 && !string.IsNullOrWhiteSpace(gameGlobalId))
             {
+                // ---- ① **先**补一条 Game（最小身份快照），再入队 Session（2h 设计 v2 §B.2 冻结）----
+                //
+                // 为什么必须在这里补：远端落地 Session 要求本地已有该 game_global_id，
+                // 否则永远是 Deferred(dependency_missing)。而"启用同步之后才第一次玩的新游戏"
+                // 不会被 backfill 覆盖（backfill 早已 done），少这一步就会导致对端**永久收不到**这局。
+                //
+                // 顺序保证：同一事务内先 Game 后 Session + 取待发按 rowid 升序 → 同一批里 Game 在前 ✓
+                // 去重：本机队列里若已有该 Game 的变更就不再补（重复也无害，但没必要）。
+                var gameAlreadyQueued = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM sync_queue WHERE entity_type = @type AND entity_global_id = @gid;",
+                    new { type = nameof(SyncEntityType.Game), gid = gameGlobalId }, tx) > 0;
+
+                if (!gameAlreadyQueued)
+                {
+                    var gameRow = await conn.QuerySingleAsync<BackfillGameRow>(
+                        """
+                        SELECT id, global_id, name, platform, platform_id, executable, executable_path, notion_page_id
+                        FROM games WHERE id = @gameId;
+                        """,
+                        new { gameId = finalSession.GameId }, tx);
+
+                    await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
+                    {
+                        QueueId = Guid.NewGuid().ToString("N"),
+                        EntityType = nameof(SyncEntityType.Game),
+                        EntityGlobalId = gameGlobalId!,
+                        Operation = SyncOperation.Create,
+                        BaseVersion = 1,
+                        Payload = SyncPayloadFactory.Game(
+                            gameRow.GlobalId!, gameRow.Name, gameRow.Platform, gameRow.PlatformId,
+                            gameRow.Executable, gameRow.ExecutablePath, gameRow.NotionPageId),
+                        CreatedAtUtc = UtcNowIso(),
+                        Status = SyncQueueStatus.Pending
+                    });
+                }
+
+                // ---- ② 再入队 Session ----
                 var payload = SyncPayloads.Serialize(new SessionSyncPayload
                 {
                     GlobalId = finalSession.GlobalId!,
@@ -478,13 +518,17 @@ public partial class SqliteRepository
     /// 把一笔增量落进 daily_summary。**逐字复刻** <see cref="AddSessionDurationToDailyAsync"/> 的语义
     /// （含 session_count 的 CASE 口径与 <c>sync_status = 'pending'</c>），只是改成在调用方的事务里执行。
     /// ⚠️ 不要在这里"顺手优化"口径 —— 它写出的值必须与心跳路径完全一致。
+    ///
+    /// ⚠️ 同步（非 async）：远端会话落地路径 <c>ApplyRemoteSession</c> 本身是同步的，
+    /// 而同一条 SQL 只能有**一份**实现（否则口径必然漂移）。SQLite + Dapper 在此处
+    /// 全程同步执行，语义与原先的 async 版本完全一致。
     /// </summary>
-    private static async Task ApplyDailyDurationDeltaAsync(
+    private static void ApplyDailyDurationDelta(
         SqliteConnection conn, SqliteTransaction tx, string date, int gameId, int durationSeconds)
     {
         if (durationSeconds <= 0) return;
 
-        var existing = await conn.QuerySingleOrDefaultAsync<dynamic>(
+        var existing = conn.QuerySingleOrDefault<dynamic>(
             "SELECT id, duration_seconds FROM daily_summary WHERE date = @date AND game_id = @gameId;",
             new { date, gameId }, tx);
 
@@ -493,7 +537,7 @@ public partial class SqliteRepository
             var newSecs = (int)existing.duration_seconds + durationSeconds;
             var newMins = newSecs / 60;
 
-            await conn.ExecuteAsync(
+            conn.Execute(
                 """
                 UPDATE daily_summary
                 SET duration_seconds = @newSecs,
@@ -510,7 +554,7 @@ public partial class SqliteRepository
             var mins = durationSeconds / 60;
             var sessionCount = mins > 0 ? 1 : 0;
 
-            await conn.ExecuteAsync(
+            conn.Execute(
                 """
                 INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status)
                 VALUES (@date, @gameId, @durationSeconds, @mins, @sessionCount, 'pending');
@@ -525,14 +569,17 @@ public partial class SqliteRepository
     /// 用 <c>substr(start_time,1,10)</c>（**日历日**，不是会计日）分组、只统计 ≥60 秒的会话、
     /// 以及对"外部/Notion 手工录入时长"的 manualBonus 判定。
     /// ⚠️ 这段口径是既有行为，不要"顺手修正"（改动会波及 Notion 同步的场次数字）。
+    ///
+    /// ⚠️ 同步（非 async）：远端会话落地路径 <c>ApplyRemoteSession</c> 本身是同步的，
+    /// 而同一条口径只能有**一份**实现。SQLite + Dapper 在此处全程同步执行，语义与原先一致。
     /// </summary>
-    private static async Task RecomputeSessionCountAsync(
+    private static void RecomputeSessionCount(
         SqliteConnection conn, SqliteTransaction tx, int sessionId, int durationSeconds)
     {
         // 只有当会话时长 >= 60 秒时才计入有效游玩次数；低于 60 秒的微小启动忽略。
         if (durationSeconds < 60) return;
 
-        var sessionRow = await conn.QuerySingleOrDefaultAsync<dynamic>(
+        var sessionRow = conn.QuerySingleOrDefault<dynamic>(
             "SELECT game_id, substr(start_time, 1, 10) AS session_date FROM sessions WHERE id = @sessionId;",
             new { sessionId }, tx);
 
@@ -541,7 +588,7 @@ public partial class SqliteRepository
         int gameId = (int)sessionRow.game_id;
         string date = (string)sessionRow.session_date;
 
-        var validSessionsCount = await conn.ExecuteScalarAsync<int>(
+        var validSessionsCount = conn.ExecuteScalar<int>(
             """
             SELECT COUNT(*) FROM sessions
             WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date AND duration_seconds >= 60;
@@ -550,14 +597,14 @@ public partial class SqliteRepository
 
         if (validSessionsCount <= 0) return;
 
-        var localSessionsTotalSecs = await conn.ExecuteScalarAsync<int>(
+        var localSessionsTotalSecs = conn.ExecuteScalar<int>(
             """
             SELECT COALESCE(SUM(duration_seconds), 0) FROM sessions
             WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date;
             """,
             new { gameId, date }, tx);
 
-        var dailyRow = await conn.QuerySingleOrDefaultAsync<DailyDurationCheck>(
+        var dailyRow = conn.QuerySingleOrDefault<DailyDurationCheck>(
             "SELECT duration_seconds, session_count FROM daily_summary WHERE game_id = @gameId AND date = @date LIMIT 1;",
             new { gameId, date }, tx);
 
@@ -570,7 +617,7 @@ public partial class SqliteRepository
 
         int finalSessionCount = validSessionsCount + manualBonusSessions;
 
-        await conn.ExecuteAsync(
+        conn.Execute(
             """
             UPDATE daily_summary SET session_count = @finalSessionCount
             WHERE game_id = @gameId AND date = @date;
@@ -633,6 +680,26 @@ public partial class SqliteRepository
                         DeletedAtUtc = string.IsNullOrWhiteSpace(change.CreatedAtUtc) ? UtcNowIso() : change.CreatedAtUtc,
                         CreatedAtUtc = UtcNowIso()
                     });
+
+                    // ⚠️ 2026-10-07（C5）：收到远端 Delete 时，除了落墓碑，还必须把本地该 Game
+                    // 置为「历史归档」—— 否则在接收端这个 Game 仍以**正常身份**出现在列表/候选里
+                    // （与"删除事实"矛盾）。只改 status：历史 Session / daily_summary 一律原样保留。
+                    // 幂等：已经是 archived 的行不重复写。
+                    if (string.Equals(change.EntityType, nameof(SyncEntityType.Game), StringComparison.Ordinal))
+                    {
+                        await conn.ExecuteAsync(
+                            """
+                            UPDATE games
+                            SET status = @archived, updated_at = CURRENT_TIMESTAMP
+                            WHERE global_id = @gid AND LOWER(COALESCE(status, '')) <> @archived;
+                            """,
+                            new
+                            {
+                                archived = GameTimeTracker.Core.DeviceSync.GameStatuses.Archived,
+                                gid = change.EntityGlobalId
+                            },
+                            tx);
+                    }
 
                     tombstonesPropagated++;
                     continue;
@@ -783,6 +850,28 @@ public partial class SqliteRepository
         return (null, schemaVersion);
     }
 
+    /// <summary>
+    /// 读取本机跨日结算小时（settings.daily_cutoff_hour，缺省/非法时 24）。
+    /// 远端会话落地时必须按**本机**口径归属统计日，因此要在同一事务里读本机设置。
+    /// </summary>
+    private static int ReadDailyCutoffHour(SqliteConnection conn, SqliteTransaction tx)
+    {
+        var raw = conn.ExecuteScalar<string?>(
+            "SELECT value FROM settings WHERE key = 'daily_cutoff_hour';", transaction: tx);
+
+        return int.TryParse(raw, out var value)
+            ? GameTimeTracker.Core.Services.AccountingDateHelper.NormalizeCutoffHour(value)
+            : 24;
+    }
+
+    /// <summary>把本库既定的本地墙上时间字符串（<c>yyyy-MM-dd HH:mm:ss</c>）解析为 <see cref="DateTime"/>。</summary>
+    private static bool TryParseLocalWallClock(string text, out DateTime value)
+        => DateTime.TryParseExact(
+            text, "yyyy-MM-dd HH:mm:ss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None,
+            out value);
+
     private static (string? Reason, int SchemaVersion) ApplyRemoteSession(
         SqliteConnection conn, SqliteTransaction tx, SyncChange change)
     {
@@ -808,8 +897,39 @@ public partial class SqliteRepository
 
         if (gameId is null)
         {
+            // E1（2026-10-07 用户批准）：区分「依赖还没到」与「Game 已经被删除」。
+            // 后者说明来源设备在离线期间为**已删除的 Game** 继续产生了会话事实：
+            // 删除事实与已发生的会话事实都要保留 ⇒ 归入 DeletionConflict（不复活、不丢、不改写），
+            // 交由用户显式恢复处理；**不能**当作 DependencyMissing 反复重试（会被静默复活 ✗）。
+            var gameTombstoned = conn.ExecuteScalar<int>(
+                "SELECT COUNT(*) FROM sync_tombstones WHERE entity_type = @type AND entity_global_id = @gid;",
+                new { type = nameof(SyncEntityType.Game), gid = session.GameGlobalId }, tx) > 0;
+
+            if (gameTombstoned)
+            {
+                return (DeferredReasons.DeletionConflict, schemaVersion);
+            }
+
             return (DeferredReasons.DependencyMissing, schemaVersion);
         }
+
+        // E1（2026-10-07 用户批准）：Game 已被删除（**历史归档**，C5 语义）时，
+        // 这条远端会话属于「删除事实 vs 已发生的会话事实」的冲突 —— 不能静默挂到已删除的 Game 上，
+        // 也不能丢弃/改写它。两侧事实都保留 ⇒ 记 DeletionConflict，等用户显式恢复。
+        var gameStatus = conn.ExecuteScalar<string?>(
+            "SELECT status FROM games WHERE id = @id;", new { id = gameId.Value }, tx);
+
+        if (GameTimeTracker.Core.DeviceSync.GameStatuses.IsArchived(gameStatus))
+        {
+            return (DeferredReasons.DeletionConflict, schemaVersion);
+        }
+
+        // ⚠️ start_time / end_time / last_heartbeat 在本库有**既定约定**：写**本地墙上时间**
+        //（心跳、结束会话、迁移写的都是它；所有 substr(start_time,1,10) 的按日分组都依赖它）。
+        // 远端会话必须遵守同一约定，否则跨 UTC 日界时同一场游戏会在两台机器上落到**不同日期**，
+        // 且既有的按日聚合与场次计数会算错。UTC 真相完好保留在 started_at_utc / ended_at_utc。
+        var startTime = ToLocalWallClock(session.StartedAtUtc);
+        var endTime = string.IsNullOrWhiteSpace(session.EndedAtUtc) ? null : ToLocalWallClock(session.EndedAtUtc);
 
         conn.Execute(
             """
@@ -824,8 +944,8 @@ public partial class SqliteRepository
             {
                 gameId = gameId.Value,
                 processName = session.ProcessName,
-                startTime = session.StartedAtUtc,
-                endTime = session.EndedAtUtc,
+                startTime,
+                endTime,
                 durationSeconds = session.DurationSeconds,
                 globalId = session.GlobalId,
                 deviceId = session.DeviceId,
@@ -835,7 +955,74 @@ public partial class SqliteRepository
             },
             tx);
 
+        // ⚠️⚠️ 关键（2026-10-05 用户拍板修复的缺陷）：远端会话**只落 sessions 是不够的**。
+        // 界面（首页「最近记录」/ 历史 / 热力图 / 统计）全部读 daily_summary，
+        // 而 daily_summary 的既有写入方只有"本机事件"。缺了这一步就会出现
+        // 「同步成功、落地 62 条，但接收端界面上一条数据都看不到」——
+        // 对用户来说就是"同步没意义"。
+        //
+        // 口径：daily_summary **不是同步实体**，只是 sessions 的**本地派生统计**
+        //（仍不上传、不下载、不进 wire、不改 ISyncBackend/Engine）。这里逐字复用
+        // 本机结束会话那条路径的既有函数，不新造聚合规则、也不做 sessions→daily_summary 全量重算
+        //（全量重算会抹掉 Notion/手工录入的时长 ✗）。
+        //
+        // 幂等：只有**真正 INSERT 了新会话**才会走到这里（上面 global_id 已存在就提前 return）
+        // → 重复 Pull 不会把时长翻倍。
+        if (session.DurationSeconds > 0 && startTime.Length >= 10)
+        {
+            // ⚠️ 统计日归属必须与本机路径**完全一致**（2026-10-07 用户批准修复的 C2）。
+            // 原实现用 startTime[..10]（本地**日历日**）把整段时长塞进一天，而本机
+            // 「心跳 + 结束会话」路径走的是 GameSessionManager.ComputeDailyDeltas →
+            // AccountingDateHelper（按 settings.daily_cutoff_hour 结算，跨分界点还会拆成两笔）。
+            // 两者口径不同 ⇒ cutoff ≠ 24 时，同一条 Session 在本机记 A 日、远端落地记 B 日 ✗。
+            //
+            // 修法：**逐字复用同一个纯函数**（不新造规则、不改跨日算法、不改 immutable fact）。
+            // 远端会话此前没有任何心跳落库，所以整段区间就是 [start, start + duration]，
+            // 与本机 heartbeat+end 两段拼起来的归属结果一致。
+            if (TryParseLocalWallClock(startTime, out var startLocal))
+            {
+                var cutoffHour = ReadDailyCutoffHour(conn, tx);
+
+                foreach (var delta in GameTimeTracker.Core.Services.GameSessionManager.ComputeDailyDeltas(
+                             startLocal,
+                             startLocal.AddSeconds(session.DurationSeconds),
+                             session.DurationSeconds,
+                             cutoffHour))
+                {
+                    ApplyDailyDurationDelta(conn, tx, delta.Date, gameId.Value, delta.DurationSeconds);
+                }
+            }
+            else
+            {
+                // 防御性回退：墙上时间不可解析时维持旧口径（日历日），绝不因此丢时长。
+                ApplyDailyDurationDelta(conn, tx, startTime[..10], gameId.Value, session.DurationSeconds);
+            }
+
+            var newSessionId = conn.ExecuteScalar<int>("SELECT last_insert_rowid();", transaction: tx);
+            RecomputeSessionCount(conn, tx, newSessionId, session.DurationSeconds);
+        }
+
         return (null, schemaVersion);
+    }
+
+    /// <summary>
+    /// 把 payload 里的 UTC 时刻换算成**本地墙上时间**（<c>yyyy-MM-dd HH:mm:ss</c>），
+    /// 供 <c>sessions.start_time/end_time/last_heartbeat</c> 使用。
+    ///
+    /// 理由见调用处：这三列在本库是**本地墙上时间**，混入 UTC 会让"同一场游戏"
+    /// 在两台机器上落到不同日期。解析失败时原样返回（宁可显示怪，也不丢数据）。
+    /// </summary>
+    private static string ToLocalWallClock(string? isoUtc)
+    {
+        if (string.IsNullOrWhiteSpace(isoUtc)) return string.Empty;
+
+        return DateTimeOffset.TryParse(
+            isoUtc,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+            : isoUtc;
     }
 
     /// <summary>解析失败时区分"版本不认识"与"payload 坏掉"——两者的后续处理方式不同。</summary>
@@ -940,7 +1127,11 @@ public partial class SqliteRepository
                     IdentityMatchLevel.None, IdentityDecisionReasons.StrongKeyEqual);
             }
 
-            var allGames = (await conn.QueryAsync<GameReconcileRow>("SELECT * FROM games;", null, tx)).ToList();
+            // 归档（用户已删除）的行不参与身份对账候选 —— 它们的存在只为历史 FK。
+            // 复用"已删除实体"的墓碑优先规则拦陈旧 Create，因此排除后不会导致 Game 复活。
+            var allGames = (await conn.QueryAsync<GameReconcileRow>(
+                $"SELECT * FROM games WHERE {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate};",
+                null, tx)).ToList();
 
             // 远端 identity 在本地的那一行（如果有）—— 它是"自己"，不能当成"另一个候选"
             var selfRow = allGames.FirstOrDefault(g =>

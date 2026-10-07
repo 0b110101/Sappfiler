@@ -27,6 +27,23 @@ public static class DeferredReasons
     /// <summary>本地已有该实体的墓碑 → 墓碑优先，陈旧数据不能把已删除实体复活。</summary>
     public const string TombstonedLocal = "tombstoned_local";
 
+    /// <summary>
+    /// **删除冲突**（E1，2026-10-07 用户批准）：这条远端 <c>Session</c> 指向的 <c>Game</c> 已被**删除**
+    /// （本地存在该 Game 的墓碑），而来源设备在离线期间仍然产生了新的会话事实。
+    ///
+    /// <para>
+    /// 语义：删除事实与已发生的会话事实 <b>都保留</b>，同步层不替用户裁决"删除还是恢复"。
+    /// 因此它**不能**归入 <see cref="DependencyMissing"/> —— 那表示"依赖还没到"，
+    /// 会被后续 Pull 反复重试、并可能把已删除的 Game 静默复活 ✗；也不能丢弃或改写这条 Session ✗。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 仅作为**客户端侧**原因码（写入本地 <c>sync_deferred_changes.reason</c> 与 PullSummary 日志），
+    /// 不上 wire、不进 <c>ISyncBackend</c>、不改协议版本。恢复已删除 Game 必须走用户显式操作。
+    /// </para>
+    /// </summary>
+    public const string DeletionConflict = "deletion_conflict";
+
     /// <summary>本阶段不落地的实体类型（例如 GameMapping）。</summary>
     public const string UnsupportedEntityType = "unsupported_entity_type";
 
