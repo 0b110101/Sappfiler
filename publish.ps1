@@ -39,6 +39,90 @@ function Fail($msg) {
     exit 1
 }
 
+# ---- 精确判定一个程序集是否为 ReadyToRun 产物（读 PE 元数据，**不看体积**）----
+# ReadyToRun（crossgen2）镜像的本质标志：CLR 头 IMAGE_COR20_HEADER 里的
+# ManagedNativeHeader（偏移 0x40）非 0，且它指向的 READYTORUN_HEADER 以魔数 'RTR\0'（0x00525452）开头。
+# 手工解析 PE 的原因：Windows PowerShell 5.1 没有 System.Reflection.PortableExecutable。
+# 2026-10-09 起因：原体积启发式在正常代码增长下误报（Core.dll 152KB→204KB 越过 200KB 上限）。
+# 返回 @{ IsReadyToRun; Reason }。
+function Test-ReadyToRunAssembly {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40) { return @{ IsReadyToRun = $false; Reason = '文件过小，不是 PE' } }
+
+    # DOS 头：e_lfanew(0x3C) → PE 头偏移
+    $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+    if ($peOffset -le 0 -or ($peOffset + 0x18) -ge $bytes.Length) {
+        return @{ IsReadyToRun = $false; Reason = 'e_lfanew 越界' }
+    }
+    if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) {
+        return @{ IsReadyToRun = $false; Reason = '缺 PE 签名' }
+    }
+
+    $coff = $peOffset + 4
+    $numberOfSections = [System.BitConverter]::ToUInt16($bytes, $coff + 2)
+    $sizeOfOptionalHeader = [System.BitConverter]::ToUInt16($bytes, $coff + 16)
+    $optional = $coff + 20
+    $magic = [System.BitConverter]::ToUInt16($bytes, $optional)
+
+    # 数据目录第 15 项 = CLR 头（COM descriptor）
+    $dataDir = if ($magic -eq 0x20B) { $optional + 0x70 } else { $optional + 0x60 }
+    $clrRva = [System.BitConverter]::ToUInt32($bytes, $dataDir + (14 * 8))
+    if ($clrRva -eq 0) { return @{ IsReadyToRun = $false; Reason = '不是托管程序集（无 CLR 头）' } }
+
+    $sections = $optional + $sizeOfOptionalHeader
+
+    # 把 CLR 头的 RVA 映射成文件偏移（RVA 必落在某个已映射节内）
+    $corOffset = -1
+    for ($i = 0; $i -lt $numberOfSections; $i++) {
+        $s = $sections + ($i * 40)
+        $virtualSize = [System.BitConverter]::ToUInt32($bytes, $s + 8)
+        $virtualAddress = [System.BitConverter]::ToUInt32($bytes, $s + 12)
+        $rawSize = [System.BitConverter]::ToUInt32($bytes, $s + 16)
+        $rawPointer = [System.BitConverter]::ToUInt32($bytes, $s + 20)
+        $span = [Math]::Max($virtualSize, $rawSize)
+        if ($clrRva -ge $virtualAddress -and $clrRva -lt ($virtualAddress + $span)) {
+            $corOffset = [int]($clrRva - $virtualAddress + $rawPointer)
+            break
+        }
+    }
+    if ($corOffset -lt 0 -or ($corOffset + 0x48) -gt $bytes.Length) {
+        return @{ IsReadyToRun = $false; Reason = 'CLR 头 RVA 无法映射' }
+    }
+
+    $nativeHeaderRva = [System.BitConverter]::ToUInt32($bytes, $corOffset + 0x40)
+    if ($nativeHeaderRva -eq 0) {
+        return @{ IsReadyToRun = $false; Reason = 'ManagedNativeHeader = 0（解释器/JIT 镜像）' }
+    }
+
+    $nativeOffset = -1
+    for ($i = 0; $i -lt $numberOfSections; $i++) {
+        $s = $sections + ($i * 40)
+        $virtualSize = [System.BitConverter]::ToUInt32($bytes, $s + 8)
+        $virtualAddress = [System.BitConverter]::ToUInt32($bytes, $s + 12)
+        $rawSize = [System.BitConverter]::ToUInt32($bytes, $s + 16)
+        $rawPointer = [System.BitConverter]::ToUInt32($bytes, $s + 20)
+        $span = [Math]::Max($virtualSize, $rawSize)
+        if ($nativeHeaderRva -ge $virtualAddress -and $nativeHeaderRva -lt ($virtualAddress + $span)) {
+            $nativeOffset = [int]($nativeHeaderRva - $virtualAddress + $rawPointer)
+            break
+        }
+    }
+
+    $nativeMagic = 0
+    if ($nativeOffset -ge 0 -and ($nativeOffset + 4) -le $bytes.Length) {
+        $nativeMagic = [System.BitConverter]::ToUInt32($bytes, $nativeOffset)
+    }
+
+    $rtrSignature = 0x00525452   # 'RTR\0' = READYTORUN_SIGNATURE
+    return @{
+        IsReadyToRun = $true     # 只要 ManagedNativeHeader 非 0 就判定为带原生代码的镜像（宁可拦住）
+        Reason       = ('ManagedNativeHeader RVA=0x{0:X} magic=0x{1:X8}{2}' -f $nativeHeaderRva, $nativeMagic,
+                        $(if ($nativeMagic -eq $rtrSignature) { ' = RTR 签名 ✓' } else { ' ≠ RTR 签名（仍是原生头，按 R2R 处理）' }))
+    }
+}
+
 # ---- 1. 从 Directory.Build.props 读版本号（唯一来源） ----
 $propsPath = Join-Path $repoRoot 'Directory.Build.props'
 if (-not (Test-Path $propsPath)) { Fail "找不到 $propsPath" }
@@ -153,12 +237,14 @@ dotnet publish (Join-Path $repoRoot 'src/Sappfiler.App') `
 if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish 失败' }
 
 # ---- 3b. 把使用文档放进包 ----
-# QA / 用户拿到 zip 后应能直接看说明，不必回头找仓库。
-# README 是给使用者的（配置 Notion、更新方法、常见问题），
-# CHANGELOG 是给 QA 的（本版改了什么 / 重点验什么 / 已知问题）。
+# 用户拿到 zip 后应能直接看说明，不必回头找仓库。
+#   · README.md    —— 面向使用者（安装、Notion/WebDAV 配置、常见问题）；
+#   · CHANGELOG.md —— **公开**更新日志（本版对用户可见的变更），随包改名「更新说明.md」。
+# ⚠️ 不得引用内部 QA 文档（CHANGELOG-QA.md 等不公开资料）：公开仓库里不存在它们，
+#    打包时必须能在缺少这些文件的情况下正常工作（下方逐个文件判存在，缺失只提示不失败）。
 $docCopies = @(
     @{ Src = (Join-Path $repoRoot 'README.md');        Dst = 'README.md' },
-    @{ Src = (Join-Path $repoRoot 'CHANGELOG-QA.md');  Dst = '更新说明.md' }
+    @{ Src = (Join-Path $repoRoot 'CHANGELOG.md');     Dst = '更新说明.md' }
 )
 foreach ($d in $docCopies) {
     if (Test-Path $d.Src) {
@@ -170,7 +256,13 @@ foreach ($d in $docCopies) {
 Write-Host "已随包附带 README.md 与 更新说明.md" -ForegroundColor DarkGray
 
 # 清理非必需的 pdb 调试符号文件
-Get-ChildItem $outDir -Filter "*.pdb" | Remove-Item -Force
+# ⚠️ 必须用 ForEach-Object + -LiteralPath：
+#    `Get-ChildItem ... | Remove-Item -Force` 会因管道绑定 FileInfo 失败而整体中止
+#    （ParameterBindingException: InputObjectNotBound；2026-10-09 在交互式会话里直接
+#     `.\publish.ps1` 时实测复现，同一脚本用 -File 调用则不复现 —— 属于调用方式的坑）。
+#    ForEach-Object + -LiteralPath 在 Windows PowerShell 5.1 与 PowerShell 7 下都安全；
+#    **清理目标与删除范围不变**（仍是 $outDir 下的 *.pdb，且失败仍然照旧中止）。
+Get-ChildItem -LiteralPath $outDir -Filter "*.pdb" -File | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 # ---- 4a. 清理多余的语言资源目录 ----
 # WinUI 的 native 库自带 86 个语言的 .mui 卫星资源，默认全被复制进来，
@@ -279,24 +371,28 @@ Write-Host "产物校验通过（$fileCount 个文件，关键 WinUI 组件齐�
 # 2026-09-19 曾有 1 轮把「关窗口再打开就崩」归因于 R2R，**那个结论后来被推翻了**
 # （用户实测非 R2R 的 alpha22 照样崩；真正来源是隐藏窗口时拆掉了页面，见
 #  App.csproj / MainWindow 里的说明）。这里保留校验，只为两点：
-#   1. R2R 会显著增大体积，本程序启动路径没有需要它的热点；
+#   1. 本程序启动路径没有需要 R2R 的热点；
 #   2. 当初观察到 R2R 版确实更容易崩，在没查清前不放开。
-# 如果你确认要开 R2R，把下面 $r2rChecks 清空即可 —— 它不是硬性正确性要求。
+# 如果你确认要开 R2R，把下面 $r2rTargets 清空即可 —— 它不是硬性正确性要求。
 #
-# 判据：预编译后程序集体积约为不开启时的 2 倍。
-#   App.dll：R2R ~736KB ／ 非 R2R ~400KB   → 阈值取 600KB
-#   Core.dll：R2R ~168KB ／ 非 R2R ~71KB
-# 用体积而不是翻 PE 头，是因为它足够稳、且失败时能直接看出原因。
-$r2rChecks = @(
-    @{ Name = 'Sappfiler.dll';     MaxKB = 600 },
-    @{ Name = 'Sappfiler.Core.dll'; MaxKB = 200 }
-)
+# 🔧 2026-10-09：判据从「程序集体积启发式」改成**读 PE 元数据**（Test-ReadyToRunAssembly）。
+#    原因：体积启发式会随正常代码增长误报 —— 当天 Core.dll 从 152KB 长到 204KB 就越过了
+#    200KB 上限，把一次完全正常的非 R2R 发布判成 R2R。R2R 的本质标志是 CLR 头里的
+#    ManagedNativeHeader 非 0（指向 'RTR\0'），与体积无关。
+$r2rTargets = @('Sappfiler.dll', 'Sappfiler.Core.dll')
 $r2rHit = @()
-foreach ($c in $r2rChecks) {
-    $p = Join-Path $outDir $c.Name
-    if (Test-Path $p) {
-        $kb = [math]::Round((Get-Item $p).Length / 1KB)
-        if ($kb -gt $c.MaxKB) { $r2rHit += "$($c.Name) = ${kb}KB（上限 $($c.MaxKB)KB）" }
+foreach ($name in $r2rTargets) {
+    $p = Join-Path $outDir $name
+    if (-not (Test-Path $p)) {
+        Write-Host "  提示: 包内未找到 $name，跳过 R2R 校验" -ForegroundColor Yellow
+        continue
+    }
+
+    $verdict = Test-ReadyToRunAssembly -Path $p
+    if ($verdict.IsReadyToRun) {
+        $r2rHit += "$name ：$($verdict.Reason)"
+    } else {
+        Write-Host "  $name 非 ReadyToRun ✓（$($verdict.Reason)）" -ForegroundColor DarkGray
     }
 }
 
