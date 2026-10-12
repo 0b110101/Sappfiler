@@ -165,6 +165,108 @@ public class GameSessionManager
         }
     }
 
+    /// <summary>
+    /// <b>结束指定游戏的全部活跃会话</b>（2026-10-12：删除游戏前调用）。
+    ///
+    /// <para>
+    /// 目的：让"删除游戏 → 以后重新启动游戏"**必然新建 Session**，而不是复用删除前那条
+    /// —— 复用会让新计时接在旧起点上，违反「本次新的计时必须从新 Session 的起点开始」。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 只动这**一个** game 的会话，其它游戏的活跃会话分毫不动。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 走的是既有完整结束路径（<see cref="EndSessionAsync"/>：落尾段 daily → 跨日切分 →
+    /// 重算场次 → 同事务产出同步事实），**绝不**直接改数据库字段伪造会话结束。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 只对**内存里真实跟踪中**的会话生效；内存里没有就不动作（残留的库内活跃行由启动时的
+    /// 僵尸清理负责，这里不越权）。
+    /// </para>
+    /// </summary>
+    /// <returns>被摘除关联的 PID 数量（供调用方记日志）。</returns>
+    public async Task<int> EndSessionsForGameAsync(int gameId)
+    {
+        List<int> pids;
+        await _lock.WaitAsync();
+        try
+        {
+            if (!_gameSessions.TryGetValue(gameId, out var state) || state.ActivePids.Count == 0)
+            {
+                return 0;
+            }
+
+            pids = state.ActivePids.ToList();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+
+        var ended = 0;
+        foreach (var pid in pids)
+        {
+            // 复用既有语义：该游戏还有别的 PID 在跑时 EndSessionAsync 会提前返回，
+            // 全部 PID 都摘掉之后才真正结束会话（"最后一个 PID 消失才结束"）。
+            await EndSessionAsync(pid);
+            ended++;
+        }
+
+        return ended;
+    }
+
+    /// <summary>该 PID 当前被跟踪到的 GameId；未被跟踪返回 null。</summary>
+    public int? GetTrackedGameId(int pid)
+    {
+        lock (_pidToGameId)
+        {
+            return _pidToGameId.TryGetValue(pid, out var gameId) ? gameId : null;
+        }
+    }
+
+    /// <summary>
+    /// 心跳（带**归属校验**）：只相信"本轮扫描得到的 GameId"，不再无条件相信 <c>_pidToGameId[pid]</c> 的旧映射。
+    ///
+    /// ⚠️ Windows 会**复用 PID**：某个游戏退出后，同一个 PID 可能被分配给另一个游戏。
+    /// 旧映射一旦残留，就会把**新 Game 的时间记到旧 Game**头上。因此：
+    /// <code>
+    /// 扫描得到的 GameId == 已跟踪的 GameId  → 正常心跳（与 HeartbeatSessionAsync 行为完全一致）
+    /// 扫描得到的 GameId != 已跟踪的 GameId  → 重归属：先摘掉旧关联，再按新 Game 建/并入会话
+    /// </code>
+    ///
+    /// 重归属复用既有公开语义（各自加锁）：<see cref="EndSessionAsync"/> 在旧 Game 还有其它 PID 时
+    /// 会提前返回 —— 旧 Session 照旧活跃，"最后一个 PID 消失才结束"的分支一字未改。
+    ///
+    /// ⚠️ 两次调用之间不做补偿、也不引入第二套去重状态：生产环境只有 5 秒扫描循环调用这些方法，
+    /// 且逐个 <c>await</c> 串行，不存在并发插入。
+    /// </summary>
+    /// <returns>true = 发生了重归属（供调用方记日志）。</returns>
+    public async Task<bool> HeartbeatOrReassignAsync(
+        int pid, GameRecord game, DetectedProcess process, DateTime? nowTime = null)
+    {
+        var trackedGameId = GetTrackedGameId(pid);
+
+        if (trackedGameId is null)
+        {
+            // 理论上调用方只在"已跟踪"时进来；真遇到未跟踪就按新 Game 正常建立关联。
+            await StartSessionAsync(game, process, nowTime);
+            return false;
+        }
+
+        if (trackedGameId.Value == game.Id)
+        {
+            await HeartbeatSessionAsync(pid, nowTime);
+            return false;
+        }
+
+        await EndSessionAsync(pid, nowTime);
+        await StartSessionAsync(game, process, nowTime);
+        return true;
+    }
+
     public async Task EndSessionAsync(int pid, DateTime? endTime = null)
     {
         await _lock.WaitAsync();
@@ -197,11 +299,27 @@ public class GameSessionManager
             //    "会话已结束、daily 少算尾段增量"的不一致（Phase 2d 冻结的事务边界）。
             var dailyDeltas = ComputeDailyDeltas(lastFlush, end, deltaSeconds, DailyCutoffHour);
 
+            // 🔒 2026-10-11（实机事故修复）：**先落库、确认成功后才改内存态**。
+            //    此前无论写库成败都会 `_gameSessions.Remove(gameId)`：一旦那次原子写入整体回滚
+            //    （同步轮次长时间持有写锁 / SQLITE_BUSY / 任何 IO 失败），内存里会话没了、
+            //    数据库里该会话仍是 is_active = 1 —— 实机表现就是"正在玩的游戏不再被记录，重启才恢复"，
+            //    而且下一拍还会为同一个进程另起一条会话（同一游戏两条 active 行）。
+            //    写库失败时保持跟踪并返回：下一拍扫描会自然重试，秒数不会丢
+            //    （LastDailyFlushTime 未推进，尾段增量由 lastFlush → now 重新计算）。
+            var write = await _repo.EndSessionWithOutboxAsync(session.Id, end, totalDuration, dailyDeltas);
+
+            if (!write.SessionEnded)
+            {
+                // 整体回滚已由仓储完成（失败详情已在仓储侧按 ERROR + 堆栈记录，可诊断）。
+                state.ActivePids.Add(pid);
+                _pidToGameId[pid] = gameId;
+                return;
+            }
+
             session.EndTime = end;
             session.DurationSeconds = totalDuration;
             session.IsActive = false;
 
-            await _repo.EndSessionWithOutboxAsync(session.Id, end, totalDuration, dailyDeltas);
             _gameSessions.Remove(gameId);
 
             SessionEnded?.Invoke(this, session);
@@ -291,6 +409,44 @@ public class GameSessionManager
         var deltas = new List<DailyDurationDelta>(2);
         if (prevDelta > 0) deltas.Add(new DailyDurationDelta(date1.ToString("yyyy-MM-dd"), prevDelta));
         if (nextDelta > 0) deltas.Add(new DailyDurationDelta(date2.ToString("yyyy-MM-dd"), nextDelta));
+
+        // 边界恰好落在窗口端点（两侧都为 0）⇒ 整段归入起始日，绝不丢秒。
+        if (deltas.Count == 0)
+        {
+            return new[] { new DailyDurationDelta(date1.ToString("yyyy-MM-dd"), deltaSeconds) };
+        }
+
+        // ---- 收口（2026-10-09 冻结）----
+        // 分片之和必须**严格等于** canonical 秒数 `deltaSeconds`。
+        // 上面按"墙上时间"切分，当调用方传入的秒数与墙上跨度不一致时
+        // （远端落地用 canonical duration、心跳与结束路径有亚秒截断）会差几秒 ——
+        // 差额从最后一个分片起向前吸收：绝不留丢失，也绝不改变时间归属日。
+        var sum = 0;
+        foreach (var d in deltas) sum += d.DurationSeconds;
+
+        var diff = deltaSeconds - sum;
+        for (var i = deltas.Count - 1; i >= 0 && diff != 0; i--)
+        {
+            var adjusted = deltas[i].DurationSeconds + diff;
+
+            if (adjusted < 0)
+            {
+                diff = adjusted;                                              // 这一片不够扣，继续往前
+                deltas[i] = new DailyDurationDelta(deltas[i].Date, 0);
+            }
+            else
+            {
+                deltas[i] = new DailyDurationDelta(deltas[i].Date, adjusted);
+                diff = 0;
+            }
+        }
+
+        // 理论上不可能（把所有片扣成 0 之后仍有余额）：兜底归入起始日，绝不静默丢秒。
+        if (diff != 0)
+        {
+            deltas[0] = new DailyDurationDelta(deltas[0].Date, deltas[0].DurationSeconds + diff);
+        }
+
         return deltas;
     }
 }
