@@ -42,6 +42,19 @@ public sealed class GameSyncPayload
     /// </summary>
     [JsonPropertyName("notion_page_id")]
     public string? NotionPageId { get; set; }
+
+    /// <summary>
+    /// 封面图的**内容寻址引用**（schema v2，可选）：远端 <c>{根}/blobs/&lt;sha256&gt;</c>。
+    ///
+    /// ⚠️ 只保存 hash —— 图片本体走**独立二进制通道**，绝不 Base64 塞进 JSON batch。
+    /// ⚠️ 本地没有封面时**不写该字段**（绝不制造假 blob / 空 blob）。
+    /// </summary>
+    [JsonPropertyName("cover_blob_hash")]
+    public string? CoverBlobHash { get; set; }
+
+    /// <summary>图标同理（本地没有图标文件时为空）。</summary>
+    [JsonPropertyName("icon_blob_hash")]
+    public string? IconBlobHash { get; set; }
 }
 
 /// <summary>
@@ -81,6 +94,172 @@ public sealed class SessionSyncPayload
 }
 
 /// <summary>
+/// 日时长调整的**来源**（写入 <c>daily_duration_adjustments.source</c> 与 v2 payload）。
+/// 它是审计信息，不参与合并规则 —— 合并永远是"同 (game, 统计日) 上所有设备的 adjustment 相加"。
+/// </summary>
+public static class DailyAdjustmentSources
+{
+    /// <summary>用户在 UI 上手工录入的日时长增量。</summary>
+    public const string Manual = "manual";
+
+    /// <summary>Notion 导入路径产生的增量（<c>SyncDailyRecordFromNotionAsync</c>）。</summary>
+    public const string Notion = "notion";
+
+    /// <summary>
+    /// **历史残差**（一次性迁移）：该 (game, 统计日) **本库已经没有任何会话可查**，
+    /// 但当天确实落在"应用已有会话能力"的时间窗内 ⇒ 极可能是**曾经被会话统计出来、会话已不可恢复**的值
+    /// （2026-10-09 只读取证：9/23 Deathloop 7872s 曾由真实会话产生，数据根切换后会话只留在另一份库里）。
+    ///
+    /// 依据公式：<c>max(0, daily.duration_seconds − Σ sessions.duration_seconds)</c>。
+    /// ⚠️ 它是**混合语义**：既可能是丢失的会话时长，也可能混入了 Notion 往返的量化误差（±30~60s/行）。
+    /// </summary>
+    public const string HistoricalResidual = "historical_residual";
+
+    /// <summary>
+    /// **Notion 侧外部声明**（一次性迁移）：这个值不可能是本机算出来的 ——
+    ///   · 该 (game, 统计日) **本库没有任何会话**，且日期**早于本库最早会话日**（当时应用还没有会话数据）；或
+    ///   · 该日**已经有会话派生秒数**，而 <c>daily_summary</c> 仍高于它（会话之外另行声明的时间）。
+    /// 例：9/13 Deathloop 7.78h（早于最早会话 9/17）、10/6 Halo 的 34 分钟（当天已有会话）。
+    /// </summary>
+    public const string NotionExternal = "notion_external";
+
+    /// <summary>
+    /// ⚠️ 已废弃的历史来源名（v2 早期只用过它，语义过粗：把"会话不可恢复的残差"与
+    /// "Notion 侧声明"混成了一个词）。**不再用于新建**；migration 007 会把既有行改写为上两者之一。
+    /// 保留常量只为让老库/老 payload 能被识别。
+    /// </summary>
+    public const string Legacy = "legacy";
+}
+
+/// <summary>
+/// 日时长调整（DailyDurationAdjustment）的同步载荷快照（<b>schema v2</b>）。
+///
+/// 语义：**设备产生的不可变历史事实** —— "这台设备在某个统计日，为某个游戏额外声明了 N 秒"。
+///
+/// ⚠️ 它**不**改写 Session（不改 <c>duration_seconds</c>、不合并会话），
+///   也**不**把 <c>daily_summary</c> 变成跨设备实体；最终统计仍是本地派生：
+/// <code>
+/// daily_summary(game, date) = Σ session-derived duration + Σ adjustments(game, date, 全部设备)
+/// </code>
+///
+/// ⚠️ 合并规则是**相加**：A 设备 +30 分钟、B 设备 +20 分钟 → 最终 +50 分钟。
+///    **不取 max、不做 LWW**（两台设备各自的手工时长都是真事实，不能被对方覆盖掉）。
+/// </summary>
+public sealed class DailyAdjustmentSyncPayload
+{
+    [JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; set; } = DeviceSyncConstants.CurrentSchemaVersion;
+
+    /// <summary>
+    /// 跨设备稳定 identity：<c>sha256("adjustment|" + device_id + "|" + game_global_id + "|" + 统计日 + "|" + source)</c>。
+    /// 稳定 ⇒ 重复 Pull / 重复导入天然幂等（同一条事实永远同一个 id）；含 device_id ⇒ 不同设备是不同事实。
+    /// </summary>
+    [JsonPropertyName("global_id")]
+    public string GlobalId { get; set; } = "";
+
+    /// <summary>所属游戏（跨设备身份，绝不含本地 INTEGER id）。</summary>
+    [JsonPropertyName("game_global_id")]
+    public string GameGlobalId { get; set; } = "";
+
+    /// <summary>统计日（会计日，<c>yyyy-MM-dd</c>）。</summary>
+    [JsonPropertyName("statistical_date")]
+    public string StatisticalDate { get; set; } = "";
+
+    /// <summary>产生这条事实的设备（多设备相加的依据，也是审计依据）。</summary>
+    [JsonPropertyName("device_id")]
+    public string DeviceId { get; set; } = "";
+
+    /// <summary>增量秒数（**必须为正数**：adjustment 只做加法，负数会让对端统计倒退）。</summary>
+    [JsonPropertyName("duration_seconds")]
+    public int DurationSeconds { get; set; }
+
+    /// <summary>manual / notion / legacy，见 <see cref="DailyAdjustmentSources"/>。</summary>
+    [JsonPropertyName("source")]
+    public string Source { get; set; } = DailyAdjustmentSources.Manual;
+
+    [JsonPropertyName("created_at_utc")]
+    public string CreatedAtUtc { get; set; } = "";
+
+    /// <summary>
+    /// <b>撤销标记</b>（2026-10-11 新增，schema 3）：这条声明已被其产生设备**撤回**
+    /// （典型场景：用户在 Notion 侧删除了对应的每日记录页面）。
+    ///
+    /// <para>
+    /// ⚠️ 撤销**沿用同一个 identity**（<c>device + game + 统计日 + source</c>）——
+    /// 身份不变才能精确指向"被撤回的那一条"，绝不误伤别的来源、别的日期、别的设备；
+    /// <see cref="DurationSeconds"/> 恒为 0。
+    /// 对端收到后**删除该 identity 的声明并重算 `daily_summary`**（派生缓存因此可以变小）。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 这不是"把删除偷偷写成 0 秒记录"：0 秒仍是一条**有效声明**（会参与累加与收敛），
+    /// 而撤销表达的是"这条声明已不存在"。两者语义不同，必须在协议层可区分，
+    /// 所以用独立字段而不是 0 值来表达。
+    /// </para>
+    /// </summary>
+    [JsonPropertyName("revoked")]
+    public bool Revoked { get; set; }
+}
+
+/// <summary>
+/// <b>每日游玩分片排除事实</b>（2026-10-11，schema v2 实体扩展）。
+///
+/// <para>
+/// 语义：<c>session_global_id</c> 这条会话在 <c>statistical_date</c> 这个**会计日**上的
+/// **时长分片不计入统计**（既不计秒数，也不计场次）。
+/// </para>
+///
+/// <para>
+/// 为什么需要独立事实（而不是复用 Session 的 Delete / Adjustment）：
+/// <list type="bullet">
+///   <item><c>sessions</c> 一条会话是**整段**事实，其秒数按结算点被拆分到最多两个会计日。
+///        用整条 Session 的墓碑表达"只删某一天的分片"，会连带删掉另一个会计日的有效时长 ✗；</item>
+///   <item><c>daily_duration_adjustments</c> 是**正数加项**、identity 里没有会话维度，
+///        既无法表达"作废某条会话的某日分片"，也违反"不得把 daily 旧值伪造成声明"的契约 ✗；</item>
+///   <item><c>daily_summary</c> 是派生缓存，把它当同步实体同样违反契约 ✗。</item>
+/// </list>
+/// 所以引入这条**普通不可变事实**：它只描述"哪一分片不算"，不改写任何会话的游玩事实。
+/// </para>
+///
+/// <para>
+/// ⚠️ 只作废**明确列出**的会话分片：删除之后新产生的会话（新 <c>global_id</c>）永不受影响；
+/// 同一会话在其他会计日的分片也永不受影响。合并语义是**并集**（同一 identity 重复到达收敛为一条）。
+/// </para>
+/// </summary>
+public sealed class DailyPlayExclusionSyncPayload
+{
+    [JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; set; } = DeviceSyncConstants.CurrentSchemaVersion;
+
+    /// <summary>
+    /// 跨设备稳定 identity：
+    /// <c>sha256("play-exclusion|" + device_id + "|" + game_global_id + "|" + 统计日 + "|" + session_global_id)</c>。
+    /// 含 device_id ⇒ 不同设备各自表达自己的删除意图、互不覆盖；稳定 ⇒ 重复 Pull 天然幂等。
+    /// </summary>
+    [JsonPropertyName("global_id")]
+    public string GlobalId { get; set; } = "";
+
+    /// <summary>所属游戏（跨设备身份，绝不含本地 INTEGER id）。</summary>
+    [JsonPropertyName("game_global_id")]
+    public string GameGlobalId { get; set; } = "";
+
+    /// <summary>被作废分片所属的会计日（<c>yyyy-MM-dd</c>）。</summary>
+    [JsonPropertyName("statistical_date")]
+    public string StatisticalDate { get; set; } = "";
+
+    /// <summary>被作废分片所属会话的跨设备 identity（<c>sessions.global_id</c>）。</summary>
+    [JsonPropertyName("session_global_id")]
+    public string SessionGlobalId { get; set; } = "";
+
+    /// <summary>产生这条删除事实的设备（审计依据；也保证两端各自表达、互不覆盖）。</summary>
+    [JsonPropertyName("device_id")]
+    public string DeviceId { get; set; } = "";
+
+    [JsonPropertyName("created_at_utc")]
+    public string CreatedAtUtc { get; set; } = "";
+}
+
+/// <summary>
 /// 同步载荷的序列化 / 解析。**唯一真相**：payload 的字段名与 schema 版本在这里定义一次，
 /// 由 Outbox 写入方（2d）与 SyncEngine 的落地方共用，避免两边各写一套 JSON 形状。
 ///
@@ -97,6 +276,12 @@ public static class SyncPayloads
     public static string Serialize(GameSyncPayload payload) => JsonSerializer.Serialize(payload, Options);
 
     public static string Serialize(SessionSyncPayload payload) => JsonSerializer.Serialize(payload, Options);
+
+    /// <summary>序列化 v2 的日时长调整事实。</summary>
+    public static string Serialize(DailyAdjustmentSyncPayload payload) => JsonSerializer.Serialize(payload, Options);
+
+    /// <summary>序列化每日游玩分片排除事实（schema v2 实体扩展）。</summary>
+    public static string Serialize(DailyPlayExclusionSyncPayload payload) => JsonSerializer.Serialize(payload, Options);
 
     /// <param name="schemaVersion">payload 里声明的版本；无法解析时为 -1（用于 Deferred 台账留痕）。</param>
     public static bool TryParseGame(string? json, out GameSyncPayload? payload, out int schemaVersion, out string? error)
