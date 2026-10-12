@@ -252,6 +252,24 @@ dotnet run --project src/Sappfiler.App
 .\publish.cmd
 ```
 产物将输出至 `dist/Sappfiler-vX.X.X-win-x64/` 及对应 `.zip` 压缩包。
+版本号以仓库根 `Directory.Build.props` 为唯一来源（`VersionPrefix` / `VersionSuffix` / `FileVersion`），
+打包脚本会与 `src/Sappfiler.App/Package.appxmanifest` 的版本做一致性校验。
+
+### 配置与数据位置
+- **所有配置都在应用内完成**：启动后进入「设置」页填写 Notion Integration Token 与两个数据库 ID；
+  需要多设备同步时，在「设置 → 多设备同步」子页填写 WebDAV 服务地址与账号。
+- **不需要环境变量或 `.env` 文件**：程序不读取任何环境配置文件。凭据由应用写入本机数据目录，
+  WebDAV 密码使用 Windows DPAPI 加密存储（不落明文、不进入仓库）。
+- **数据目录**：默认 `%LocalAppData%\Sappfiler`（内含 `gametime.db`），可在设置页改为自定义位置。
+  ⚠️ **不要把这个目录复制到第二台机器** —— 两台设备必须各自持有独立设备身份，否则会互相覆盖。
+- 开发调试时可用环境变量 `GAMETIME_DB_PATH` 指向一个独立的数据库文件，避免影响日常数据。
+
+### 关于测试源码（重要）
+本仓库**不包含测试工程**：`tests/` 目录仅存在于开发者本地，未纳入版本控制（见 `.gitignore`）。
+这是刻意的公开边界，不影响产品的构建与运行：
+- 公开仓库构建只需 `dotnet build Sappfiler.slnx`（解决方案仅含三个产品工程，不引用测试工程）；
+- 打包脚本 `publish.ps1` 在缺少 `tests/` 时会自动跳过测试步骤，仍能正常出包；
+- 维护者在本地保留完整测试套件，发布前在本地执行（公开仓库中无法运行单元测试）。
 
 ---
 
