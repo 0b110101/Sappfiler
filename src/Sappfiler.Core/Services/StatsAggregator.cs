@@ -195,11 +195,11 @@ public static class StatsAggregator
         string prevEndStr = range.PrevEndDate.ToString("yyyy-MM-dd");
 
         var curSummaries = allSummaries
-            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, startStr) >= 0 && string.CompareOrdinal(s.Date, endStr) <= 0)
+            .Where(s => s.DurationSeconds > 0 && string.CompareOrdinal(s.Date, startStr) >= 0 && string.CompareOrdinal(s.Date, endStr) <= 0)
             .ToList();
 
         var prevSummaries = allSummaries
-            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, prevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevEndStr) <= 0)
+            .Where(s => s.DurationSeconds > 0 && string.CompareOrdinal(s.Date, prevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevEndStr) <= 0)
             .ToList();
 
         DateTime prevPrevStartDate = range.PeriodComparisonLabel switch
@@ -213,17 +213,17 @@ public static class StatsAggregator
         string prevPrevEndStr = prevPrevEndDate.ToString("yyyy-MM-dd");
 
         var prevPrevSummaries = allSummaries
-            .Where(s => s.DurationMinutes > 0 && string.CompareOrdinal(s.Date, prevPrevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevPrevEndStr) <= 0)
+            .Where(s => s.DurationSeconds > 0 && string.CompareOrdinal(s.Date, prevPrevStartStr) >= 0 && string.CompareOrdinal(s.Date, prevPrevEndStr) <= 0)
             .ToList();
 
         // 1. Current period metrics
-        int curTotalMinutes = curSummaries.Sum(s => s.DurationMinutes);
+        int curTotalMinutes = DurationMath.MinutesFromSeconds(curSummaries.Sum(s => (long)s.DurationSeconds));
         int curTotalSessions = curSummaries.Sum(s => Math.Max(0, s.SessionCount));
         var curActiveDays = curSummaries.Select(s => s.Date).Distinct().Count();
         int curAvgMinutes = curActiveDays > 0 ? (int)Math.Round((double)curTotalMinutes / curActiveDays) : 0;
 
         // 2. Previous period metrics
-        int prevTotalMinutes = prevSummaries.Sum(s => s.DurationMinutes);
+        int prevTotalMinutes = DurationMath.MinutesFromSeconds(prevSummaries.Sum(s => (long)s.DurationSeconds));
         int prevTotalSessions = prevSummaries.Sum(s => Math.Max(0, s.SessionCount));
         var prevActiveDays = prevSummaries.Select(s => s.Date).Distinct().Count();
         int prevAvgMinutes = prevActiveDays > 0 ? (int)Math.Round((double)prevTotalMinutes / prevActiveDays) : 0;
@@ -247,7 +247,7 @@ public static class StatsAggregator
             .Select(g =>
             {
                 var first = g.First();
-                int mins = g.Sum(x => x.DurationMinutes);
+                int mins = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds));
                 string name = string.IsNullOrWhiteSpace(first.GameName) ? $"Game #{first.GameId}" : first.GameName;
                 return new
                 {
@@ -337,7 +337,7 @@ public static class StatsAggregator
                     .Where(s => string.CompareOrdinal(s.Date, mStartStr) >= 0 && string.CompareOrdinal(s.Date, mEndStr) <= 0)
                     .ToList();
 
-                int mins = mSummaries.Sum(x => x.DurationMinutes);
+                int mins = DurationMath.MinutesFromSeconds(mSummaries.Sum(x => (long)x.DurationSeconds));
                 int sessions = mSummaries.Sum(x => Math.Max(0, x.SessionCount));
                 int gamesCount = mSummaries.Select(x => x.GameId).Distinct().Count();
 
@@ -387,7 +387,7 @@ public static class StatsAggregator
                     .Where(s => string.CompareOrdinal(s.Date, wStartStr) >= 0 && string.CompareOrdinal(s.Date, wEndStr) <= 0)
                     .ToList();
 
-                int mins = wSummaries.Sum(x => x.DurationMinutes);
+                int mins = DurationMath.MinutesFromSeconds(wSummaries.Sum(x => (long)x.DurationSeconds));
                 int sessions = wSummaries.Sum(x => Math.Max(0, x.SessionCount));
                 int gamesCount = wSummaries.Select(x => x.GameId).Distinct().Count();
 
@@ -430,7 +430,7 @@ public static class StatsAggregator
 
                 if (summariesByDate.TryGetValue(dStr, out var dayList))
                 {
-                    mins = dayList.Sum(x => x.DurationMinutes);
+                    mins = DurationMath.MinutesFromSeconds(dayList.Sum(x => (long)x.DurationSeconds));
                     sessions = dayList.Sum(x => Math.Max(0, x.SessionCount));
                     gamesCount = dayList.Select(x => x.GameId).Distinct().Count();
                 }
@@ -520,19 +520,19 @@ public static class StatsAggregator
         var curGames = curSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
         {
             Name = g.First().GameName,
-            Minutes = g.Sum(x => x.DurationMinutes)
+            Minutes = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds))
         });
 
         var prevGames = prevSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
         {
             Name = g.First().GameName,
-            Minutes = g.Sum(x => x.DurationMinutes)
+            Minutes = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds))
         });
 
         var prevPrevGames = prevPrevSummaries.GroupBy(s => s.GameId).ToDictionary(g => g.Key, g => new
         {
             Name = g.First().GameName,
-            Minutes = g.Sum(x => x.DurationMinutes)
+            Minutes = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds))
         });
 
         var earliestMap = earliestPlayDates != null
@@ -724,7 +724,7 @@ public static class StatsAggregator
     {
         var gamesGrouped = curSummaries
             .GroupBy(s => s.GameId)
-            .Select(g => new { GameId = g.Key, Minutes = g.Sum(x => x.DurationMinutes) })
+            .Select(g => new { GameId = g.Key, Minutes = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds)) })
             .Where(x => x.Minutes > 0)
             .ToList();
 
@@ -804,14 +804,14 @@ public static class StatsAggregator
         IReadOnlyList<DailySummary> curSummaries,
         IReadOnlyDictionary<int, string?>? gameCoverMap)
     {
-        var validSummaries = curSummaries.Where(s => s.DurationMinutes > 0).ToList();
+        var validSummaries = curSummaries.Where(s => s.DurationSeconds > 0).ToList();
         var grouped = validSummaries
             .GroupBy(s => s.GameId)
             .Select(g =>
             {
                 var first = g.First();
                 int activeDays = g.Select(x => x.Date).Distinct().Count();
-                int totalMinutes = g.Sum(x => x.DurationMinutes);
+                int totalMinutes = DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds));
                 string lastDate = g.Max(x => x.Date) ?? "";
                 string lastPlayedText = "最近";
                 if (DateTime.TryParse(lastDate, out var dt))
@@ -885,7 +885,7 @@ public static class StatsAggregator
         // 游戏名 -> 累计时长
         var gameMinutes = curSummaries
             .GroupBy(s => (s.GameName ?? "").Trim())
-            .ToDictionary(g => g.Key, g => g.Sum(x => x.DurationMinutes));
+            .ToDictionary(g => g.Key, g => DurationMath.MinutesFromSeconds(g.Sum(x => (long)x.DurationSeconds)));
 
         var genreMap = new Dictionary<string, (int GameCount, int TotalMinutes)>(StringComparer.OrdinalIgnoreCase);
 

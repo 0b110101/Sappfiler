@@ -54,6 +54,22 @@ public interface IDatabaseRepository
         IReadOnlyList<DailyDurationDelta> dailyDeltas);
     Task CleanupStaleSessionsAsync(TimeSpan staleThreshold);
 
+    /// <summary>
+    /// **日统计一致性自愈**（2026-10-11 A/B 实机对差根因修复）。
+    ///
+    /// <para>
+    /// 从 canonical 事实（<c>sessions</c> + <c>daily_duration_adjustments</c>）重新派生
+    /// <c>daily_summary</c> 的**缺行与偏差**：只升不降（来源不明的历史残差原样保留并报告）、
+    /// 孤儿事实只报告不推断归属、重复运行幂等；返回**实际修复的行数**。
+    /// </para>
+    ///
+    /// <para>
+    /// 默认**不恢复**"被 Notion 删除对账有意删除"的行（避免把用户已经删掉的 Notion 页面又建回来），
+    /// 这类行只进入审计报告，等人工裁定。
+    /// </para>
+    /// </summary>
+    Task<int> ReconcileDailySummariesAsync(bool apply = true);
+
     // Daily summaries & Stats
     Task AddSessionDurationToDailyAsync(string date, int gameId, int durationSeconds);
     Task<IReadOnlyList<DailySummary>> GetDailySummariesByDateAsync(string date);
@@ -118,7 +134,12 @@ public interface INotionClient
     /// 新建每日记录。gameName 是**游戏名**（不是拼好的标题），标题由实现方按
     /// 「gameName · X h」拼装；iconUrl 非空时同时设置页面 icon。
     /// </summary>
-    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId, string? iconUrl = null);
+    /// <remarks>
+    /// canonical seconds（2026-10-09）：<paramref name="durationSeconds"/> 非空时**以秒为准**，
+    /// 一次换算成小时（<c>round(seconds/3600, 2)</c>）再写标题与「时长」属性；
+    /// 为 null（历史/标题规范化等不写数值的路径）才退回旧的分钟口径。
+    /// </remarks>
+    Task<string> CreateDailyRecordAsync(string dailyDbId, string date, string gameName, int durationMinutes, string? gamePageId, string? iconUrl = null, int? durationSeconds = null);
 
     /// <summary>
     /// 更新每日记录。iconUrl 非空时一并把该页面 icon 设为 external 图片；
@@ -138,7 +159,7 @@ public interface INotionClient
     /// <param name="titleOverride">
     /// 可选的完整标题。若传入则直接使用，不按 gameName + durationMinutes 重拼（用于回刷保留原有时长后缀）。
     /// </param>
-    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null, bool writeDuration = false, string? titleOverride = null);
+    Task<bool> UpdateDailyRecordAsync(string pageId, int durationMinutes, string? gamePageId, string? gameName = null, string? iconUrl = null, bool writeDuration = false, string? titleOverride = null, int? durationSeconds = null);
 
     /// <summary>
     /// **只**改每日记录的标题（以及可选图标）—— 绝不碰「单次时长」「日期」这类数据属性。

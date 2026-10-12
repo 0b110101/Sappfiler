@@ -18,8 +18,28 @@ public static class DeviceSyncConstants
     /// <summary>
     /// 同步载荷的 schema 版本。payload 结构任何变化都要 +1；
     /// 服务端遇到不认识的版本必须**拒绝同步并提示客户端升级**，不要静默损坏数据。
+    ///
+    /// <para>
+    /// <b>v2（2026-10-08 批准）</b>：本端**发送 v2**、接收端**接受 v1 + v2**。
+    /// 新增内容只有两处扩展，<b>不重新定义任何既有事实语义</b>：
+    /// <list type="bullet">
+    ///   <item>新实体类型 <see cref="SyncEntityType.DailyAdjustment"/>（日时长调整）；</item>
+    ///   <item>Game 载荷的封面/图标 <b>blob hash 引用</b>（二进制走独立 blob 通道，不进 JSON batch）。</item>
+    /// </list>
+    /// v1 的 Game / Session 载荷字段与语义**逐字不变**，v2 客户端照常落地。
+    /// </para>
     /// </summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>
+    /// 本端**能理解**的最低 schema 版本。v1 载荷（既有 Game / Session）继续正常落地 ——
+    /// "升级到 v2" 不等于"拒绝旧包"，两台设备混版本期间必须能互相消费对方的历史事实。
+    /// </summary>
+    public const int MinSupportedSchemaVersion = 1;
+
+    /// <summary>本端能否理解该 schema 版本。低于下限或高于本端版本 → false（调用方按 unsupported_schema_version 处理）。</summary>
+    public static bool IsSupportedSchemaVersion(int version)
+        => version >= MinSupportedSchemaVersion && version <= CurrentSchemaVersion;
 
     /// <summary>
     /// **Backend 协议版本**（2f 冻结为 v1）。
@@ -46,7 +66,53 @@ public enum SyncEntityType
 {
     Session = 1,
     Game = 2,
-    GameMapping = 3
+    GameMapping = 3,
+
+    /// <summary>
+    /// 日时长调整（schema v2）：**设备产生的不可变历史事实**，
+    /// 表达"某设备在某统计日为某游戏额外声明了 N 秒"（手工录入 / Notion 导入 / 历史差值迁移）。
+    ///
+    /// ⚠️ 与 <see cref="Session"/> 严格分离：它不改写任何会话事实，也不把 <c>daily_summary</c> 变成同步实体 ——
+    ///    daily_summary 仍是本地派生数据（= Σ 会话派生时长 + Σ 本游戏该日的 adjustments）。
+    /// 合并语义：同一 (games, statistical_date) 上**所有设备的 adjustment 相加**（不是取 max、不是 LWW）。
+    /// </summary>
+    DailyAdjustment = 4,
+
+    /// <summary>
+    /// <b>跨设备身份关联</b>（2026-10-11 协议扩展）：表达"<c>superseded_global_id</c> 这个游戏 identity
+    /// 等同于 <c>canonical_global_id</c>"，并在同步网络上**传播**。
+    ///
+    /// <para>
+    /// ⚠️ 与 <see cref="GameMapping"/>（= 游戏↔Provider 路径映射，例如 Notion 页面 / Obsidian 路径）
+    /// **不是同一个概念**，因此单独占一个类型值，绝不复用。
+    /// </para>
+    ///
+    /// <para>
+    /// 语义要点：canonical 身份不是"谁先写谁赢"，而是**所有设备都能独立复算的纯函数**
+    /// （同一等价类中 <c>global_id</c> 按 <c>StringComparer.Ordinal</c> 最小者，
+    /// 见 <c>GameIdentityRules.ElectCanonical</c>）。因此乱序、重复、并发到达都能收敛，
+    /// 不会出现 A 存 <c>gB→gA</c>、B 存 <c>gA→gB</c> 的反向映射。
+    /// </para>
+    /// </summary>
+    GameIdentity = 5,
+
+    /// <summary>
+    /// <b>每日游玩分片排除事实</b>（2026-10-11 协议扩展）：表达"某条会话在某个会计日上的时长分片
+    /// 不计入统计"。
+    ///
+    /// <para>
+    /// ⚠️ 与 <see cref="Session"/> 的 Delete **严格分离**：一条 Session 是整段事实，其秒数按结算点
+    /// 被拆分到最多两个会计日；用整条 Session 的墓碑表达"只删某一天的分片"会连带删掉另一个会计日的
+    /// 有效时长。本实体以 <c>(game, 会计日, session_global_id)</c> 为粒度作废分片，其余分片分毫不动。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 与 <see cref="DailyAdjustment"/> 也**严格分离**：adjustment 是正数**加项**，
+    /// 而本实体是"某分片不计入"，不改变任何会话事实、也不改 <c>daily_summary</c> 的派生地位。
+    /// 合并语义为**并集**（同 identity 重复到达收敛为一条，永不丢失）。
+    /// </para>
+    /// </summary>
+    DailyPlayExclusion = 6
 }
 
 /// <summary>同步操作。DELETE 走 tombstone，不做物理删除。</summary>

@@ -85,10 +85,31 @@ public class GameSession
 
 public class DailySummary
 {
+    private int _durationSeconds;
+
     public int Id { get; set; }
     public string Date { get; set; } = string.Empty; // Format: "yyyy-MM-dd"
     public int GameId { get; set; }
-    public int DurationSeconds { get; set; }
+
+    /// <summary>
+    /// canonical fact（秒）。统计**一律**以它为准；<see cref="DurationMinutes"/> 只是派生/显示。
+    ///
+    /// <para>
+    /// 兼容回退：仅为"没有秒字段的历史对象 / 测试夹具"服务 —— 当秒为 0 而分钟 &gt; 0 时按
+    /// <c>分钟 × 60</c> 反推。真实数据里两列始终由写库路径同时写入（<c>minutes = seconds / 60</c>），
+    /// 因此这个回退不会改变任何真实事实（30 秒的行仍然是 30，不会被分钟 0 抹掉）。
+    /// </para>
+    /// </summary>
+    public int DurationSeconds
+    {
+        get => _durationSeconds > 0 ? _durationSeconds : DurationMinutes * 60;
+        set => _durationSeconds = value;
+    }
+
+    /// <summary>
+    /// 派生的兼容/显示字段（= <see cref="DurationSeconds"/> / 60，写库时**只截断一次**）。
+    /// ⚠️ 任何统计都不许直接对多行的它求和（那是 Σ floor(seconds/60)，会丢秒）。
+    /// </summary>
     public int DurationMinutes { get; set; }
     public int SessionCount { get; set; } = 1;
     public string SyncStatus { get; set; } = "pending"; // "synced", "pending", "error"
@@ -176,6 +197,13 @@ public class NotionDailyRecordItem
 
     public string Date { get; set; } = string.Empty;
     public int DurationMinutes { get; set; }
+
+    /// <summary>
+    /// canonical seconds（2026-10-09）：Notion 侧 0.01h 声明解析后的**秒**值
+    /// （<c>round(hours × 3600)</c> 一次换算）。事实层以它为准，<see cref="DurationMinutes"/> 只是派生/显示。
+    /// 老数据或测试构造的 item 可能没有它（为 0）→ 消费方退回 <c>DurationMinutes × 60</c>。
+    /// </summary>
+    public int DurationSeconds { get; set; }
 
     /// <summary>
     /// 「单次时长」原始值的单位是不是**分钟**（从标题后缀判定，如「… · 42 min」）。

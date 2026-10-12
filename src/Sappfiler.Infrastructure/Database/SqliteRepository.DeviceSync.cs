@@ -565,13 +565,20 @@ public partial class SqliteRepository
     }
 
     /// <summary>
-    /// 重算当日有效场次。**逐字复刻** <see cref="EndSessionAsync"/> 的既有口径：
-    /// 用 <c>substr(start_time,1,10)</c>（**日历日**，不是会计日）分组、只统计 ≥60 秒的会话、
-    /// 以及对"外部/Notion 手工录入时长"的 manualBonus 判定。
-    /// ⚠️ 这段口径是既有行为，不要"顺手修正"（改动会波及 Notion 同步的场次数字）。
+    /// 重算当日有效场次（**统一口径的唯一实现**见
+    /// <see cref="ComputeSessionCountForAccountingDate"/>）：
+    /// ≥60 秒的会话按**起始时刻的会计日**计数，再加上「声明/残差 ≥60s 计 1 次」。
+    ///
+    /// <para>
+    /// 🔧 2026-10-11（A/B 实机对差根因修复）：旧实现有两处缺陷 ——
+    /// ① 用 <c>substr(start_time,1,10)</c>（**日历日**）分组，cutoff ≠ 24 时会把跨结算点的会话
+    ///    计到错误的日期；② 只在"带 delta 的结束路径"被调用，**僵尸/陈旧收尾传空增量** ⇒
+    ///    该 (game, 日) 的场次永远停留在 INSERT 默认值 1（实测 A 端 9/19、9/20 的 1 vs 3 就是这么来的）。
+    /// 现在两处都按会计日口径统一，并由 daily 一致性审计兜底。
+    /// </para>
     ///
     /// ⚠️ 同步（非 async）：远端会话落地路径 <c>ApplyRemoteSession</c> 本身是同步的，
-    /// 而同一条口径只能有**一份**实现。SQLite + Dapper 在此处全程同步执行，语义与原先一致。
+    /// 而同一条口径只能有**一份**实现。SQLite + Dapper 在此处全程同步执行。
     /// </summary>
     private static void RecomputeSessionCount(
         SqliteConnection conn, SqliteTransaction tx, int sessionId, int durationSeconds)
@@ -579,50 +586,26 @@ public partial class SqliteRepository
         // 只有当会话时长 >= 60 秒时才计入有效游玩次数；低于 60 秒的微小启动忽略。
         if (durationSeconds < 60) return;
 
-        var sessionRow = conn.QuerySingleOrDefault<dynamic>(
-            "SELECT game_id, substr(start_time, 1, 10) AS session_date FROM sessions WHERE id = @sessionId;",
+        var row = conn.QuerySingleOrDefault<SessionFactRow>(
+            """
+            SELECT game_id AS GameId, start_time AS StartTime, duration_seconds AS DurationSeconds
+            FROM sessions WHERE id = @sessionId;
+            """,
             new { sessionId }, tx);
 
-        if (sessionRow is null) return;
+        if (row is null) return;
 
-        int gameId = (int)sessionRow.game_id;
-        string date = (string)sessionRow.session_date;
-
-        var validSessionsCount = conn.ExecuteScalar<int>(
-            """
-            SELECT COUNT(*) FROM sessions
-            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date AND duration_seconds >= 60;
-            """,
-            new { gameId, date }, tx);
-
-        if (validSessionsCount <= 0) return;
-
-        var localSessionsTotalSecs = conn.ExecuteScalar<int>(
-            """
-            SELECT COALESCE(SUM(duration_seconds), 0) FROM sessions
-            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date;
-            """,
-            new { gameId, date }, tx);
-
-        var dailyRow = conn.QuerySingleOrDefault<DailyDurationCheck>(
-            "SELECT duration_seconds, session_count FROM daily_summary WHERE game_id = @gameId AND date = @date LIMIT 1;",
-            new { gameId, date }, tx);
-
-        int manualBonusSessions = 0;
-        if (dailyRow != null && dailyRow.duration_seconds > localSessionsTotalSecs + 60)
+        if (!TryParseWallClock(row.StartTime, out var start))
         {
-            // 存在外部 / Notion 手动录入的时长（未通过本地进程捕获），计入该手动游玩次数
-            manualBonusSessions = 1;
+            // 旧口径会静默跳过（并留下一个错误场次）。这里必须可见：交给 daily 一致性审计报告。
+            AppLog.Warn($"[日统计] 会话 {sessionId} 的 start_time 无法解析，场次计数跳过（由 daily 一致性审计报告）");
+            return;
         }
 
-        int finalSessionCount = validSessionsCount + manualBonusSessions;
+        var cutoffHour = ReadDailyCutoffHour(conn, tx);
+        var statisticalDate = GameTimeTracker.Core.Services.AccountingDateHelper.GetAccountingDateString(start, cutoffHour);
 
-        conn.Execute(
-            """
-            UPDATE daily_summary SET session_count = @finalSessionCount
-            WHERE game_id = @gameId AND date = @date;
-            """,
-            new { gameId, date, finalSessionCount }, tx);
+        ApplyUnifiedSessionCount(conn, tx, row.GameId, statisticalDate, cutoffHour);
     }
 
     // ==================== 远端变更落地（数据 + 游标同一事务） ====================
@@ -854,7 +837,9 @@ public partial class SqliteRepository
     /// 读取本机跨日结算小时（settings.daily_cutoff_hour，缺省/非法时 24）。
     /// 远端会话落地时必须按**本机**口径归属统计日，因此要在同一事务里读本机设置。
     /// </summary>
-    private static int ReadDailyCutoffHour(SqliteConnection conn, SqliteTransaction tx)
+    // ⚠️ tx 允许为空：一次性历史迁移（DeviceSyncSchema migration 005）在**没有**事务的情况下
+    //    也要读它，以保证"日时长调整"与"会话派生"用同一个结算口径。
+    internal static int ReadDailyCutoffHour(SqliteConnection conn, SqliteTransaction? tx)
     {
         var raw = conn.ExecuteScalar<string?>(
             "SELECT value FROM settings WHERE key = 'daily_cutoff_hour';", transaction: tx);
@@ -2043,6 +2028,62 @@ public partial class SqliteRepository
 
     private static string UtcNowIso(DateTime utc)
         => utc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// 按统一场次口径重写某 (game, 统计日) 的 <c>session_count</c>（行不存在则不动）。
+    /// </summary>
+    private static void ApplyUnifiedSessionCount(
+        SqliteConnection conn, SqliteTransaction? tx, long gameId, string statisticalDate, int cutoffHour,
+        int preservedResidualSeconds = 0)
+    {
+        var exists = conn.ExecuteScalar<int>(
+            "SELECT COUNT(*) FROM daily_summary WHERE game_id = @gameId AND date = @date;",
+            new { gameId, date = statisticalDate }, tx) > 0;
+
+        if (!exists) return;
+
+        var count = ComputeSessionCountForAccountingDate(
+            conn, tx, gameId, statisticalDate, cutoffHour, preservedResidualSeconds);
+
+        conn.Execute(
+            """
+            UPDATE daily_summary SET session_count = @count
+            WHERE game_id = @gameId AND date = @date;
+            """,
+            new { count, gameId, date = statisticalDate }, tx);
+    }
+
+    /// <summary>
+    /// <b>「本机重新激活意图优先」</b>的 SQL 条件（2026-10-12）：远端 Game Delete **不得归档**
+    /// 那些"在本次删除发生之后又被本机**真正重新激活**过"的行 —— 典型场景是用户删了游戏、
+    /// 之后又重新启动它（<c>GetOrCreateGameAsync</c> 复用同一身份并重新激活）。
+    ///
+    /// <para>
+    /// ⚠️ <b>判据必须是 <c>games.reactivated_at_utc</c>（migration 016），不能是 <c>updated_at</c>。</b>
+    /// 历史缺陷：<c>updated_at</c> 会被监听循环每 5 秒刷新，导致**只要游戏在运行**
+    /// 就永久拒绝一切远端 Delete（而该 Delete 的游标已越过、不会重发）⇒ 两端长期分歧。
+    /// <c>reactivated_at_utc</c> 只在真实 archived→active 转换时写入、本机删除时清空、
+    /// 后台心跳绝不触碰，因此是稳定且单调的"用户意图"。
+    /// </para>
+    ///
+    /// <para>
+    /// 时间统一用 <c>julianday()</c> 归一化后比较：两侧都可能是 ISO8601 带 <c>Z</c>
+    ///（<c>reactivated_at_utc</c> / <c>created_at_utc</c>），也可能来自 <c>CURRENT_TIMESTAMP</c>
+    /// （<c>YYYY-MM-DD HH:MM:SS</c>）—— 直接做字符串比较会失效。带毫秒的输入同样被正确解析。
+    /// 归一化到**秒**精度：同一秒内的两个事件视为"不更晚"（保守，倾向允许归档）。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ <c>@deletionAtUtc</c> 为 NULL / 空串时条件恒真 ⇒ 保持既有行为（无条件归档）：
+    /// 绝不因为"缺少时间信息"就把删除语义削弱。
+    /// ⚠️ <c>reactivated_at_utc</c> 为 NULL（从未重新激活 / 旧库升级后）⇒ 按 <c>1970-01-01</c> 处理
+    /// ⇒ 同样等价于既有行为，旧库行为逐字不变。
+    /// ⚠️ 本条件**只影响归档方向**：墓碑照常写入，因此"远端旧 Create 复活"仍然被挡。
+    /// </para>
+    /// </summary>
+    private const string LocalIntentWinsSql =
+        " AND (@deletionAtUtc IS NULL OR @deletionAtUtc = '' "
+        + "      OR julianday(COALESCE(reactivated_at_utc, '1970-01-01 00:00:00')) <= julianday(@deletionAtUtc))";
 }
 
 /// <summary>

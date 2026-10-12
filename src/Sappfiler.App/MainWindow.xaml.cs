@@ -535,6 +535,36 @@ public sealed partial class MainWindow : Window
         await _sessionManager.InitializeAsync();
         await _sessionManager.CleanupZombieSessionsAsync();
 
+        // 🔧 2026-10-11（A/B 实机对差根因修复）：daily_summary 是**派生缓存**，但它可以被
+        //    「Notion 删除对账」单独删行（DeleteDailySummariesAsync）而**会话事实一行未动**；
+        //    删除后没有任何路径会从 canonical 事实重新派生 ⇒ 该 (game, 日) 的时长永久消失。
+        //
+        //    ⚠️ 启动阶段**只做只读审计**（apply: false）：任何有数据影响的操作
+        //    （补缺行 / 恢复被 Notion 删除的行 / 场次归一）都必须由人工显式授权后另行调用
+        //    ReconcileDailySummariesAsync(apply: true) / ReportAsync(..., restoreNotionDeletedRows: true,
+        //    applyCounts: true)。启动绝不改动统计数字，只把差额写进日志供诊断。
+        try
+        {
+            // 详细报告只在具体仓储上（接口只暴露"修复行数"）——这里必须走只读形态。
+            if (_repo is SqliteRepository concreteRepo)
+            {
+                var audit = await concreteRepo.ReconcileDailySummariesReportAsync(apply: false);
+
+                var actionable = audit.Issues.Count(i => !i.Fixed);
+                if (actionable > 0 || audit.Orphans.Count > 0)
+                {
+                    AppLog.Warn(
+                        $"[日统计审计] 启动只读审计（未写库）：{audit.Summary}；"
+                        + $"待人工裁定 {actionable} 项、孤儿 {audit.Orphans.Count} 条");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 审计失败绝不影响统计事实与游戏监听（本地计时永远优先）。
+            AppLog.Warn($"[日统计审计] 启动审计失败（不影响统计事实）：{ex.Message}");
+        }
+
         // 1. Load Notion credentials & DB IDs from SQLite database
         try
         {

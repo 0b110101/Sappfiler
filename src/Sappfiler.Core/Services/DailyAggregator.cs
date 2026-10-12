@@ -156,21 +156,21 @@ public static class DailyAggregator
             .ToDictionary(g => g.Key, g => g.ToList());
 
         // Pre-compute daily totals and games breakdown
-        var dailyBreakdowns = new Dictionary<string, (int totalMins, List<GameTimeBreakdown> games)>();
+        var dailyBreakdowns = new Dictionary<string, (int totalMins, long totalSeconds, List<GameTimeBreakdown> games)>();
         foreach (var kvp in summariesByDate)
         {
             var dateStr = kvp.Key;
             var list = kvp.Value;
-            var total = list.Sum(s => s.DurationMinutes);
+            var total = DurationMath.MinutesFromSeconds(list.Sum(s => (long)s.DurationSeconds));
             var breakdown = list
-                .OrderByDescending(s => s.DurationMinutes)
+                .OrderByDescending(s => s.DurationSeconds)
                 .Select(s => new GameTimeBreakdown(
                     GameName: string.IsNullOrWhiteSpace(s.GameName) ? $"Game #{s.GameId}" : s.GameName,
                     Minutes: s.DurationMinutes,
                     DurationText: FormatDuration(s.DurationMinutes)
                 ))
                 .ToList();
-            dailyBreakdowns[dateStr] = (total, breakdown);
+            dailyBreakdowns[dateStr] = (total, list.Sum(s => (long)s.DurationSeconds), breakdown);
         }
 
         // Calculate maxMinutes within the window (excluding future days)
@@ -181,7 +181,8 @@ public static class DailyAggregator
             if (d <= refDate)
             {
                 var dStr = d.ToString("yyyy-MM-dd");
-                if (dailyBreakdowns.TryGetValue(dStr, out var info) && info.totalMins > 0)
+                // 存在性判定用**秒**：当天哪怕只有 30 秒也是真玩过（不能因为分钟为 0 就当没玩）
+                if (dailyBreakdowns.TryGetValue(dStr, out var info) && info.totalSeconds > 0)
                 {
                     if (info.totalMins > maxMinutes) maxMinutes = info.totalMins;
                     activeDays++;
@@ -216,7 +217,10 @@ public static class DailyAggregator
                 dailyBreakdowns.TryGetValue(dateStr, out var info);
                 int mins = isFuture ? 0 : info.totalMins;
                 var games = isFuture ? new List<GameTimeBreakdown>() : (info.games ?? new List<GameTimeBreakdown>());
-                int level = isFuture ? 0 : CalculateHeatmapLevel(mins, maxMinutes);
+                // 有真实时长（≥1 秒）至少算 level 1，否则 <60 秒的一天会在热力图上消失
+                int level = isFuture
+                    ? 0
+                    : (info.totalSeconds > 0 ? Math.Max(1, CalculateHeatmapLevel(mins, maxMinutes)) : 0);
 
                 // Build rich tooltip
                 string tooltip;
@@ -279,11 +283,18 @@ public static class DailyAggregator
         var yesterdayStr = referenceDate.AddDays(-1).ToString("yyyy-MM-dd");
 
         // 1. Group summaries by date and calculate totals
+        // 分钟口径：**先按秒求和、最后除以 60 一次**（绝不逐行截断再相加）
         var dateTotals = allSummaries
             .GroupBy(s => s.Date)
-            .ToDictionary(g => g.Key, g => g.Sum(s => s.DurationMinutes));
+            .ToDictionary(g => g.Key, g => DurationMath.MinutesFromSeconds(g.Sum(s => (long)s.DurationSeconds)));
+
+        // 存在性口径：有没有"真玩过"必须看秒（30 秒也是玩过）
+        var dateSeconds = allSummaries
+            .GroupBy(s => s.Date)
+            .ToDictionary(g => g.Key, g => g.Sum(s => (long)s.DurationSeconds));
 
         var todayMinutes = dateTotals.GetValueOrDefault(todayStr, 0);
+        var todaySeconds = dateSeconds.GetValueOrDefault(todayStr, 0L);
         var yesterdayMinutes = dateTotals.GetValueOrDefault(yesterdayStr, 0);
 
         double todayDelta = 0.0;
@@ -334,9 +345,9 @@ public static class DailyAggregator
         int streak = 0;
         var checkDate = referenceDate.Date;
         // If today has games, start counting from today; otherwise if yesterday has games, start from yesterday
-        if (dateTotals.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0) > 0)
+        if (dateSeconds.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0L) > 0)
         {
-            while (dateTotals.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0) > 0)
+            while (dateSeconds.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0L) > 0)
             {
                 streak++;
                 checkDate = checkDate.AddDays(-1);
@@ -345,7 +356,7 @@ public static class DailyAggregator
         else
         {
             checkDate = checkDate.AddDays(-1);
-            while (dateTotals.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0) > 0)
+            while (dateSeconds.GetValueOrDefault(checkDate.ToString("yyyy-MM-dd"), 0L) > 0)
             {
                 streak++;
                 checkDate = checkDate.AddDays(-1);
@@ -373,12 +384,14 @@ public static class DailyAggregator
         {
             var dStr = d.ToString("yyyy-MM-dd");
             var mins = dateTotals.GetValueOrDefault(dStr, 0);
+            var daySeconds = dateSeconds.GetValueOrDefault(dStr, 0L);
             var count = dateGameCounts.GetValueOrDefault(dStr, 0);
             heatmapDays.Add(new HeatmapDayModel(
                 Date: d,
                 DurationMinutes: mins,
                 GameCount: count,
-                Level: CalculateHeatmapLevel(mins, 360),
+                // 同上：有秒数就算有活动（否则 <60 秒的一天在月历热力图上显示为空白）
+                Level: daySeconds > 0 ? Math.Max(1, CalculateHeatmapLevel(mins, 360)) : 0,
                 IsCurrentMonth: d.Month == referenceDate.Month,
                 IsToday: d.Date == referenceDate.Date
             ));
@@ -387,7 +400,7 @@ public static class DailyAggregator
         // 5. Today's Top Games
         var todayGames = allSummaries
             .Where(s => s.Date == todayStr)
-            .OrderByDescending(s => s.DurationMinutes)
+            .OrderByDescending(s => s.DurationSeconds)
             .ToList();
 
         var topGamesList = todayGames.Select(g => new GamePlayProgress(
@@ -398,7 +411,7 @@ public static class DailyAggregator
             Minutes: g.DurationMinutes,
             DurationText: FormatDuration(g.DurationMinutes),
             // 进度条 = 该游戏时长占当日总时长的比例（此前是相对最长游戏，单游戏恒 100%、多游戏第二名恒低）
-            Percentage: todayMinutes > 0 ? Math.Min(1.0, (double)g.DurationMinutes / todayMinutes) : 0.0
+            Percentage: todaySeconds > 0 ? Math.Min(1.0, (double)g.DurationSeconds / todaySeconds) : 0.0
         )).ToList();
 
         // 6. Generate 52-week (1-year) Activity Heatmap (7x52 = 364 days)

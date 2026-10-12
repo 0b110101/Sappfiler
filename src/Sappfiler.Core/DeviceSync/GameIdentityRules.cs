@@ -102,6 +102,36 @@ public sealed record GameIdentityDecision(
 /// </summary>
 public static class GameIdentityRules
 {
+    /// <summary>
+    /// <b>canonical 身份裁决</b>（2026-10-11 冻结）：同一等价类内，取 <c>global_id</c>
+    /// 按 <see cref="StringComparer.Ordinal"/> **最小**的那个作为 canonical。
+    ///
+    /// <para>
+    /// 为什么必须是纯函数：身份关联要在多台设备之间传播，任何"本地优先 / 先到先得 / 时间戳"
+    /// 规则都会让两端各自算出不同的 canonical，从而出现
+    /// <c>A: gB→gA</c> 与 <c>B: gA→gB</c> 的反向映射（甚至环）。改为"集合的最小 id"后：
+    /// <list type="bullet">
+    /// <item>结果只依赖**身份集合**，与到达顺序、设备、时间无关 ⇒ 可重放、可验证；</item>
+    /// <item>集合只会随同步**单调增长** ⇒ canonical 只会向更小的 id 迁移，不会来回翻转；</item>
+    /// <item>任何方向相反的旧映射都会在复算时被改写成"指向最小 id"，因此不可能形成环。</item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>⚠️ 空字符串/空白 id 不参与裁决（它们不是有效 identity）。</para>
+    /// </summary>
+    public static string? ElectCanonical(IEnumerable<string?> globalIds)
+    {
+        string? best = null;
+        foreach (var raw in globalIds)
+        {
+            var id = (raw ?? string.Empty).Trim();
+            if (id.Length == 0) continue;
+            if (best is null || string.CompareOrdinal(id, best) < 0) best = id;
+        }
+
+        return best;
+    }
+
     public static GameIdentityDecision Decide(
         GameIdentityFacts remote,
         IReadOnlyList<LocalGameCandidate> localCandidates,

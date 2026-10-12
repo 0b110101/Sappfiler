@@ -54,11 +54,28 @@ internal static class DailyRecordTitle
         => Math.Round(durationMinutes / 60.0, 2);
 
     /// <summary>
+    /// **canonical seconds → 小时（2 位小数）**：把本地秒级事实写向 Notion 时**唯一**允许的换算入口。
+    ///
+    /// ⚠️ 不要用 <see cref="MinutesToHours"/> 处理本地秒数：那会先 `seconds / 60` 截断一次、
+    /// 再 `round(/60, 2)`，形成"两套独立取整"（9/23 的 7872s 就是这么被写成 2.18 h 的；
+    /// 按秒一次换算应为 <c>round(7872/3600, 2) = 2.19 h</c>）。
+    /// 事实层永远是秒：<c>sessions.duration_seconds</c> / <c>daily_summary.duration_seconds</c>。
+    /// </summary>
+    internal static double SecondsToHours(int durationSeconds)
+        => Math.Round(durationSeconds / 3600.0, 2);
+
+    /// <summary>
     /// 拼装每日记录标题：时长以小时显示（2 位小数），如「Master Key · 0.7 h」。
     /// 参数是**游戏名**，不是拼好的标题 —— 传完整标题进来会拼出「X · 0.7 h · 0.7 h」。
     /// </summary>
     internal static string Build(string gameName, int durationMinutes)
-        => $"{gameName} · {MinutesToHours(durationMinutes)} h";
+        => BuildFromHours(gameName, MinutesToHours(durationMinutes));
+
+    /// <summary>
+    /// 同上，但直接用**小时数**拼标题（canonical seconds 路径专用：避免"先按分钟截断、再 round"的两次取整）。
+    /// </summary>
+    internal static string BuildFromHours(string gameName, double hours)
+        => $"{gameName} · {hours} h";
 
     /// <summary>剥掉标题末尾的时长后缀，得到裸游戏名。</summary>
     internal static string StripSuffix(string rawTitle)
@@ -411,6 +428,8 @@ public class NotionClient : INotionClient
                     var durationUnit = DetectDurationUnit(rawTitle);
                     var durationRaw = ExtractDouble(props, "时长", "单次时长", "时长(分)", "Duration", "DurationMinutes");
                     var duration = RawDurationToMinutes(durationRaw, rawTitle);
+                    // canonical seconds：外部声明**一次**换算成秒（分钟字段只留给显示/旧字段）
+                    var durationSeconds = RawDurationToSeconds(durationRaw, rawTitle);
                     var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
 
@@ -424,6 +443,7 @@ public class NotionClient : INotionClient
                             TitlePropertyName = string.IsNullOrWhiteSpace(titlePropName) ? "游戏动态" : titlePropName,
                             Date = date,
                             DurationMinutes = duration,
+                            DurationSeconds = durationSeconds,
                             DurationUnitIsMinutes = durationUnit == DurationUnit.Minutes,
                             GameMasterPageId = gameMasterPageId,
                             Status = status
@@ -447,10 +467,18 @@ public class NotionClient : INotionClient
         string gameName,
         int durationMinutes,
         string? gamePageId,
-        string? iconUrl = null)
+        string? iconUrl = null,
+        int? durationSeconds = null)
     {
         var cleanDbId = dailyDbId.Replace("-", "");
-        var titleText = DailyRecordTitle.Build(gameName, durationMinutes);
+
+        // canonical seconds（2026-10-09）：调用方给了秒就以秒为准，**一次**换算成小时；
+        // 没给（历史/标题规范化等不写数值的路径）才退回旧的分钟口径。
+        var hours = durationSeconds is { } secs
+            ? DailyRecordTitle.SecondsToHours(secs)
+            : DailyRecordTitle.MinutesToHours(durationMinutes);
+
+        var titleText = DailyRecordTitle.BuildFromHours(gameName, hours);
         // ⚠️ 每日时长表的属性名：游戏动态 ／ 时长 ／ 关联游戏 ／ 绑定状态
         //    写错名字 Notion 会返回 400（property does not exist），同步直接失败。
         //    注意**总表**的 title 属性仍叫「游戏名称」，别一起改了。
@@ -458,8 +486,8 @@ public class NotionClient : INotionClient
         {
             ["游戏动态"] = new { title = new[] { new { text = new { content = titleText } } } },
             ["日期"] = new { date = new { start = date } },
-            // 值是**小时**（2 位小数），不是分钟 —— 与标题后缀保持一致。
-            ["时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) },
+            // 值是**小时**（2 位小数），不是分钟 —— 与标题后缀保持一致（同上面那次换算，绝不第二次取整）。
+            ["时长"] = new { number = hours },
             ["绑定状态"] = new { select = new { name = !string.IsNullOrEmpty(gamePageId) ? "已绑定" : "未绑定" } }
         };
 
@@ -490,7 +518,8 @@ public class NotionClient : INotionClient
         string? gameName = null,
         string? iconUrl = null,
         bool writeDuration = false,
-        string? titleOverride = null)
+        string? titleOverride = null,
+        int? durationSeconds = null)
     {
         var cleanPageId = pageId.Replace("-", "");
         // 属性名同 CreateDailyRecordAsync：游戏动态 / 时长 / 关联游戏
@@ -502,8 +531,14 @@ public class NotionClient : INotionClient
             //    历史记录在 Notion 上的数值是权威 —— 拿本地缓存去覆盖它属于毁灭性错误
             //    （2026-09-19 回刷链路就是这么篡改了 QA 786 条记录）。
             //    只改"呈现"（标题 / 关系 / 图标）的调用必须传 writeDuration: false。
-            // 值是**小时**（2 位小数），与创建时以及标题后缀保持一致
-            properties["时长"] = new { number = DailyRecordTitle.MinutesToHours(durationMinutes) };
+            // 值是**小时**（2 位小数），与创建时以及标题后缀保持一致。
+            // canonical seconds：给了秒就一次换算成小时（避免分钟截断 + round 的两次取整）。
+            properties["时长"] = new
+            {
+                number = durationSeconds is { } secs
+                    ? DailyRecordTitle.SecondsToHours(secs)
+                    : DailyRecordTitle.MinutesToHours(durationMinutes)
+            };
         }
 
         if (!string.IsNullOrEmpty(titleOverride))
@@ -983,21 +1018,30 @@ public class NotionClient : INotionClient
     /// 只有标题里认不出单位时（用户只写了名字），才回落到数值大小猜测：
     /// 单日单游戏不可能超过 24 小时，故 &gt; 24 视为分钟。
     /// </remarks>
-    private static int RawDurationToMinutes(double? raw, string? title)
+    /// <summary>
+    /// 把 Notion 的「时长/单次时长」原始值**一次**换算成 canonical seconds。
+    ///
+    /// <para>
+    /// ⚠️ 外部声明只有 0.01h（≈36 秒）分辨率，所以必须直接 <c>round(value × 3600)</c>；
+    /// **绝不**"小时 → 分钟 → 秒"中转 —— 那会把 7.79h 先截断成 467 分钟，回推时变成 7.78h。
+    /// 旧行可能存的是**分钟**（标题带 min，或数值 &gt; 24），那时按 <c>round(value × 60)</c>。
+    /// </para>
+    /// </summary>
+    private static int RawDurationToSeconds(double? raw, string? title)
     {
         if (raw is { } value && value > 0)
         {
             switch (DetectDurationUnit(title))
             {
-                case DurationUnit.Minutes: return (int)Math.Round(value);
-                case DurationUnit.Hours: return (int)Math.Round(value * 60.0);
+                case DurationUnit.Minutes: return (int)Math.Round(value * 60.0);
+                case DurationUnit.Hours: return (int)Math.Round(value * 3600.0);
             }
 
             // 标题里没有可识别的单位：只能按数量级猜
             const double MaxPlausibleHours = 24.0;
             return value > MaxPlausibleHours
-                ? (int)Math.Round(value)            // 像是旧格式的分钟
-                : (int)Math.Round(value * 60.0);    // 像是小时
+                ? (int)Math.Round(value * 60.0)     // 像是旧格式的分钟
+                : (int)Math.Round(value * 3600.0);  // 像是小时
         }
 
         // 若远端数值属性未填或为 0，尝试从标题中提取时长（兼容用户只手写在标题的情况）
@@ -1012,8 +1056,8 @@ public class NotionClient : INotionClient
                 var unit = m.Groups["unit"].Value.ToLowerInvariant();
                 return unit switch
                 {
-                    "小时" or "时" or "hours" or "hour" or "hrs" or "hr" or "h" => (int)Math.Round(parsedVal * 60.0),
-                    "分钟" or "分" or "minutes" or "minute" or "mins" or "min" or "m" => (int)Math.Round(parsedVal),
+                    "小时" or "时" or "hours" or "hour" or "hrs" or "hr" or "h" => (int)Math.Round(parsedVal * 3600.0),
+                    "分钟" or "分" or "minutes" or "minute" or "mins" or "min" or "m" => (int)Math.Round(parsedVal * 60.0),
                     _ => 0
                 };
             }
@@ -1021,6 +1065,12 @@ public class NotionClient : INotionClient
 
         return 0;
     }
+
+    /// <summary>
+    /// 兼容保留（旧字段/显示用）：从 canonical seconds 派生的分钟，**不参与任何事实计算**。
+    /// </summary>
+    private static int RawDurationToMinutes(double? raw, string? title)
+        => (int)Math.Round(RawDurationToSeconds(raw, title) / 60.0);
 
     private static string? ExtractRelationId(JsonElement props, params string[] propertyNames)
     {
@@ -1153,14 +1203,18 @@ public class NotionSyncService : INotionSyncService
     /// 快照只是优化手段，写失败不该影响推送本身 —— 下一轮回刷会自然补上，所以这里吞异常。
     /// </remarks>
     private async Task RecordRemoteSnapshotAsync(
-        string pageId, string displayName, int durationMinutes, string? iconUrl)
+        string pageId, string displayName, int durationMinutes, string? iconUrl, int? durationSeconds = null)
     {
         if (string.IsNullOrWhiteSpace(pageId)) return;
 
         try
         {
-            await _repo.UpdateDailyRecordFromNotionAsync(
-                pageId, DailyRecordTitle.Build(displayName, durationMinutes), iconUrl);
+            // 快照必须与刚才**实际写上去**的标题逐字一致（否则下一轮回刷会以为要更新，反复 PATCH）。
+            var expectedTitle = durationSeconds is { } secs
+                ? DailyRecordTitle.BuildFromHours(displayName, DailyRecordTitle.SecondsToHours(secs))
+                : DailyRecordTitle.Build(displayName, durationMinutes);
+
+            await _repo.UpdateDailyRecordFromNotionAsync(pageId, expectedTitle, iconUrl);
         }
         catch (Exception ex)
         {

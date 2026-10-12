@@ -930,34 +930,10 @@ public partial class SqliteRepository : IDatabaseRepository
 
                     if (validSessionsCount > 0)
                     {
-                        // 检查 daily_summary 是否存在从 Notion 或外部手动记录的时长（即未包含在 sessions 明细里的时长）
-                        var localSessionsTotalSecs = await conn.ExecuteScalarAsync<int>(
-                            """
-                            SELECT COALESCE(SUM(duration_seconds), 0) FROM sessions 
-                            WHERE game_id = @gameId AND substr(start_time, 1, 10) = @date;
-                            """,
-                            new { gameId, date });
-
-                        var dailyRow = await conn.QuerySingleOrDefaultAsync<DailyDurationCheck>(
-                            "SELECT duration_seconds, session_count FROM daily_summary WHERE game_id = @gameId AND date = @date LIMIT 1;",
-                            new { gameId, date });
-
-                        int manualBonusSessions = 0;
-                        if (dailyRow != null && dailyRow.duration_seconds > localSessionsTotalSecs + 60)
-                        {
-                            // 存在外部/Notion 手动录入的时长（未通过本地进程捕获），计入该手动游玩次数
-                            manualBonusSessions = 1;
-                        }
-
-                        int finalSessionCount = validSessionsCount + manualBonusSessions;
-
-                        await conn.ExecuteAsync(
-                            """
-                            UPDATE daily_summary 
-                            SET session_count = @finalSessionCount 
-                            WHERE game_id = @gameId AND date = @date;
-                            """,
-                            new { gameId, date, finalSessionCount });
+                        // 🔒 2026-10-11（口径统一，count-rule-v1）：遗留结束路径也走唯一规则，
+                        //    不再使用"日历日计数 + manualBonus（daily > 会话和 + 60 ⇒ +1）"的旧公式
+                        //    —— 该启发式既不可重算，也会制造无会话支撑的伪场次。
+                        ApplyUnifiedSessionCount(conn, null, gameId, date, ReadDailyCutoffHour(conn, null));
                     }
                 }
             }
@@ -1010,9 +986,7 @@ public partial class SqliteRepository : IDatabaseRepository
                 await conn.ExecuteAsync(
                     """
                     UPDATE daily_summary
-                    SET duration_seconds = @newSecs, duration_minutes = @newMins,
-                        session_count = CASE WHEN duration_minutes = 0 AND @newMins > 0 THEN 1 ELSE session_count END,
-                        sync_status = 'pending'
+                    SET duration_seconds = @newSecs, duration_minutes = @newMins, sync_status = 'pending'
                     WHERE id = @id;
                     """,
                     new { id = existing.id, newSecs, newMins });
@@ -1020,14 +994,18 @@ public partial class SqliteRepository : IDatabaseRepository
             else
             {
                 var mins = durationSeconds / 60;
-                var sessionCount = mins > 0 ? 1 : 0;
                 await conn.ExecuteAsync(
                     """
                     INSERT INTO daily_summary (date, game_id, duration_seconds, duration_minutes, session_count, sync_status)
-                    VALUES (@date, @gameId, @durationSeconds, @mins, @sessionCount, 'pending');
+                    VALUES (@date, @gameId, @durationSeconds, @mins, 0, 'pending');
                     """,
-                    new { date, gameId, durationSeconds, mins, sessionCount });
+                    new { date, gameId, durationSeconds, mins });
             }
+
+            // 🔒 2026-10-11（口径统一，count-rule-v1）：心跳路径**不再自己推算场次**
+            //    （旧实现是 `duration_minutes=0 且新值>0 就置 1` 的启发式，会制造无会话支撑的伪场次）。
+            //    场次一律由唯一规则按事实重算：≥60s 且起始会计日匹配的会话数 + 声明/残差 bonus。
+            ApplyUnifiedSessionCount(conn, null, gameId, date, ReadDailyCutoffHour(conn, null));
         }
         finally
         {
