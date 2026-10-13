@@ -143,8 +143,8 @@ public partial class HomeViewModel : ObservableObject
     [ObservableProperty] public partial string WeekDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush WeekDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
 
-    // 初始值与下方 Math.Max(streak, 1) 保持一致：新用户/首次刷新前显示 1 天（Lv.1 起点），不显示遗留占位值
-    [ObservableProperty] public partial int StreakDays { get; set; } = 1;
+    // 真实值，不是占位值：没有任何有效游玩记录时必须是 0 天（刷新前也显示 0，不得显示 1）
+    [ObservableProperty] public partial int StreakDays { get; set; } = 0;
     [ObservableProperty] public partial string StreakRankTitle { get; set; } = "🎮 Lv.1 愿望单收集家";
     [ObservableProperty] public partial string NextMilestoneText { get; set; } = "下一个里程碑：6 天 (🌿 Lv.2)";
     [ObservableProperty] public partial double NextMilestoneTarget { get; set; } = 6;
@@ -597,7 +597,9 @@ public partial class HomeViewModel : ObservableObject
             TodayDeltaBrush = stats.TodayDeltaPercent > 0 ? greenBrush : (stats.TodayDeltaPercent < 0 ? redBrush : grayBrush);
             WeekDeltaBrush = stats.WeekDeltaPercent > 0 ? greenBrush : (stats.WeekDeltaPercent < 0 ? redBrush : grayBrush);
 
-            var streak = Math.Max(stats.StreakDays, 1);
+            // 直接采用统计值：0 是合法结果（全新用户没有有效游玩记录）。这里只防负数，
+            // 绝不把 0 抬成 1 —— 旧实现的下限会把"连续 0 天"显示成"连续 1 天"。
+            var streak = Math.Max(stats.StreakDays, 0);
             StreakDays = streak;
 
             if (streak <= 5)
