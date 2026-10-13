@@ -31,6 +31,13 @@ public static class GameSyncEligibility
     /// 内存侧判定（启动去重逐行用）。语义必须与 <see cref="SqlPredicate"/> **完全一致**。
     /// </summary>
     /// <param name="sessionCount">该游戏关联的会话数；调用方负责先查出来。</param>
+    /// <remarks>
+    /// 2026-10-10：**刻意没有**在这里加入"带外部导入事实的游戏也可同步"——那条语义由
+    /// <c>DeviceSyncSchema.AssignGameGlobalIdIfMissing</c> 在"该游戏确实要承载导入事实"的那一刻
+    /// 定点补身份来实现（见 <c>SqliteRepository.SyncDailyRecordFromNotionAsync</c>）。
+    /// 原因是 <see cref="SqlPredicate"/> 会被**设备同步尚未启用**的库调用，
+    /// 而 <c>daily_duration_adjustments</c> 表那时可能还不存在 —— 加子句会让这些查询整体报错。
+    /// </remarks>
     public static bool IsSyncable(string? executable, string? executablePath, int sessionCount)
         => !string.IsNullOrWhiteSpace(executable)
         || !string.IsNullOrWhiteSpace(executablePath)

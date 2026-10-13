@@ -80,27 +80,39 @@ public partial class SqliteRepository
     ///   · Game：<see cref="GameSyncEligibility.SqlPredicate"/> 为真 **且** 已有 <c>global_id</c>
     ///     （没有 identity 的游戏无法构造合法变更 —— 播种**不生成**新 identity，
     ///     因为播种只允许 SELECT + INSERT sync_queue）；
-    ///   · Session：<c>global_id</c> 非空，且其游戏也有 <c>global_id</c>。
+    ///   · Session：<c>global_id</c> 非空、其游戏也有 <c>global_id</c>，**且已经结束（is_active = 0）**
+    ///     —— 与 <see cref="GetBackfillSessionsAsync"/> 的口径完全一致（正在进行中的会话不算候选）；
+    ///   · **归属**：Game 要求"本机产生过它的会话"、Session 要求 <c>device_id = 本机</c> ——
+    ///     从对端落地的历史事实不算本机候选（否则会整批回推成 already_exists_local）。
     /// </summary>
     public async Task<(int Games, int Sessions)> CountBackfillCandidatesAsync()
     {
         using var conn = CreateConnection();
+        var localDeviceId = await GetLocalDeviceIdAsync();
 
         var games = await conn.ExecuteScalarAsync<int>(
             $"""
              SELECT COUNT(*) FROM games
              WHERE NULLIF(TRIM(games.global_id), '') IS NOT NULL
                AND {GameSyncEligibility.SqlPredicate}
-               AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate};
-             """);
+               AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate}
+               AND (
+                     NOT EXISTS (SELECT 1 FROM sessions s2 WHERE s2.game_id = games.id)
+                     OR EXISTS (SELECT 1 FROM sessions s3
+                                WHERE s3.game_id = games.id AND s3.device_id = @localDeviceId));
+             """,
+            new { localDeviceId });
 
         var sessions = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*) FROM sessions s
             JOIN games g ON g.id = s.game_id
             WHERE NULLIF(TRIM(s.global_id), '') IS NOT NULL
-              AND NULLIF(TRIM(g.global_id), '') IS NOT NULL;
-            """);
+              AND NULLIF(TRIM(g.global_id), '') IS NOT NULL
+              AND s.is_active = 0
+              AND s.device_id = @localDeviceId;
+            """,
+            new { localDeviceId });
 
         return (games, sessions);
     }
@@ -109,6 +121,8 @@ public partial class SqliteRepository
     public async Task<IReadOnlyList<BackfillGameRow>> GetBackfillGamesAsync(long afterId, int limit)
     {
         using var conn = CreateConnection();
+        var localDeviceId = await GetLocalDeviceIdAsync();
+
         var rows = await conn.QueryAsync<BackfillGameRow>(
             $"""
              SELECT id, global_id, name, platform, platform_id, executable, executable_path, notion_page_id
@@ -117,18 +131,48 @@ public partial class SqliteRepository
                AND NULLIF(TRIM(global_id), '') IS NOT NULL
                AND {GameSyncEligibility.SqlPredicate}
                AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate}
+               AND (
+                     NOT EXISTS (SELECT 1 FROM sessions s2 WHERE s2.game_id = games.id)
+                     OR EXISTS (SELECT 1 FROM sessions s3
+                                WHERE s3.game_id = games.id AND s3.device_id = @localDeviceId))
              ORDER BY id ASC
              LIMIT @limit;
              """,
-            new { afterId, limit });
+            new { afterId, limit, localDeviceId });
 
         return rows.ToList();
     }
 
-    /// <summary>取一批可播种的 Session（按 <c>id</c> 升序）。</summary>
+    /// <summary>
+    /// 取一批可播种的 Session（按 <c>id</c> 升序）。
+    ///
+    /// ⚠️ <b>只取"本机产生"的会话</b>（<c>s.device_id = 本机 device_id</c>）：从对端**落地**的会话
+    /// 保留其**原产设备** id，它们在对端本来就有；把它们当成本机候选再播种/回推，
+    /// 只会让对端整批判成 <c>already_exists_local</c>（永久 Deferred）并淹掉真正的新数据 ——
+    /// 这是 2026-10-08 第二次双机验收的真实事故（B 把从 A 收到的 77 条全部回推）。
+    /// 与「历史 Outbox Gap Repair」的判据**完全一致**（同一原则：只有本机产生的事实，
+    /// 才允许由本机历史修复机制重新进入自己的 outbox）。
+    ///
+    /// ⚠️ <b>只取已经结束的会话</b>（<c>s.is_active = 0</c>）：正在进行的会话还没定型 ——
+    /// 它的 <c>duration_seconds</c> 只是"到目前为止"、<c>ended_at_utc</c> 还没写。
+    /// 一旦把它导出成"部分事实"，会话真正结束时还会为**同一个 global_id** 产生一条事实不同的变更，
+    /// 对端只能得到 <c>AlreadyExistsLocal</c> / 拒绝改写历史（永久 Deferred）——
+    /// 用户 2026-10-08 裁定：**未结束的会话绝不进 Device Sync**，只有结束路径
+    /// （`EndSessionWithOutboxAsync`，is_active=0 与最终事实同事务写入）才能产生同步事实。
+    ///
+    /// ⚠️ 为什么不额外要求 <c>ended_at_utc IS NOT NULL</c>：<c>ended_at_utc</c> <b>不属于</b> Session 的
+    /// 四项不可变事实（device_id / started_at_utc / duration_seconds / game identity，
+    /// 见 <c>SessionIdentityRules.SessionFacts</c>）；而被"僵尸清理"收尾的会话
+    /// （<c>CleanupStaleSessionsAsync</c> 只写 <c>end_time = last_heartbeat</c> + <c>is_active = 0</c>）
+    /// 会出现 is_active=0 但 ended_at_utc 为空的行，加上该条件会让它们**永远无法同步**
+    /// （schema 自愈的查询条件同样不含 ended_at_utc，不会回填这些行）。<c>is_active = 0</c>
+    /// 已经足够表达"这条会话不会再产生新的事实"。
+    /// </summary>
     public async Task<IReadOnlyList<BackfillSessionRow>> GetBackfillSessionsAsync(long afterId, int limit)
     {
         using var conn = CreateConnection();
+        var localDeviceId = await GetLocalDeviceIdAsync();
+
         var rows = await conn.QueryAsync<BackfillSessionRow>(
             """
             SELECT s.id, s.global_id, s.device_id, s.process_name, s.started_at_utc, s.ended_at_utc,
@@ -136,12 +180,14 @@ public partial class SqliteRepository
             FROM sessions s
             JOIN games g ON g.id = s.game_id
             WHERE s.id > @afterId
+              AND s.is_active = 0
+              AND s.device_id = @localDeviceId
               AND NULLIF(TRIM(s.global_id), '') IS NOT NULL
               AND NULLIF(TRIM(g.global_id), '') IS NOT NULL
             ORDER BY s.id ASC
             LIMIT @limit;
             """,
-            new { afterId, limit });
+            new { afterId, limit, localDeviceId });
 
         return rows.ToList();
     }

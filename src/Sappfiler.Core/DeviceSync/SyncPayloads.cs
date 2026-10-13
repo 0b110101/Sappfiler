@@ -307,9 +307,11 @@ public static class SyncPayloads
 
             schemaVersion = parsed.SchemaVersion;
 
-            if (parsed.SchemaVersion != DeviceSyncConstants.CurrentSchemaVersion)
+            // v1 与 v2 都接受：v2 只是"多了 DailyAdjustment 实体 + Game 的 blob hash 引用"，
+            // Game 载荷本身的字段与语义逐字未变（两台设备混版本期间必须能互相消费）。
+            if (!DeviceSyncConstants.IsSupportedSchemaVersion(parsed.SchemaVersion))
             {
-                error = $"不支持的 schema_version={parsed.SchemaVersion}（本机支持 {DeviceSyncConstants.CurrentSchemaVersion}）";
+                error = $"不支持的 schema_version={parsed.SchemaVersion}（本机支持 {DeviceSyncConstants.MinSupportedSchemaVersion}~{DeviceSyncConstants.CurrentSchemaVersion}）";
                 return false;
             }
 
@@ -376,9 +378,10 @@ public static class SyncPayloads
 
             schemaVersion = parsed.SchemaVersion;
 
-            if (parsed.SchemaVersion != DeviceSyncConstants.CurrentSchemaVersion)
+            // 同上：v1 / v2 都接受（Session 的四项不可变事实与字段在 v2 里一字未改）。
+            if (!DeviceSyncConstants.IsSupportedSchemaVersion(parsed.SchemaVersion))
             {
-                error = $"不支持的 schema_version={parsed.SchemaVersion}（本机支持 {DeviceSyncConstants.CurrentSchemaVersion}）";
+                error = $"不支持的 schema_version={parsed.SchemaVersion}（本机支持 {DeviceSyncConstants.MinSupportedSchemaVersion}~{DeviceSyncConstants.CurrentSchemaVersion}）";
                 return false;
             }
 
@@ -397,4 +400,154 @@ public static class SyncPayloads
             return false;
         }
     }
+
+    /// <summary>
+    /// 解析 v2 的日时长调整事实。
+    ///
+    /// ⚠️ <b>只接受 v2 及以上</b>：v1 客户端根本没有这个实体类型，
+    /// 用 v1 形状去硬解只会把"手工时长"解释成错的东西 —— 宁可 Deferred 也不猜。
+    /// </summary>
+    /// <param name="schemaVersion">payload 里声明的版本；无法解析时为 -1（用于 Deferred 台账留痕）。</param>
+    public static bool TryParseDailyAdjustment(
+        string? json, out DailyAdjustmentSyncPayload? payload, out int schemaVersion, out string? error)
+    {
+        payload = null;
+        schemaVersion = -1;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            error = "payload 为空";
+            return false;
+        }
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<DailyAdjustmentSyncPayload>(json, Options);
+            if (parsed is null)
+            {
+                error = "payload 反序列化为空";
+                return false;
+            }
+
+            schemaVersion = parsed.SchemaVersion;
+
+            if (!DeviceSyncConstants.IsSupportedSchemaVersion(parsed.SchemaVersion) || parsed.SchemaVersion < 2)
+            {
+                error = $"日时长调整需要 schema_version>=2（收到 {parsed.SchemaVersion}）";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.GlobalId) || string.IsNullOrWhiteSpace(parsed.GameGlobalId))
+            {
+                error = "payload 缺少 global_id / game_global_id";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.DeviceId))
+            {
+                error = "payload 缺少 device_id（adjustment 必须能追溯到产生它的设备）";
+                return false;
+            }
+
+            if (!IsIsoDate(parsed.StatisticalDate))
+            {
+                error = $"statistical_date 不是 yyyy-MM-dd：{parsed.StatisticalDate}";
+                return false;
+            }
+
+            // 只允许正增量：负数会让对端统计倒退，且"撤销"应当由用户显式删除，而不是靠负 adjustment 抵消。
+            // ⚠️ 2026-10-11：**撤销（revoked=true）允许 0 秒** —— 它表达"这条声明已不存在"，
+            //    与"0 秒的有效声明"是两件不同的事（后者仍被拒绝）。其余 0 / 负数一律拒绝。
+            if (parsed.DurationSeconds <= 0 && !(parsed.Revoked && parsed.DurationSeconds == 0))
+            {
+                error = $"duration_seconds 必须为正数（收到 {parsed.DurationSeconds}）";
+                return false;
+            }
+
+            payload = parsed;
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = $"payload 不是合法 JSON：{ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 解析<b>每日游玩分片排除事实</b>。
+    ///
+    /// ⚠️ 只接受 v2 及以上（与 <see cref="TryParseDailyAdjustment"/> 同一判据）：
+    /// v1 客户端没有这个实体类型，用旧形状硬解只会把"删除"解释成别的东西 —— 宁可 Deferred 也不猜。
+    /// </summary>
+    /// <param name="schemaVersion">payload 里声明的版本；无法解析时为 -1（用于 Deferred 台账留痕）。</param>
+    public static bool TryParseDailyPlayExclusion(
+        string? json, out DailyPlayExclusionSyncPayload? payload, out int schemaVersion, out string? error)
+    {
+        payload = null;
+        schemaVersion = -1;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            error = "payload 为空";
+            return false;
+        }
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<DailyPlayExclusionSyncPayload>(json, Options);
+            if (parsed is null)
+            {
+                error = "payload 反序列化为空";
+                return false;
+            }
+
+            schemaVersion = parsed.SchemaVersion;
+
+            if (!DeviceSyncConstants.IsSupportedSchemaVersion(parsed.SchemaVersion) || parsed.SchemaVersion < 2)
+            {
+                error = $"每日游玩分片排除需要 schema_version>=2（收到 {parsed.SchemaVersion}）";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.GlobalId)
+                || string.IsNullOrWhiteSpace(parsed.GameGlobalId)
+                || string.IsNullOrWhiteSpace(parsed.SessionGlobalId))
+            {
+                error = "payload 缺少 global_id / game_global_id / session_global_id";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.DeviceId))
+            {
+                error = "payload 缺少 device_id（排除事实必须能追溯到产生它的设备）";
+                return false;
+            }
+
+            if (!IsIsoDate(parsed.StatisticalDate))
+            {
+                error = $"statistical_date 不是 yyyy-MM-dd：{parsed.StatisticalDate}";
+                return false;
+            }
+
+            payload = parsed;
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            error = $"payload 不是合法 JSON：{ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>严格 <c>yyyy-MM-dd</c>（统计日是**日期**，不是时间戳）。</summary>
+    private static bool IsIsoDate(string? text)
+        => !string.IsNullOrWhiteSpace(text)
+           && DateTime.TryParseExact(
+               text, "yyyy-MM-dd",
+               System.Globalization.CultureInfo.InvariantCulture,
+               System.Globalization.DateTimeStyles.None,
+               out _);
 }

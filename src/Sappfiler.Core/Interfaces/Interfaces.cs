@@ -23,6 +23,49 @@ public interface IDatabaseRepository
     Task<IReadOnlyList<DailySummary>> GetSyncedDailySummariesAsync();
     /// <summary>物理删除若干条每日汇总。</summary>
     Task<int> DeleteDailySummariesAsync(IEnumerable<int> ids);
+
+    /// <summary>
+    /// **删除一条历史游玩记录**（某 (游戏, 会计日) 的记录，2026-10-11 粒度重写）：
+    ///
+    /// <para>
+    /// 事实层按 <c>(游戏, 会计日, 会话)</c> 粒度**作废该日的时长分片**（<c>daily_play_exclusions</c>
+    /// + 同步实体 <c>DailyPlayExclusion</c>）；同一条会话在**其它**会计日的分片分毫不动
+    /// （<c>sessions</c> 是整段事实、其秒数按结算点被拆到最多两个会计日，所以删除粒度不可能等于整条会话）。
+    /// </para>
+    ///
+    /// <para>
+    /// 同时撤回该日外部声明（<c>historical_residual</c> 受保护、不撤）、为所有受影响日期写墓碑并入队、
+    /// **在同一个 SQLite 事务里**重算全部受影响日期（目标日 + 被作废分片所在的其它日）。
+    /// 若删除后该日仍有无法归属的残差（或存在进行中的会话），结果会标记 <c>FullyDeleted = false</c>，
+    /// 界面必须显示"部分删除"而不是完全成功。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>删除范围（产品语义，必须与界面提示一致）</b>：删除的是**删除时刻本机已知的**、
+    /// 归属于该会计日的**已结束**会话分片。因此：
+    /// <list type="bullet">
+    ///   <item>其它设备上**尚未同步到本机**的会话分片不在范围内 —— 它们同步过来后会**正常计入**该日期
+    ///         （那是此前未同步的合法时长，**不是**"被删除的数据复活"）；</item>
+    ///   <item>进行中的会话不在范围内（时长尚未定型）—— 结束游戏后可**再次删除**该记录以完成清理；</item>
+    ///   <item>"删除"**不是**"永久禁止该日出现时长"：之后真正发生的新游玩照常记录与统计。</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    Task<PlayRecordDeletionResult> DeletePlayRecordAsync(int dailySummaryId);
+
+    /// <summary>
+    /// <b>撤回本机某条外部时长声明</b>（2026-10-11，schema 3）。
+    ///
+    /// <para>
+    /// 语义：这条声明的**外部来源已经不存在**（例如 Notion 每日记录页面被用户删除）⇒
+    /// 它不该继续作为有效统计事实存在。实现：删除该 identity（设备+游戏+统计日+来源）的声明、
+    /// 按事实重算 <c>daily_summary</c>（派生缓存可以因此变小）、并把撤销作为**同一 identity**
+    /// 的同步事实入队，让对端也收敛（对端只删这一条 identity，不会碰别的来源/日期/设备，也不会碰 Session）。
+    /// </para>
+    ///
+    /// <para>幂等：本机没有这条声明 ⇒ no-op 返回 false；队列已有该 identity ⇒ 不重复入队。</para>
+    /// </summary>
+    Task<bool> RevokeLocalDailyAdjustmentAsync(int gameId, string statisticalDate, string source);
     /// <summary>把被删除的数据写入本地归档表（物理删除前留底，便于人工找回）。</summary>
     Task ArchiveDeletedAsync(string kind, string source, string reference, string payloadJson);
     /// <summary>清理目录缓存中已不在 Notion 总表里的行（让 game_catalog 成为总表的忠实快照）。</summary>
@@ -103,35 +146,6 @@ public interface IDatabaseRepository
     // App Settings
     Task<string?> GetSettingAsync(string key);
     Task SetSettingAsync(string key, string value);
-
-    /// <summary>
-    /// **删除一条历史游玩记录**（某 (游戏, 会计日) 的记录，2026-10-11 粒度重写）：
-    ///
-    /// <para>
-    /// 事实层按 <c>(游戏, 会计日, 会话)</c> 粒度**作废该日的时长分片**（<c>daily_play_exclusions</c>
-    /// + 同步实体 <c>DailyPlayExclusion</c>）；同一条会话在**其它**会计日的分片分毫不动
-    /// （<c>sessions</c> 是整段事实、其秒数按结算点被拆到最多两个会计日，所以删除粒度不可能等于整条会话）。
-    /// </para>
-    ///
-    /// <para>
-    /// 同时撤回该日外部声明（<c>historical_residual</c> 受保护、不撤）、为所有受影响日期写墓碑并入队、
-    /// **在同一个 SQLite 事务里**重算全部受影响日期（目标日 + 被作废分片所在的其它日）。
-    /// 若删除后该日仍有无法归属的残差（或存在进行中的会话），结果会标记 <c>FullyDeleted = false</c>，
-    /// 界面必须显示"部分删除"而不是完全成功。
-    /// </para>
-    ///
-    /// <para>
-    /// <b>删除范围（产品语义，必须与界面提示一致）</b>：删除的是**删除时刻本机已知的**、
-    /// 归属于该会计日的**已结束**会话分片。因此：
-    /// <list type="bullet">
-    ///   <item>其它设备上**尚未同步到本机**的会话分片不在范围内 —— 它们同步过来后会**正常计入**该日期
-    ///         （那是此前未同步的合法时长，**不是**"被删除的数据复活"）；</item>
-    ///   <item>进行中的会话不在范围内（时长尚未定型）—— 结束游戏后可**再次删除**该记录以完成清理；</item>
-    ///   <item>"删除"**不是**"永久禁止该日出现时长"：之后真正发生的新游玩照常记录与统计。</item>
-    /// </list>
-    /// </para>
-    /// </summary>
-    Task<PlayRecordDeletionResult> DeletePlayRecordAsync(int dailySummaryId);
 }
 
 public interface IProcessMonitor

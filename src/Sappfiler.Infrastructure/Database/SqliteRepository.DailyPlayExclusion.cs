@@ -135,6 +135,49 @@ public partial class SqliteRepository
                 at = createdAtUtc
             }, tx) > 0;
 
+    /// <summary>
+    /// 落地远端的"每日游玩分片排除事实"，并按剩余事实重算该会计日的派生行。
+    ///
+    /// <para>
+    /// ⚠️ **不要求本地已有该会话**：排除事实是独立事实，先于会话到达（乱序）也必须落地 ——
+    /// 该会话稍后落地时，其分片会被同一份排除集跳过（<c>ApplyRemoteSession</c> 会查询它）。
+    /// </para>
+    ///
+    /// <para>幂等：<c>ON CONFLICT DO NOTHING</c>；重复 Pull 只有第一次插入会触发重算。</para>
+    /// </summary>
+    private static (string? Reason, int SchemaVersion) ApplyRemoteDailyPlayExclusion(
+        SqliteConnection conn, SqliteTransaction tx, SyncChange change)
+    {
+        if (!SyncPayloads.TryParseDailyPlayExclusion(change.Payload, out var payload, out var schemaVersion, out _))
+        {
+            return (ClassifyParseFailure(schemaVersion), Math.Max(schemaVersion, 0));
+        }
+
+        var exclusion = payload!;
+
+        // 依赖：必须挂在本地已存在的 game 上（与 Session / DailyAdjustment 完全一致的口径，
+        // 且必须走**别名解析** —— 游戏 identity 可能已被身份对账并入本机权威 id）。
+        var gameId = ResolveLocalGameIdByGlobalId(conn, tx, exclusion.GameGlobalId);
+        if (gameId is null)
+        {
+            return (DeferredReasons.DependencyMissing, schemaVersion);
+        }
+
+        var inserted = InsertDailyPlayExclusionCore(
+            conn, tx, exclusion.GlobalId, gameId.Value, exclusion.StatisticalDate,
+            exclusion.SessionGlobalId, exclusion.DeviceId, exclusion.CreatedAtUtc);
+
+        if (inserted)
+        {
+            RefreshDailyRowFromRemainingFactsCore(
+                conn, tx, gameId.Value, exclusion.StatisticalDate, ReadDailyCutoffHour(conn, tx));
+
+            AppLog.Info($"[设备同步] 落地每日游玩分片排除：{exclusion.StatisticalDate} "
+                + $"session={Truncate(exclusion.SessionGlobalId)}（该日已按剩余事实重算）");
+        }
+
+        return (null, schemaVersion);
+    }
 
     private static string Truncate(string value)
         => string.IsNullOrEmpty(value) || value.Length <= 8 ? value : value[..8] + "…";

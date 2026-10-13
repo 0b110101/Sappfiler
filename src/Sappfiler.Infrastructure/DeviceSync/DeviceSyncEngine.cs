@@ -272,9 +272,14 @@ public sealed class DeviceSyncEngine
 
             if (apply.Deferred > 0)
             {
-                AppLog.Warn($"[设备同步] Deferred {apply.Deferred} 条（≠ Completed，本机没有同步成功）"
+                // ⚠️ 2026-10-11：措辞必须区分两类语义（旧文案一律说"本机没有同步成功"，把
+                //    "本地本来就有同 identity（幂等重复，已经是对的）"也说成失败，误导排查）。
+                //    两者都照旧写入台账（Deferred ≠ Completed，审计不许丢），只是说清楚。
+                AppLog.Warn($"[设备同步] Deferred {apply.Deferred} 条（≠ Completed）"
                     + $"：{string.Join("、", apply.DeferredReasons)}"
-                    + " —— 已写入 sync_deferred_changes 台账，留给 2e 身份/冲突解决阶段重新处理");
+                    + " —— 说明：already_exists_local = 本地已有同 identity（幂等重复，不是数据丢失）；"
+                    + "business_key_taken_by_other_identity / dependency_missing = 需要 2e 身份对账或依赖补齐；"
+                    + "均已写入 sync_deferred_changes 台账，启动时由 2e 重处理（同一轮内会多遍收敛）");
             }
 
             if (apply.TombstonesPropagated > 0)

@@ -276,8 +276,13 @@ public class NotionClient : INotionClient
                         continue;
                     }
 
+                    // ⚠️ 2026-10-13：把状态码一并带进异常（消息**逐字不变**）——
+                    //    致命错误判定（IsFatalAuthError）需要机器可读的状态码，
+                    //    靠解析文案去猜 401/403 太脆。
                     throw new HttpRequestException(
-                        $"Notion API {(int)response.StatusCode}: {(string.IsNullOrEmpty(detail) ? response.ReasonPhrase : detail)}");
+                        $"Notion API {(int)response.StatusCode}: {(string.IsNullOrEmpty(detail) ? response.ReasonPhrase : detail)}",
+                        inner: null,
+                        statusCode: response.StatusCode);
                 }
 
                 var stream = await response.Content.ReadAsStreamAsync();
@@ -597,6 +602,14 @@ public class NotionClient : INotionClient
         catch (Exception ex)
         {
             AppLog.Warn($"[UpdateDailyBindingStatusAsync] 更新页面 {pageId} 绑定状态失败: {ex.Message}");
+
+            // ⚠️ 2026-10-13（真机故障修复）：认证/权限错误（401/403）**必须让调用方知道** ——
+            //    逐条回写循环靠它立刻中断；这里若照旧 `return false`，异常被吞掉，
+            //    循环的 catch 永远不触发，就会继续对着同一条死路逐条重试到分钟级
+            //    （真机实测：无效 Token 时这里把首次同步拖到分钟级，保存按钮被禁用）。
+            //    其它错误（网络/超时/限流/5xx）沿用既有契约：记日志 + 返回 false，不抛。
+            if (NotionSyncService.IsFatalAuthError(ex)) throw;
+
             return false;
         }
     }
@@ -764,14 +777,24 @@ public class NotionClient : INotionClient
             using var req = CreateRequest(HttpMethod.Get, $"/pages/{cleanPageId}");
             var res = await SendWithRetryAsync(req);
 
-            if (res.TryGetProperty("archived", out var archived) && archived.GetBoolean())
-            {
-                return true;
-            }
+            // 🔒 2026-10-11 收紧（用户裁定：**归档 ≠ 删除**，不得未经产品语义确认就等价处理）：
+            //    · in_trash = true ⇒ 用户在 Notion 里把页面扔进了回收站 ⇒ 认定删除；
+            //    · archived = true ⇒ 仅表示"归档/移出当前视图"。它**可能是"暂时不想看"**，
+            //      而不是"这条声明不存在了"。若在这里认定删除，会连带撤销该 (游戏, 日期) 的外部声明、
+            //      把时长从两机统计里减掉 —— 属于不可逆的数据语义变更，必须由产品决策。
+            //      因此判为**未删除**，只落一条 Warn 供人工确认。
             if (res.TryGetProperty("in_trash", out var inTrash) && inTrash.GetBoolean())
             {
                 return true;
             }
+
+            if (res.TryGetProperty("archived", out var archived) && archived.GetBoolean())
+            {
+                AppLog.Warn($"[删除对账] Notion 页面 {pageId} 处于**归档**状态（非回收站）："
+                    + "按'归档 ≠ 删除'处理，本轮**不撤销**任何声明；若确认该页已不再使用，请人工确认后处理");
+                return false;
+            }
+
             return false;
         }
         catch (HttpRequestException ex) when (ex.Message.Contains("404") || ex.Message.Contains("Could not find page") || ex.Message.Contains("object_not_found"))
@@ -1126,11 +1149,57 @@ public class NotionSyncService : INotionSyncService
         var msg = ex.Message;
         if (msg.Contains("401")) return "Notion Token 无效或已过期——请到设置页重新复制 Internal Access Secret";
         if (msg.Contains("403")) return "Notion 拒绝访问——请确认两个数据库都已在 ··· → Connections 里连接该 Integration";
+
+        // ⚠️ 2026-10-13：404 原先原样透出（"Notion API 404: Could not find database with ID: …"），
+        //    用户看不懂它指什么，也不知道该改哪里。这里给出可行动的说明；
+        //    具体是哪个 id 由调用方连同这一步的上下文写进日志（见 RefreshGameCatalogCacheAsync）。
+        if (msg.Contains("404"))
+            return "Notion 找不到该数据库或页面——它可能已被删除，或 Integration 没有被授权访问"
+                + "（请在 Notion 里打开该页面/数据库 → ··· → Connections 连接该 Integration，"
+                + "再到设置页确认对应的 ID 是最新的）";
+
         if (msg.Contains("archived")) return "该记录在 Notion 已被删除，本地将跟随清理";
         if (msg.Contains("SSL connection") || msg.Contains("不知道这样的主机") ||
             msg.Contains("No such host") || msg.Contains("timed out") || msg.Contains("name resolver"))
             return "无法连接 Notion 服务器——请检查网络或代理（api.notion.com 在部分地区需要代理访问）";
         return msg;
+    }
+
+    /// <summary>
+    /// 是否为**致命**的 Notion 认证/权限错误（401 Token 无效 / 403 拒绝访问）。
+    /// 判据与 <see cref="FriendlyNotionError"/> 完全一致（它把 401/403 归为"用户必须去改配置"的两类），
+    /// 区别只是这里要的是**布尔结论**而不是给用户看的文案。
+    ///
+    /// <para>
+    /// 用途：逐条回写循环（绑定状态回写、关系回填、标题回刷）遇到它应当**立刻中断** ——
+    /// 同一个 Token 对后续每一条记录都必然同样失败，继续下去只是把几百条各重试 3 次
+    /// （真机故障：无效 Token 时首次同步被拖到分钟级，期间设置页保存按钮被禁用，
+    /// 用户既不能解绑也不能重新绑定）。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ <b>只认 401/403</b>：网络异常、超时、限流（429）、5xx 等**可恢复**错误一律返回 false，
+    /// 继续沿用既有的"单条失败不阻断其余记录 + 下一轮重试"策略。
+    /// </para>
+    /// </summary>
+    internal static bool IsFatalAuthError(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            // 首选：结构化状态码（NotionClient 抛出的 HttpRequestException 已带上）。
+            if (e is HttpRequestException
+                { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
+            {
+                return true;
+            }
+
+            // 兜底：只留下文案的包装异常。用 NotionClient 自己拼的固定前缀，
+            // 不会与 page id、时长数字之类混淆。
+            var msg = e.Message;
+            if (msg.Contains("Notion API 401") || msg.Contains("Notion API 403")) return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1254,8 +1323,26 @@ public class NotionSyncService : INotionSyncService
         }
         catch (Exception ex)
         {
+            // ⚠️ 2026-10-13：这一步**只做一件事** —— 查询游戏总表数据库（`POST /databases/{id}/query`），
+            //    因此失败原因必然出在"总表数据库 ID / 授权"上（每日时长表那条链路是独立的，可能仍然全绿，
+            //    症状就是"别的都正常，只有总表刷新一闪而过地失败"）。
+            //    把"是哪一步 + 是哪个 ID"记进日志，避免下次只能靠猜。
+            AppLog.Warn($"[游戏总表] 刷新失败（数据库 id={Fingerprint(_config.GameDatabaseId)}）：{ex.Message}"
+                + "；本机已有的总表快照与游戏映射**不受影响**，下一轮同步会自动重试");
+
             SyncStatusChanged?.Invoke(this, $"更新失败: {FriendlyNotionError(ex)}");
         }
+    }
+
+    /// <summary>
+    /// 给日志用的 ID 指纹：只取前 8 位（够区分是哪个库，又不必把整串 id 铺在日志里）。
+    /// 空/过短时原样返回，避免"看起来像有个 id"。
+    /// </summary>
+    private static string Fingerprint(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return "（未配置）";
+        var clean = id.Replace("-", "");
+        return clean.Length <= 8 ? clean : clean[..8] + "…";
     }
 
     public async Task<int> PullDailyRecordsFromNotionAsync()
@@ -1337,6 +1424,10 @@ public class NotionSyncService : INotionSyncService
                     continue;
                 }
 
+                // canonical seconds：合并时取"秒"（老数据/测试构造的 item 退回 minutes × 60）
+                static int EffectiveSeconds(NotionDailyRecordItem item)
+                    => item.DurationSeconds > 0 ? item.DurationSeconds : item.DurationMinutes * 60;
+
                 // 同一天同一游戏在 Notion 存在多个页面（例如用户截图中的 3 条记录）！
                 // 1. 选取权威主页面：优先匹配本地已绑定的 pageId，否则选时长最大的
                 var groupDate = group[0].Date;
@@ -1345,14 +1436,17 @@ public class NotionSyncService : INotionSyncService
 
                 var canonical = matchedLocal != null
                     ? group.First(g => NormalizePageId(g.PageId) == NormalizePageId(matchedLocal.NotionPageId))
-                    : group.OrderByDescending(g => g.DurationMinutes).First();
+                    : group.OrderByDescending(EffectiveSeconds).First();
 
                 var duplicates = group.Where(g => g.PageId != canonical.PageId).ToList();
 
                 // 2. 累计合并总时长
-                int sumMinutes = group.Sum(g => g.DurationMinutes);
-                int localMinutes = matchedLocal?.DurationMinutes ?? 0;
-                int totalMinutes = Math.Max(sumMinutes, localMinutes);
+                // 同一天多个页面的合并：**按秒**求和/取大，最后只换算一次
+                // （逐页按分钟截断再相加会让每次合并都吃掉最多 59 秒）
+                int sumSeconds = group.Sum(EffectiveSeconds);
+                int localSeconds = matchedLocal?.DurationSeconds ?? 0;
+                int totalSeconds = Math.Max(sumSeconds, localSeconds);
+                int totalMinutes = GameTimeTracker.Core.Services.DurationMath.MinutesFromSeconds(totalSeconds);
 
                 // 3. 将多余的重复页面归档移入 Notion 回收站
                 foreach (var dup in duplicates)
@@ -1382,7 +1476,8 @@ public class NotionSyncService : INotionSyncService
                         masterPageId,
                         displayName,
                         iconUrl,
-                        writeDuration: true);
+                        writeDuration: true,
+                        durationSeconds: totalSeconds);
                     AppLog.Info($"[同步] 自动合并 Notion 同日重复记录：「{displayName}」{canonical.Date} 合并 {group.Count} 个页面为单个页面（总时长 {totalMinutes} 分钟），已更新远端页面 {canonical.PageId}");
                 }
                 catch (Exception ex)
@@ -1551,18 +1646,22 @@ public class NotionSyncService : INotionSyncService
                         displayName,
                         item.DurationMinutes,
                         gameNotionId,
-                        iconUrl);
+                        iconUrl,
+                        durationSeconds: item.DurationSeconds);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped", newPageId);
-                    await RecordRemoteSnapshotAsync(newPageId, displayName, item.DurationMinutes, iconUrl);
+                    await RecordRemoteSnapshotAsync(
+                        newPageId, displayName, item.DurationMinutes, iconUrl, item.DurationSeconds);
                 }
                 else
                 {
                     await _client.UpdateDailyRecordAsync(
                         item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl,
-                        writeDuration: !isHistorical);
+                        writeDuration: !isHistorical,
+                        durationSeconds: item.DurationSeconds);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
-                    await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, iconUrl);
+                    await RecordRemoteSnapshotAsync(
+                        item.NotionPageId, displayName, item.DurationMinutes, iconUrl, item.DurationSeconds);
                 }
                 count++;
             }
@@ -1606,6 +1705,11 @@ public class NotionSyncService : INotionSyncService
 
         var unmapped = await _repo.GetUnmappedDailySummariesAsync();
         int backfilled = 0;
+
+        // ⚠️ 2026-10-13：一旦判定为**致命**认证/权限错误（401/403），立即中止本轮逐条回填 ——
+        //    同一个 Token 对后续每条记录都必然同样失败，继续只会把几百条各重试 3 次
+        //    （真机故障：无效 Token 时这条链被拖到分钟级，期间设置页保存按钮被禁用）。
+        var fatalAuthAborted = false;
 
         foreach (var item in unmapped)
         {
@@ -1679,6 +1783,15 @@ public class NotionSyncService : INotionSyncService
                     }
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, "error", errorMessage: ex.Message);
+
+                    // 致命认证/权限错误 ⇒ 中止整个循环（后续记录必然同样失败，不再逐条重试）。
+                    if (IsFatalAuthError(ex))
+                    {
+                        fatalAuthAborted = true;
+                        AppLog.Warn("[BackfillRelationsAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
+                            + "中止本轮逐条回填（后续记录必然同样失败）");
+                        break;
+                    }
                 }
             }
             else if (!string.IsNullOrEmpty(item.NotionPageId))
@@ -1696,12 +1809,21 @@ public class NotionSyncService : INotionSyncService
                 catch (Exception ex)
                 {
                     AppLog.Warn($"[BackfillRelationsAsync] 补全未绑定状态失败 ({item.NotionPageId}): {ex.Message}");
+
+                    if (IsFatalAuthError(ex))
+                    {
+                        fatalAuthAborted = true;
+                        AppLog.Warn("[BackfillRelationsAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
+                            + "中止本轮逐条回写（后续记录必然同样失败）");
+                        break;
+                    }
                 }
             }
         }
 
         // 统一对齐远端每日记录的绑定状态（例如历史记录或直接在 Notion 中添加但尚未有绑定状态的行）
-        if (_lastPulledDailyRecords != null)
+        // ⚠️ 上面若已因致命认证/权限错误中止，这里整段跳过：否则等于把同一批无效请求再来一遍。
+        if (!fatalAuthAborted && _lastPulledDailyRecords != null)
         {
             foreach (var r in _lastPulledDailyRecords)
             {
@@ -1717,6 +1839,14 @@ public class NotionSyncService : INotionSyncService
                     catch (Exception ex)
                     {
                         AppLog.Warn($"[BackfillRelationsAsync] 同步远端未绑定状态失败 ({r.PageId}): {ex.Message}");
+
+                        if (IsFatalAuthError(ex))
+                        {
+                            fatalAuthAborted = true;
+                            AppLog.Warn("[BackfillRelationsAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
+                                + "中止本轮远端绑定状态对齐（后续记录必然同样失败）");
+                            break;
+                        }
                     }
                 }
                 else if (!string.IsNullOrEmpty(r.GameMasterPageId) && r.Status != "已绑定")
@@ -1729,9 +1859,24 @@ public class NotionSyncService : INotionSyncService
                     catch (Exception ex)
                     {
                         AppLog.Warn($"[BackfillRelationsAsync] 同步远端已绑定状态失败 ({r.PageId}): {ex.Message}");
+
+                        if (IsFatalAuthError(ex))
+                        {
+                            fatalAuthAborted = true;
+                            AppLog.Warn("[BackfillRelationsAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
+                                + "中止本轮远端绑定状态对齐（后续记录必然同样失败）");
+                            break;
+                        }
                     }
                 }
             }
+        }
+
+        if (fatalAuthAborted)
+        {
+            // 与"单条记录失败"区分：这是**整轮被致命错误中断**。
+            AppLog.Warn($"[BackfillRelationsAsync] 本轮因 Notion 认证/权限错误提前结束（已回填 {backfilled} 条）。"
+                + "Token 修复后下一轮同步会自动继续，本机数据未受影响");
         }
 
         if (backfilled > 0)
@@ -1861,6 +2006,15 @@ public class NotionSyncService : INotionSyncService
             {
                 // 单条失败不阻断其余记录：回刷是尽力而为的补偿动作，下轮还会再来。
                 AppLog.Warn($"回刷每日记录标题失败（{item.Date} {item.GameName}）: {ex.Message}");
+
+                // ⚠️ 2026-10-13 例外：致命认证/权限错误（401/403）⇒ 中止整个回刷循环 ——
+                //    后续每一条必然同样失败，逐条重试只是把同步拖到分钟级。
+                if (IsFatalAuthError(ex))
+                {
+                    AppLog.Warn("[RefreshDailyTitlesFromMasterAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
+                        + $"中止本轮回刷（已更新 {refreshed} 条；下轮同步会自动继续）");
+                    break;
+                }
             }
         }
 
@@ -2563,7 +2717,17 @@ public class NotionSyncService : INotionSyncService
                 record.NotionPageId
             }));
 
-        result.LocalDailyRecordsDeleted = await _repo.DeleteDailySummariesAsync(new[] { dailySummaryId });
+        // 🛡️ 2026-10-11（记录删除粒度重写）：用户显式删除一条历史记录时，只删 `daily_summary`
+        //    派生行是不够的（会话事实仍在 ⇒ 任何重算都会把这条记录原样派生回来，且删除无法跨设备传播）。
+        //    现在走 <see cref="IDatabaseRepository.DeletePlayRecordAsync"/> 的**单事务**链路：
+        //    按 (游戏, 会计日, 会话) 粒度作废时长分片 + 撤回该日声明 + 写墓碑/入队 + 重算所有受影响日期。
+        //    ⚠️ Notion 网络操作**不在**该事务里（归档在上面已经做过）；本地失败一律整体回滚。
+        var deletion = await _repo.DeletePlayRecordAsync(dailySummaryId);
+        result.LocalDailyRecordsDeleted = deletion.Found ? 1 : 0;
+        result.LocalPlayRecordFullyDeleted = deletion.FullyDeleted;
+        result.LocalRemainingSeconds = deletion.RemainingSeconds;
+        result.LocalActiveSessionsSkipped = deletion.ActiveSessionsSkipped;
+        result.LocalDeletionNote = deletion.Note;
 
         SyncStatusChanged?.Invoke(this,
             result.NotionDailyRecordsArchived > 0
@@ -2645,8 +2809,40 @@ public class NotionSyncService : INotionSyncService
                     }
                 }
 
+                // 🔒 2026-10-11（实机：A 删了 Notion 记录，B 却永远多算）：
+                //    只删本地派生行是不够的 —— 必须**撤回对应的外部声明**，否则
+                //    ① 本机按事实重算时会把这段时长再加回来；
+                //    ② 对端（Device Sync）永远不知道它被删了 ⇒ 双机统计永久不一致。
+                //    ⚠️ 顺序：**先删派生行、再撤回声明**。撤回内部会按事实重算该行，
+                //    于是最终结果 = Σ 会话派生 + Σ 剩余声明 —— 外部声明那一段消失，
+                //    会话派生的时长**原样留住**（页面被删 ≠ 没玩过）。
+                //    撤销沿用同一 identity（设备+游戏+日期+来源），并按既有同步协议入队传播；
+                //    只针对 Notion 来源，绝不误伤同一天同游戏的手工声明。
+                if (orphanRows.Count > 0)
+                {
+                    result.DeletedDailyRecords =
+                        await _repo.DeleteDailySummariesAsync(orphanRows.Select(r => r.Id));
+                }
+
                 foreach (var row in orphanRows)
                 {
+                    foreach (var source in new[]
+
+                             {
+                                 GameTimeTracker.Core.DeviceSync.DailyAdjustmentSources.Notion,
+                                 GameTimeTracker.Core.DeviceSync.DailyAdjustmentSources.NotionExternal
+                             })
+                    {
+                        try
+                        {
+                            await _repo.RevokeLocalDailyAdjustmentAsync(row.GameId, row.Date, source);
+                        }
+                        catch (Exception ex)
+                        {
+                            AppLog.Warn($"[删除对账] 撤回声明失败（{row.Date} {row.GameName} / {source}）：{ex.Message}");
+                        }
+                    }
+
                     await _repo.ArchiveDeletedAsync("daily", "notion",
                         $"{row.Date} {row.GameName}",
                         System.Text.Json.JsonSerializer.Serialize(new
@@ -2659,12 +2855,6 @@ public class NotionSyncService : INotionSyncService
                             row.NotionPageId,
                             row.SyncStatus
                         }));
-                }
-
-                if (orphanRows.Count > 0)
-                {
-                    result.DeletedDailyRecords =
-                        await _repo.DeleteDailySummariesAsync(orphanRows.Select(r => r.Id));
                 }
             }
 

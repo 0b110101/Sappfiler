@@ -44,6 +44,17 @@ public static class DeferredReasons
     /// </summary>
     public const string DeletionConflict = "deletion_conflict";
 
+    /// <summary>
+    /// 删除/旧记录的目标身份**无法确认**，但存在"同平台同名"等**弱线索**。
+    ///
+    /// <para>
+    /// ⚠️ 与 <see cref="DeletionConflict"/> 严格区分：后者是"身份明确命中了已删除实体"（事实），
+    /// 前者只是"可能是同一款游戏，但身份关系尚未建立"（怀疑）。弱线索**只能发现冲突**，
+    /// 不能作为归档、覆盖身份或固化删除标记的依据 ⇒ 一律保留现状 + 留痕等人工裁定。
+    /// </para>
+    /// </summary>
+    public const string PossibleDeletedGameIdentityConflict = "possible_deleted_game_identity_conflict";
+
     /// <summary>本阶段不落地的实体类型（例如 GameMapping）。</summary>
     public const string UnsupportedEntityType = "unsupported_entity_type";
 

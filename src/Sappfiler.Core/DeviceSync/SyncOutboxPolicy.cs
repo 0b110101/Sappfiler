@@ -26,6 +26,15 @@ public static class SyncOutboxPolicy
     /// </summary>
     public const int ReconcileBatchSize = 200;
 
+    /// <summary>
+    /// 一次「历史 Outbox Gap Repair」**每类**最多补多少条（用户 2026-10-08 裁定）。
+    ///
+    /// ⚠️ 这是**单遍上限**，不是"循环到清空"：Gap Repair 本身是幂等的
+    /// （判据 = 队列里还没有该实体的变更），这一遍没补完的下一次启动接着补。
+    /// 绝不在同步初始化里自旋成隐性死循环 —— 与 <see cref="ReconcileBatchSize"/> 同一口径。
+    /// </summary>
+    public const int GapRepairBatchSize = 200;
+
     /// <summary>已完成（收到服务器 ACK）的 Outbox 记录保留时长，过期即清理。</summary>
     public static readonly TimeSpan CompletedRetention = TimeSpan.FromDays(7);
 

@@ -79,6 +79,10 @@ public partial class SqliteRepository : IDatabaseRepository
                 notion_page_id TEXT,
                 status TEXT DEFAULT 'active',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                -- ⚠️ updated_at = "最后一次被任意写路径碰过"：监听循环**每 5 秒**都会经
+                --    GetOrCreateGameAsync 的命令刷新它。**绝不可**用它做"重新激活"或
+                --    "删除冲突"的仲裁依据 —— 那是 games.reactivated_at_utc 的职责
+                --    （migration 016；判据见 SqliteRepository.DeviceSync.cs 的 LocalIntentWinsSql）。
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(platform, platform_id)
             );
@@ -140,7 +144,8 @@ public partial class SqliteRepository : IDatabaseRepository
             );
 
             -- 删除留底：双向删除是物理删除，误判时靠这张表把数据找回。
-            -- kind: 'game' | 'daily'   source: 'app'（在程序里删）| 'notion'（对账发现远端已删）
+            -- kind: 'game' | 'daily' | 'play-record'（用户在历史页删除某 (游戏, 会计日) 记录）
+            -- source: 'app'（在程序里删）| 'notion'（对账发现远端已删）
             CREATE TABLE IF NOT EXISTS deleted_archive (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
@@ -275,7 +280,22 @@ public partial class SqliteRepository : IDatabaseRepository
                                     !string.IsNullOrWhiteSpace(g2.Name) &&
                                     string.Equals(g1.Name.Trim(), g2.Name.Trim(), StringComparison.OrdinalIgnoreCase);
 
-                    if (sameNotion || sameName)
+                    // 🛡️ 2026-10-11（身份模型审查）：**绝不按名称合并"强键可用且不相等"的两行**。
+                    //
+                    //    身份规则（GameIdentityRules）里"强键适用但不等"是 A 级冲突 ⇒ 一律阻断；
+                    //    而启动去重过去只按「同 Notion 页面 或 同名」分组、没有这条守卫 ⇒ 两款**同名但
+                    //    不同 AppID** 的游戏（本体 / 重制版 / 同平台两个发行条目）会被合并成一行，并把
+                    //    sessions / daily_duration_adjustments / daily_summary 搬到另一款游戏名下
+                    //    —— 事实错归属且不可逆（实测：两行 → 一行）。
+                    //
+                    //    同 Notion 页面的合并**不受影响**：页面本身就是跨设备共享的 Provider 身份。
+                    var leftFacts = new GameIdentityFacts(g1.Platform, g1.PlatformId);
+                    var rightFacts = new GameIdentityFacts(g2.Platform, g2.PlatformId);
+                    var strongKeyConflict = GameIdentityRules.StrongKeyAvailable(leftFacts)
+                                            && GameIdentityRules.StrongKeyAvailable(rightFacts)
+                                            && !GameIdentityRules.StrongKeyEqual(leftFacts, rightFacts);
+
+                    if (sameNotion || (sameName && !strongKeyConflict))
                     {
                         group.Add(g2);
                         visited.Add(g2.Id);
@@ -421,9 +441,18 @@ public partial class SqliteRepository : IDatabaseRepository
                         !string.IsNullOrWhiteSpace(bestGlobalId) &&
                         !string.Equals(discarded.GlobalId, bestGlobalId, StringComparison.Ordinal))
                     {
-                        WriteGameSupersession(conn, tx, discarded.GlobalId!, bestGlobalId!,
+                        // 🛡️ 2026-10-11（身份协议）：启动去重也走**统一入口** ——
+                        //    ① 不再自行决定 canonical（改为等价类内最小 identity，与对账/确认/对端一致）；
+                        //    ② 真正发生的映射**入队传播**（否则本机合并了、对端还留着两条身份）。
+                        var dedupOutcome = EstablishIdentityLinkCore(conn, tx,
+                            new[] { discarded.GlobalId, bestGlobalId },
                             SupersessionReasons.StartupDedupDuplicateIdentity);
-                        AppLog.Info($"[设备同步] 身份合并（非删除）：{discarded.GlobalId} → {bestGlobalId}（原「{dup.Name}」id={dup.Id}）");
+
+                        EnqueueIdentityMappingsCore(conn, tx, dedupOutcome.MappingsChanged,
+                            SupersessionReasons.StartupDedupDuplicateIdentity);
+
+                        AppLog.Info($"[设备同步] 身份合并（非删除）：{discarded.GlobalId} → {dedupOutcome.CanonicalGlobalId}"
+                            + $"（原「{dup.Name}」id={dup.Id}；传播 {dedupOutcome.MappingsChanged.Count} 条）");
                     }
 
                     AppLog.Info($"[维护] 自动合并重复游戏记录：「{canonical.Name}」(保留 id={canonical.Id}, 清理重复 id={dup.Id})");
@@ -480,8 +509,78 @@ public partial class SqliteRepository : IDatabaseRepository
                     new { identity.Name });
             }
 
+            // 4. 🛡️ 兜底（2026-10-12 实机事故修复）：同 (platform, platform_id) 的**已归档**行。
+            //
+            //    事故现场（用户真实库证据）：用户删除过某游戏（games.status='archived'），之后再次启动它 ——
+            //    上面三步的 WHERE 都带 NormalGamePredicate（排除 archived）⇒ 全都查不到 ⇒ 走到 INSERT，
+            //    而表级 UNIQUE(platform, platform_id) 仍被那条 archived 行占用 ⇒ 每 5 秒抛
+            //    "UNIQUE constraint failed: games.platform, games.platform_id"，该游戏**永远无法再被识别/计时**。
+            //
+            //    语义裁定（与"删除一条历史记录 ≠ 删除游戏"一致）：
+            //      **删除游戏 = 把它移出游戏库，不是永久禁止它产生新记录。**
+            //      本机用户主动启动该游戏 = 新意图 ⇒ 复用**同一行身份**并重新激活：
+            //        · id / global_id 全部保留 ⇒ 身份稳定，不会诞生第二条身份、不会重复计时；
+            //        · 历史事实与删除排除（daily_play_exclusions）分毫不动 ⇒ 被删掉的那一天**不会复活**；
+            //        · 墓碑（sync_tombstones）**不删** ⇒ 远端旧数据重放仍然被 GameDeletionGuard 挡下
+            //          （"本机新意图"与"远端复活"是两条独立路径，不能混为一谈）。
+            if (existing == null && !string.IsNullOrWhiteSpace(identity.PlatformId))
+            {
+                existing = await conn.QueryFirstOrDefaultAsync<GameRecord>(
+                    "SELECT * FROM games WHERE LOWER(platform) = LOWER(@Platform) "
+                    + "AND LOWER(platform_id) = LOWER(@PlatformId) "
+                    + $"AND NOT ({GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate}) "
+                    + "ORDER BY id ASC;",
+                    new { identity.Platform, identity.PlatformId });
+
+                if (existing != null)
+                {
+                    // ⚠️ 2026-10-12（仲裁缺陷修复）：这里是全仓**唯一**的 archived→active 转换点，
+                    //    因此也是**唯一**写 reactivated_at_utc 的地方 —— 它表达"用户此刻的重新激活意图"，
+                    //    供远端 Game Delete 仲裁使用（见 LocalIntentWinsSql / migration 016）。
+                    //    下面的通用更新块（existing != null 那段）**刻意不碰**这一列：那里的调用来自
+                    //    5 秒监听循环，绝不能把"心跳"当成"用户意图"。
+                    var reactivatedAt = UtcNowIso();
+
+                    // ⚠️ 2026-10-12（再激活的传播）：本机状态与"我要把它传播出去"必须**同一事务**提交。
+                    //    否则就会出现"本地已恢复、对端永远停在已删除"—— 真机实测的后果是对端既看不到该
+                    //    游戏恢复，也**收不到本机之后产生的会话**（对端落 deletion_conflict 且永久挂起）。
+                    bool queuedForSync;
+                    using (var tx = conn.BeginTransaction())
+                    {
+                        await conn.ExecuteAsync(
+                            "UPDATE games SET status = @active, reactivated_at_utc = @reactivatedAt, "
+                            + "updated_at = CURRENT_TIMESTAMP WHERE id = @Id;",
+                            new
+                            {
+                                active = GameTimeTracker.Core.DeviceSync.GameStatuses.Active,
+                                reactivatedAt,
+                                existing.Id
+                            },
+                            tx);
+
+                        queuedForSync = await EnqueueGameReactivationCoreAsync(conn, tx, existing, reactivatedAt);
+
+                        tx.Commit();
+                    }
+
+                    existing.Status = GameTimeTracker.Core.DeviceSync.GameStatuses.Active;
+
+                    AppLog.Info($"[计时] 「{existing.Name}」此前被删除（已归档），本次启动重新启用**同一身份**"
+                        + $"（id={existing.Id}，global_id 保持不变）；已删除的历史日期记录不会因此恢复。");
+
+                    if (queuedForSync)
+                    {
+                        AppLog.Info($"[设备同步] 已入队「{existing.Name}」的重新启用变更（{reactivatedAt}）："
+                            + "其他设备收到后会撤销本机此前传播过去的删除并恢复该游戏。");
+                    }
+                }
+            }
+
             if (existing != null)
             {
+                // ⚠️ 2026-10-12：本块由 **5 秒监听循环**高频调用（每次识别到在跑的游戏）。
+                //    它**刻意不更新 reactivated_at_utc**：这里的 updated_at 只是"被碰过"的时间戳，
+                //    与"用户重新激活意图"无关。远端 Delete 的仲裁一律看 reactivated_at_utc。
                 // If existing has manual or generic platform, but identity has a real platform (e.g. steam, xbox), upgrade it!
                 bool upgradePlatform = (existing.Platform == "manual" || existing.PlatformId.Length == 8 || existing.PlatformId.Length == 16) &&
                                        identity.Platform != "manual" && !string.IsNullOrEmpty(identity.PlatformId);
@@ -651,36 +750,67 @@ public partial class SqliteRepository : IDatabaseRepository
             string? globalId = (string?)snapshot.global_id;
             globalId = string.IsNullOrWhiteSpace(globalId) ? null : globalId!.Trim();
 
-            await conn.ExecuteAsync(
+            // 🛡️ 2026-10-11（删除传播修复）：没有 global_id 的本地行过去**既不起墓碑、也不入队**
+            //    （旧条件是 globalId is not null），删除根本不具备跨设备能力 —— 其他设备上的旧记录
+            //    可以直接把它复活。删除是**终态**，这里先补一个身份（同一事务），再走统一的
+            //    「归档 + 墓碑 + Delete 入队」路径，保证不会出现"状态已改、删除事件没写"的半完成态。
+            if (globalId is null)
+            {
+                globalId = Guid.NewGuid().ToString("N");
+                await conn.ExecuteAsync(
+                    "UPDATE games SET global_id = @globalId, updated_at = CURRENT_TIMESTAMP WHERE id = @gameId;",
+                    new { globalId, gameId }, tx);
+            }
+
+            var archivedCount = await conn.ExecuteAsync(
                 """
                 UPDATE games
-                SET status = @archived, updated_at = CURRENT_TIMESTAMP
+                SET status = @archived, reactivated_at_utc = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = @gameId AND LOWER(COALESCE(status, '')) <> @archived;
                 """,
                 new { archived = GameTimeTracker.Core.DeviceSync.GameStatuses.Archived, gameId }, tx);
 
-            // 墓碑 + Delete 变更只认 global_id（跨设备身份）；没有 global_id 的纯本地行无需传播。
-            if (globalId is not null)
+            // 🛡️ 2026-10-11（身份协议）：删除的是**逻辑实体**，不是某一个 identity ⇒
+            //    等价类里**每个** identity 都要写墓碑。否则对端那套被并入的 identity 的旧 Create
+            //    重放会绕过墓碑，只能靠"同平台同名"弱线索兜底（那正是要消除的不确定性）。
+            //    幂等（UNIQUE(entity_type, entity_global_id)），类内只有自己时是空操作。
+            var deleteClass = ReadIdentityClassCore(conn, tx, new[] { globalId });
+            if (deleteClass.Count > 1)
             {
-                WriteGameTombstone(conn, tx, globalId);
+                WriteIdentityClassTombstonesCore(conn, tx, deleteClass, ReadLocalDeviceId(conn, tx));
+            }
+
+            // 墓碑 + Delete 变更只认 global_id（跨设备身份）；上面已保证删除时 global_id 非空。
+            //
+            // ⚠️ 2026-10-11（幂等修复）：**只有真的把行改成归档时才入队**。旧实现无条件入队，
+            //    重复点删除会给同一条 identity 堆出多条 Delete 变更（实测第二次删除产生第 2 条），
+            //    既放大推送量，也让"删除已传播"的判断失去意义。墓碑写入本身是幂等的。
+            if (archivedCount > 0)
+            {
+                // ⚠️ 2026-10-12：**删除时刻只取一次**，墓碑与队列行共用同一个值 ——
+                //    接收端拿它写本地墓碑的 deleted_at_utc，推送守卫也拿它判定"比远端墓碑更新"。
+                var deletedAt = UtcNowIso();
+
+                WriteGameTombstone(conn, tx, globalId, deletedAt);
 
                 // 删除事实入队（同一个事务 ⇒ 与本地归档状态一起提交，不会出现"归档了但没传播"）。
                 // Payload 沿用与 Create 相同的 Game 快照（含 schema_version，保证 push 侧可校验）；
                 // 接收端在 Delete 分支只读 EntityType/EntityGlobalId，不会用 payload 回写任何字段。
-                await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
-                {
-                    QueueId = Guid.NewGuid().ToString("N"),
-                    EntityType = nameof(SyncEntityType.Game),
-                    EntityGlobalId = globalId,
-                    Operation = SyncOperation.Delete,
-                    BaseVersion = 1,
-                    Payload = SyncPayloadFactory.Game(
-                        globalId, (string)snapshot.name, (string)snapshot.platform,
-                        (string)snapshot.platform_id, (string)snapshot.executable,
-                        (string)snapshot.executable_path, (string?)snapshot.notion_page_id),
-                    CreatedAtUtc = UtcNowIso(),
-                    Status = SyncQueueStatus.Pending
-                });
+                //
+                // 🛡️ 2026-10-11（旧版本兼容）：**等价类内每个 identity 各发一条 Delete**。
+                //    旧版本设备无法按等价类解析，只会用"来件的 global_id 精确命中本机行"；
+                //    只发本机 identity 的话，对端那行带着另一个 identity 就归档不掉
+                //    （表现为"本机已删、对端界面还在"）。
+                //
+                // ⚠️ 2026-10-12（反复删除收敛）：queue_id 带上**本次删除时刻** ⇒ 每次真实删除各发一条。
+                //    只用 delete:{identity} 的话，"删除 → 重新启用 → 再删除"的第二次会被静默丢掉，
+                //    对端永远不知道该再次归档（真机实测"反复删除时对端不收敛 + 会话延后"）。
+                EnqueueIdentityClassDeletesCore(
+                    conn, tx, deleteClass,
+                    (string)snapshot.name, (string)snapshot.platform, (string)snapshot.platform_id,
+                    (string)snapshot.executable, (string)snapshot.executable_path,
+                    (string?)snapshot.notion_page_id,
+                    deletedAt);
             }
 
             tx.Commit();
@@ -944,20 +1074,98 @@ public partial class SqliteRepository : IDatabaseRepository
         }
     }
 
+    /// <summary>僵尸会话收尾时的只读快照（<c>last_heartbeat</c> 即"最后一次已 flush 的时刻"）。</summary>
+    public sealed class StaleSessionRow
+    {
+        public int Id { get; set; }
+        public string LastHeartbeat { get; set; } = "";
+        public int DurationSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// 把"卡住的活跃会话"（心跳超过阈值没更新）收尾。
+    ///
+    /// <para>
+    /// 收尾语义与**正常结束路径同源**（走 <see cref="EndSessionWithOutboxAsync"/>，不另写一套）：
+    /// <list type="bullet">
+    ///   <item>写 <c>end_time = last_heartbeat</c>、<c>is_active = 0</c>（与旧行为一致）；</item>
+    ///   <item>补 identity：<c>global_id / device_id / started_at_utc / ended_at_utc / time_precision</c>；</item>
+    ///   <item>与会话结束**同事务**地产生 Session(+Game) 同步事实 —— 否则这局会变成"本地有历史、
+    ///         Device Sync 永远不知道"的孤儿（用户 2026-10-08 裁定：Session 是 immutable historical fact，
+    ///         崩溃/被杀/异常关机导致的收尾同样必须产出同步事实）；</item>
+    ///   <item><b>尾段 daily 增量为 0</b>：心跳路径已经把时长 flush 到 <c>last_heartbeat</c>，
+    ///         这里传空增量 → 不重算、不重复计入（与旧行为逐字一致）。</item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 兜底：若同步事实写不进去（如事务/磁盘异常），**绝不让会话留在 active**（那正是"永远挂着"）——
+    /// 退化为最小收尾（<c>is_active = 0</c> + <c>end_time = last_heartbeat</c>）；
+    /// 缺的那条同步事实由「历史 Outbox Gap Repair」（<c>RepairOutboxGapsAsync</c>）在后续启动时补上。
+    /// <b>本地计时永远优先于同步。</b>
+    /// </para>
+    ///
+    /// 幂等：只处理 <c>is_active = 1 AND last_heartbeat &lt; threshold</c> 的行，重复调用不会重复入队。
+    /// </summary>
     public async Task CleanupStaleSessionsAsync(TimeSpan staleThreshold)
     {
+        // ① 只取"要收尾哪些会话"（短锁）。不能持着写锁去调 EndSessionWithOutboxAsync —— 它会自己再拿一次锁。
+        List<StaleSessionRow> stale;
         await _writeLock.WaitAsync();
         try
         {
             using var conn = CreateConnection();
             var thresholdTime = DateTime.Now.Subtract(staleThreshold).ToString("yyyy-MM-dd HH:mm:ss");
+            stale = (await conn.QueryAsync<StaleSessionRow>(
+                """
+                SELECT id             AS Id,
+                       last_heartbeat AS LastHeartbeat,
+                       duration_seconds AS DurationSeconds
+                FROM sessions
+                WHERE is_active = 1 AND last_heartbeat < @thresholdTime
+                ORDER BY id ASC;
+                """,
+                new { thresholdTime })).ToList();
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+
+        foreach (var row in stale)
+        {
+            var endTime = DateTime.Parse(row.LastHeartbeat);   // 与旧行为一致：结束时间取最后一次心跳
+            var duration = Math.Max(0, row.DurationSeconds);   // 心跳已写过的时长，原样保留
+
+            var result = await EndSessionWithOutboxAsync(
+                row.Id, endTime, duration, Array.Empty<DailyDurationDelta>());
+
+            if (result.SessionEnded) continue;
+
+            // 同步事实没写成 → 仍然收尾（绝不留下永远 active 的会话），缺口交给 Gap Repair
+            AppLog.Warn($"[设备同步] 僵尸会话 {row.Id} 的同步事实未写成，退化为最小收尾（缺口待 Gap Repair 补）");
+            await ForceCloseSessionAsync(row.Id, endTime);
+        }
+    }
+
+    /// <summary>
+    /// 最小收尾（旧行为）：只写 <c>is_active = 0</c> + <c>end_time</c>。
+    /// ⚠️ 只在"带 outbox 的完整收尾"失败时使用 —— 它会留下没有同步事实的缺口，
+    /// 必须由 <c>RepairOutboxGapsAsync</c> 补齐（这也是 Gap Repair 存在的理由之一）。
+    /// </summary>
+    private async Task ForceCloseSessionAsync(int sessionId, DateTime endTime)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
             await conn.ExecuteAsync(
                 """
-                UPDATE sessions 
-                SET is_active = 0, end_time = last_heartbeat
-                WHERE is_active = 1 AND last_heartbeat < @thresholdTime;
+                UPDATE sessions
+                SET is_active = 0, end_time = @endTime
+                WHERE id = @sessionId AND is_active = 1;
                 """,
-                new { thresholdTime });
+                new { sessionId, endTime = endTime.ToString("yyyy-MM-dd HH:mm:ss") });
         }
         finally
         {
@@ -1017,11 +1225,12 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
             WHERE d.date = @date
+              AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("g")}
             ORDER BY d.duration_minutes DESC;
             """,
             new { date });
@@ -1033,11 +1242,12 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
-            WHERE d.date >= @startDate AND d.date <= @endDate AND d.duration_minutes > 0
+            WHERE d.date >= @startDate AND d.date <= @endDate AND d.duration_seconds > 0
+              AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("g")}
             ORDER BY d.date ASC;
             """,
             new { startDate, endDate });
@@ -1049,10 +1259,12 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var dates = (await conn.QueryAsync<string>(
-            """
+            $"""
             SELECT date
             FROM daily_summary
-            WHERE duration_minutes > 0
+            -- 存在性用秒：<60 秒的一天也算"玩过"，否则连续游玩会断链
+            WHERE duration_seconds > 0
+              AND game_id IN (SELECT id FROM games WHERE {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate})
             GROUP BY date
             ORDER BY date DESC;
             """)).ToHashSet();
@@ -1088,10 +1300,12 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT game_id, MIN(date) AS first_date
             FROM daily_summary
-            WHERE duration_minutes > 0
+            -- 首次游玩日期同样按秒判定（30 秒的首次会话也是"首次游玩"）
+            WHERE duration_seconds > 0
+              AND game_id IN (SELECT id FROM games WHERE {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate})
             GROUP BY game_id;
             """);
 
@@ -1125,11 +1339,12 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id, g.notion_page_id AS game_notion_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
             WHERE d.sync_status NOT IN ('synced', 'unmapped') AND d.duration_minutes > 0
+              AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("g")}
             ORDER BY d.date ASC;
             """);
 
@@ -1196,7 +1411,7 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
@@ -1206,7 +1421,8 @@ public partial class SqliteRepository : IDatabaseRepository
                 WHERE end_time IS NOT NULL
                 GROUP BY game_id, substr(end_time, 1, 10)
             ) s ON s.game_id = d.game_id AND s.play_date = d.date
-            WHERE d.duration_minutes > 0
+            WHERE d.duration_seconds > 0
+              AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("g")}
             ORDER BY d.date DESC, COALESCE(s.last_end, '') DESC, d.id DESC
             LIMIT @limit;
             """,
@@ -1226,6 +1442,71 @@ public partial class SqliteRepository : IDatabaseRepository
             return dt.Date < DateTime.Today.AddDays(-7);
         }
         return false;
+    }
+
+    /// <summary>
+    /// <b>本地统一事实存储</b>（2026-10-10，用户裁定）：确保"承载导入事实的游戏"**既有 identity、又已进入 outbox**。
+    ///
+    /// <para>
+    /// 两步缺一不可：
+    /// <list type="number">
+    ///   <item>没有 <c>global_id</c> ⇒ 这条 adjustment 会被入队判据跳过（只落库、不进 Device Sync）；</item>
+    ///   <item>只补身份不推 <c>Game</c> ⇒ 对端落地时解析不到 <c>game_global_id</c>，永久 <c>dependency_missing</c>。
+    ///         真实事故（Notion 手工新增记录换机后同步不过去）正是这两步一起缺。</item>
+    /// </list>
+    /// Notion Pull 期间新建的游戏**没有任何会话**，因此既有的 Gap Repair Game 类目
+    /// （要求"本机产生过会话"）不会覆盖它 —— 这条路径必须自己保证。
+    /// </para>
+    ///
+    /// <para>幂等：身份只补空值；队列行按"任何状态已存在即跳过" + 与 Gap Repair **同源**的确定性 <c>queue_id</c>。</para>
+    /// </summary>
+    private async Task EnsureGameSyncIdentityAndOutboxAsync(SqliteConnection conn, GameRecord game)
+    {
+        DeviceSyncSchema.AssignMissingGameGlobalIds(conn);
+        DeviceSyncSchema.AssignGameGlobalIdIfMissing(conn, game.Id);
+
+        var globalId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT global_id FROM games WHERE id = @id;", new { id = game.Id });
+
+        if (string.IsNullOrWhiteSpace(globalId)) return;
+
+        // ⚠️ 设备同步从未启用（或更老的库）时 sync_queue 可能还不存在 ——
+        //    "补 outbox"绝不能把整条导入链拖垮（那会表现为"Notion 记录同步失败"且被静默吞掉）。
+        if (await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_queue';") == 0)
+        {
+            return;
+        }
+
+        if (await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = @type AND entity_global_id = @gid;",
+                new { type = nameof(SyncEntityType.Game), gid = globalId }) > 0)
+        {
+            return;   // 任何状态（Pending/InFlight/Completed/Failed）都算"已在队列"，绝不重复入队
+        }
+
+        var fresh = await conn.QuerySingleOrDefaultAsync<GameRecord>(
+                        "SELECT * FROM games WHERE id = @id;", new { id = game.Id })
+                    ?? game;
+
+        using var tx = conn.BeginTransaction();
+
+        await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
+        {
+            QueueId = SyncHashing.BackfillQueueId(nameof(SyncEntityType.Game), globalId!),
+            EntityType = nameof(SyncEntityType.Game),
+            EntityGlobalId = globalId!,
+            Operation = SyncOperation.Create,
+            BaseVersion = 1,
+            Payload = SyncPayloadFactory.Game(
+                globalId!, fresh.Name, fresh.Platform, fresh.PlatformId,
+                fresh.Executable, fresh.ExecutablePath, fresh.NotionPageId,
+                coverBlobHash: TryRegisterLocalCoverBlob(conn, tx, fresh.Platform, fresh.PlatformId)),
+            CreatedAtUtc = UtcNowIso(),
+            Status = SyncQueueStatus.Pending
+        });
+
+        tx.Commit();
     }
 
     public async Task<int> SyncDailyRecordFromNotionAsync(NotionDailyRecordItem item)
@@ -1332,6 +1613,35 @@ public partial class SqliteRepository : IDatabaseRepository
 
                         if (game == null)
                         {
+                            // 🛡️ 2026-10-11（已删除游戏复活修复）：上面的查找全部带 NormalGamePredicate
+                            //    （排除 archived）⇒ 用户已删除的游戏查不到就 **新建一条 active 行**
+                            //    ⇒ 同一款游戏被"另一个身份入口"复活。先找**已归档**的同款游戏：
+                            //    命中则复用它（导入事实挂在归档行上、界面不显示），绝不新建 active。
+                            var archivedId = FindArchivedGameForImport(conn, platform, platformId, item.GameMasterPageId, catItem.Name);
+                            if (archivedId is not null)
+                            {
+                                game = await conn.QuerySingleOrDefaultAsync<GameRecord>(
+                                    "SELECT * FROM games WHERE id = @id;", new { id = archivedId.Value });
+                            }
+                        }
+
+                        if (game == null)
+                        {
+                            // 🛡️ 2026-10-11（身份模型审查）：弱线索（同平台同名）**不得**升级为强身份。
+                            //    既不新建 active 副本（否则已删除游戏会以"另一个身份"复活），
+                            //    也不复用别的归档行（会把导入事实挂到错误的实体上）。
+                            //    只报告并跳过本条导入 —— 事实仍在 Notion 源侧，身份确认后可重新导入，不会丢失。
+                            var weakArchived = FindArchivedGamesByPlatformAndNameWeak(conn, platform, catItem.Name);
+                            if (weakArchived.Count > 0)
+                            {
+                                AppLog.Warn($"[Notion 导入] 「{catItem.Name}」存在同平台同名归档行 "
+                                    + $"{string.Join(",", weakArchived)}，但身份未建立关联 ⇒ 跳过本条导入，等人工裁定");
+                                return 0;
+                            }
+                        }
+
+                        if (game == null)
+                        {
                             var newId = await conn.ExecuteScalarAsync<int>(
                                 """
                                 INSERT INTO games (platform, platform_id, name, executable, executable_path, notion_page_id, status, created_at, updated_at)
@@ -1365,6 +1675,30 @@ public partial class SqliteRepository : IDatabaseRepository
 
             if (game == null)
             {
+                // 🛡️ 2026-10-11（已删除游戏复活修复）：同 4.6.1 —— 已删除游戏的同名 / 同 notion 页面记录
+                //    不得通过本入口复活成 active 行，复用归档行即可（历史事实与状态都保留）。
+                var archivedManualId = FindArchivedGameForImport(conn, "manual", null, item.GameMasterPageId, item.GameTitle);
+                if (archivedManualId is not null)
+                {
+                    game = await conn.QuerySingleOrDefaultAsync<GameRecord>(
+                        "SELECT * FROM games WHERE id = @id;", new { id = archivedManualId.Value });
+                }
+            }
+
+            if (game == null)
+            {
+                // 🛡️ 同 4.6.1：同平台同名的归档行只能作为**弱线索报告**，不能复用、也不能据此新建 active。
+                var weakArchivedManual = FindArchivedGamesByPlatformAndNameWeak(conn, "manual", item.GameTitle);
+                if (weakArchivedManual.Count > 0)
+                {
+                    AppLog.Warn($"[Notion 导入] 「{item.GameTitle}」存在同平台同名归档行 "
+                        + $"{string.Join(",", weakArchivedManual)}，但身份未建立关联 ⇒ 跳过本条导入，等人工裁定");
+                    return 0;
+                }
+            }
+
+            if (game == null)
+            {
                 var title = !string.IsNullOrEmpty(item.GameTitle) ? item.GameTitle : "未知游戏";
                 var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
                 var platformId = Guid.NewGuid().ToString("N")[..8];
@@ -1384,6 +1718,12 @@ public partial class SqliteRepository : IDatabaseRepository
             }
 
             if (game == null) return 0;
+
+            // ---- 本地优先（2026-10-10，用户裁定）：Pull 期间新建 / 尚无身份的 Game 必须**当场**拿到同步身份 ----
+            // 入队要求 game.global_id 非空（DailyAdjustments.cs 的入队判据），所以身份必须在
+            // "写 adjustment 并入队"**之前**就绪，否则这条导入事实只会落库、进不了 Device Sync。
+            // 复用**唯一实现**（只补"可同步资格"且 global_id 仍为空的行；幂等 ⇒ 不会重复分配身份）。
+            await EnsureGameSyncIdentityAndOutboxAsync(conn, game);
 
             // If game had no notion_page_id but this item has it, link it
             if (string.IsNullOrEmpty(game.NotionPageId) && !string.IsNullOrEmpty(item.GameMasterPageId))
@@ -1420,31 +1760,151 @@ public partial class SqliteRepository : IDatabaseRepository
                 """,
                 new { date = item.Date, targetGameId });
 
+            // ───────────── v2：Notion 日时长是**增量事实**，不是整行的权威值 ─────────────
+            //
+            // 语义（2026-10-08 用户批准冻结）：
+            //     daily_summary(game, 统计日) = Σ 会话派生秒数 + Σ adjustments(该 game 该日, **全部设备相加**)
+            //
+            // Notion 给的"当日总时长"里减去本地会话已经算过的部分，差额才是**手工/Notion 增量**；
+            // 把它记成一条本机 adjustment（source=notion，identity 稳定 ⇒ 重复导入幂等）。
+            // 这样"对端没有 Notion 也能拿到这段时长"是靠 Device Sync 的 v2 实体实现的，
+            // **不是**把这个 daily 行当成远端状态推过去（那正是以前做不到跨设备的原因）。
+            var derivedSecondsForDate = SumSessionDerivedSeconds(
+                conn, null, targetGameId, item.Date, ReadDailyCutoffHour(conn, null));
+
+            // canonical seconds（2026-10-09）：Notion 侧只有 0.01h（≈36 秒）分辨率，
+            // **外部输入只能一次换算成秒**（round(hours × 3600)），绝不再经"小时→分钟→秒"中转，
+            // 否则 7.79h 会先被截成 467 分钟、再换回去变成 7.78h。
+            // 老数据/测试构造的 item 没有 DurationSeconds 时，退回分钟 × 60。
+            var notionSeconds = item.DurationSeconds > 0
+                ? item.DurationSeconds
+                : item.DurationMinutes * 60;
+
+            DailySummaryRow? existing = rowByPage ?? rowByDateAndGame;
+            var existingDailySeconds = existing?.DurationSeconds ?? 0;
+
+            bool inflatedByMinuteUnitBugForDay =
+                item.DurationUnitIsMinutes &&
+                item.DurationMinutes > 0 &&
+                !string.IsNullOrEmpty(existing?.NotionPageId) &&
+                existing!.DurationSeconds >= notionSeconds;
+
+            // 该 (设备, 游戏, 日, notion) 声明的稳定 identity。
+            var targetGameGlobalId = conn.ExecuteScalar<string?>(
+                "SELECT global_id FROM games WHERE id = @id;", new { id = targetGameId });
+
+            var notionStatementId = DailyAdjustmentGlobalId.For(
+                ReadLocalDeviceId(conn, null),
+                string.IsNullOrWhiteSpace(targetGameGlobalId) ? $"local-game-{targetGameId}" : targetGameGlobalId!,
+                item.Date,
+                DailyAdjustmentSources.Notion);
+
+            // 读取本机这条声明 + **上次观察到的远端声明快照**（NULL = 还没有可靠快照）
+            var existingNotionRow = conn.QuerySingleOrDefault<dynamic>(
+                """
+                SELECT duration_seconds AS DurationSeconds, observed_remote_seconds AS ObservedRemoteSeconds
+                FROM daily_duration_adjustments WHERE adjustment_global_id = @id;
+                """,
+                new { id = notionStatementId });
+
+            int? existingNotionStatement = existingNotionRow is null
+                ? null
+                : (int?)existingNotionRow.DurationSeconds;
+
+            int? observedRemoteSeconds = existingNotionRow is null
+                ? null
+                : (int?)existingNotionRow.ObservedRemoteSeconds;
+
+            // 🔒 2026-09-19 QA 事故规则：同一天**已绑定另一个** Notion 页面（2.2h 与 2.4h 两个条目）
+            //    → 后到的重复页面绝不叠加、也不冲掉已收录的权威时长（否则两边 pageId 串号 + 循环累加）。
+            var isDuplicatePageForSameDay =
+                existingNotionStatement is not null
+                && !string.IsNullOrEmpty(existing?.NotionPageId)
+                && !string.Equals(existing!.NotionPageId, item.PageId, StringComparison.Ordinal);
+
+            if (!isDuplicatePageForSameDay)
+            {
+                // ⚠️ 必须**排除本机自己的这一条声明**：它是"要被改写的目标"，不是"别人的事实"。
+                //    否则更新会退化成"把增量加到旧值上"（45min → 60min 会变成 15min）。
+                var ownStatementSeconds = existingNotionStatement ?? 0;
+                var otherAdjustments = SumAdjustments(conn, null, targetGameId, item.Date) - ownStatementSeconds;
+
+                // Notion 给的是"当天总时长" ⇒ 本机声明应为"扣除会话派生与其它设备事实之后"的余额。
+                var notionStatementSeconds = Math.Max(
+                    0, notionSeconds - derivedSecondsForDate - otherAdjustments);
+
+                // 行内"人工声明"的下限 = 行值 − 会话派生 − 其它设备事实，也就是本机此前
+                // 记在这一行上的人工秒数（含旧版本直接写行的值）。
+                // ⚠️ 这不是"要清理的脏数据"：本地领先远端时必须靠它守住已记录的时长，
+                //    否则每轮 Pull 都会把本地的 41 分钟洗成 Notion 上的旧 12 分钟。
+                var localManualFloorSeconds = Math.Max(
+                    0, existingDailySeconds - derivedSecondsForDate - otherAdjustments);
+
+                // 历史日期 / 膨胀修正：完全尊崇 Notion 权威（允许把本地旧值改小）；
+                // 近期日期：**绝不回退**（本地领先时不接受远端旧值）。
+                //
+                // 🔒 例外（2026-10-09，9/19 QA 规则）：远端**根本没有可用时长**（属性缺失 / 0 / 坏值）
+                //    ⇒ 一律保留本地已记录的秒数，绝不拿 0 去覆盖 —— 历史行也不例外。
+                //    "Notion 没有值" 不是"时长为 0"的证据。
+                // ✅ 2026-10-10（用户裁定 §6）：**同一 identity 的声明以 Notion 为权威**（增与减都收敛）——
+                //    但只有在"这一行完全由事实构成"时才适用，否则远端旧值会把本地进度吃掉。
+                //
+                //    判据 = `localManualFloorSeconds == 0`，即 **行值 == Σ 会话派生 + Σ 声明**：
+                //      · 为 0 ⇒ 行里没有"无事实依据的秒数" ⇒ 用户可以放心改大/改小，本地跟着收敛；
+                //      · > 0 ⇒ 本地还压着无法解释的进度（QA app(2).log：记录创建后 Notion 停在 12 min、
+                //              本地一路涨到 41 min）⇒ 维持既有"本地领先不回退"，并把状态留 pending 以便回刷。
+                //    历史日期 / 分钟膨胀修正本来就走 Notion 权威，不受此分支影响。
+                // ⚠️ 2026-10-10 结论（本批次实测）：**"远端比本地低"这一状态无法区分两种成因** ——
+                //    · 远端陈旧（QA app(2).log：Notion 停在 12 min、本地涨到 41 min，必须保住本地并回刷）；
+                //    · 用户主动下调（§6：1200→1000 应该收敛到 1000）。
+                //    两者在库里完全同形（row > 远端声明），本地没有"上一次远端声明"的持久化信号可供比对，
+                //    因此**按本批次明确要求保留既有语义**：本地领先时不接受远端旧值（并留 pending 以便回刷）。
+                //    §6 的"主动下调收敛"需要新增一个持久化的"上次远端声明快照"才能安全实现 —— 见报告"未完成项"。
+                // ✅ 2026-10-10：**基于快照的变化检测** —— 只有"本次远端值与上次观察到的快照不同"才认定为
+                //    用户改动了这条声明（增、减都接受并收敛）；快照缺失或未变化 ⇒ 维持既有"本地领先不回退"。
+                //    ⚠️ 这是**轮询式**检测：程序两次观察之间发生的多次修改只能看到最后一次的净效果，
+                //       更进一步的历史我们无法还原（不宣称能解决）。
+                var remoteDeclarationChanged =
+                    observedRemoteSeconds is int previousObserved
+                    && Math.Abs(previousObserved - notionSeconds) > 1;   // 容差 1 秒，吸收两边整秒截断
+
+                var statementSeconds = notionSeconds <= 0
+                    ? localManualFloorSeconds
+                    : remoteDeclarationChanged || isHistorical || inflatedByMinuteUnitBugForDay
+                        ? notionStatementSeconds
+                        : Math.Max(localManualFloorSeconds, notionStatementSeconds);
+
+                await UpsertLocalAdjustmentWithOwnTransactionAsync(
+                    conn, targetGameId, item.Date, statementSeconds, DailyAdjustmentSources.Notion,
+                    observedRemoteSeconds: notionSeconds);
+            }
+
+            // ⚠️ 派生行（daily_summary）由**本方法自己**按同一公式（Σ 会话派生 + Σ 声明）写入 ——
+            //    这里是它唯一的写入者。不要在这里再调 RecomputeDailySummaryForGameDate：
+            //    那会先建行、随后本方法的 INSERT 撞 UNIQUE(date, game_id)（实测）。
+
+            // 该行最终值 = 会话派生 + 全部设备/来源的 adjustments（**相加**，不是 max、不是 LWW）
+            var authoritativeSeconds = derivedSecondsForDate
+                + SumAdjustments(conn, null, targetGameId, item.Date);
+
             // 计算权威时长与同步状态
             // 🚨 关键修复：必须检查 Notion 页面端是否真正建立了关联 (item.GameMasterPageId)。
             // 如果 Notion 端未关联（虽然本地根据游戏名识别出了 game），状态必须设为 "unmapped"，
             // 这样 BackfillRelationsAsync 才能检测到并向 Notion 回写关联属性并标记为"已绑定"。
             bool isBoundOnNotion = !string.IsNullOrEmpty(item.GameMasterPageId);
-            int finalMinutes = item.DurationMinutes;
-            int finalSeconds = item.DurationMinutes * 60;
+            // 行值一律 = 会话派生 + Σ adjustments（见上面的 v2 段）。
+            int finalSeconds = authoritativeSeconds;
+            int finalMinutes = authoritativeSeconds / 60;
             string newStatus = isBoundOnNotion ? "synced" : "unmapped";
 
-            DailySummaryRow? existing = rowByPage ?? rowByDateAndGame;
             if (existing != null)
             {
                 int existingMinutes = existing.DurationMinutes;
-                int existingSeconds = existing.DurationSeconds;
 
-                bool inflatedByMinuteUnitBug =
-                    item.DurationUnitIsMinutes &&
-                    item.DurationMinutes > 0 &&
-                    !string.IsNullOrEmpty(existing.NotionPageId) &&
-                    existingMinutes >= item.DurationMinutes * 60;
-
-                if (inflatedByMinuteUnitBug)
+                if (inflatedByMinuteUnitBugForDay)
                 {
-                    finalMinutes = item.DurationMinutes;
-                    finalSeconds = item.DurationMinutes * 60;
+                    // 膨胀修正：新模型下"该行的正确值"已经由 facts 推出（派生 + adjustments），
+                    // 不再需要把 notion 的分钟数直接写回去 —— 这里只补日志与状态。
                     newStatus = isBoundOnNotion ? "synced" : "unmapped";
                     AppLog.Warn(
                         $"[同步] 修正历史时长膨胀：「{item.GameTitle}」{item.Date} " +
@@ -1452,15 +1912,13 @@ public partial class SqliteRepository : IDatabaseRepository
                 }
                 else if (isHistorical)
                 {
-                    // 🚨 历史日期：Notion 上的时长为唯一权威！
-                    finalMinutes = item.DurationMinutes;
-                    finalSeconds = item.DurationMinutes * 60;
+                    // 历史日期：Notion 的手工时长是**增量权威**（已经折算进上方的 adjustment）。
                     newStatus = isBoundOnNotion ? "synced" : "unmapped";
                 }
                 else
                 {
-                    finalMinutes = Math.Max(existingMinutes, item.DurationMinutes);
-                    finalSeconds = Math.Max(existingSeconds, item.DurationMinutes * 60);
+                    // ⚠️ 与 **Notion 侧的值**比较（不是与本地行值比）：本地领先远端 ⇒ 仍需回刷 → pending，
+                    //    否则每轮 Pull 都把 pending 洗成 synced，回刷永远查不到待上传记录（QA app(2).log 事故）。
                     newStatus = (existingMinutes > item.DurationMinutes) ? "pending" : (isBoundOnNotion ? "synced" : "unmapped");
                 }
             }
@@ -1469,6 +1927,18 @@ public partial class SqliteRepository : IDatabaseRepository
             if (rowByPage != null)
             {
                 int oldGameId = rowByPage.GameId;
+
+                // 🔒 2026-10-11（migration 011 兼容，定点修复）：这条每日记录从 oldGameId 搬到
+                //    targetGameId 时，**oldGameId 上的时长声明必须一起搬走** —— 否则：
+                //    ① 它变成谁也认领不了的孤儿声明（既不进统计、也不参与同步）；
+                //    ② migration 011 的物理删除守卫会因此挡住幽灵行的清理（守卫要求三张事实表都空）。
+                //    与 `MigrateGameDataToCanonical` 的搬移语义保持一致。
+                if (oldGameId != targetGameId)
+                {
+                    await conn.ExecuteAsync(
+                        "UPDATE daily_duration_adjustments SET game_id = @targetId WHERE game_id = @oldId;",
+                        new { targetId = targetGameId, oldId = oldGameId });
+                }
 
                 // 如果目标 (item.Date, targetGameId) 已经有另一行（例如用户在 Notion 改了日期或关系，撞上了已有行）：
                 if (rowByDateAndGame != null && rowByDateAndGame.Id != rowByPage.Id)
@@ -1648,12 +2118,13 @@ public partial class SqliteRepository : IDatabaseRepository
     {
         using var conn = CreateConnection();
         var rows = await conn.QueryAsync<dynamic>(
-            """
+            $"""
             SELECT d.*, g.name AS game_name, g.platform, g.platform_id
             FROM daily_summary d
             JOIN games g ON d.game_id = g.id
-            WHERE d.date = @date AND d.duration_minutes > 0
-            ORDER BY d.duration_minutes DESC
+            WHERE d.date = @date AND d.duration_seconds > 0
+              AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicateFor("g")}
+            ORDER BY d.duration_seconds DESC
             LIMIT @limit;
             """,
             new { date, limit });
@@ -1749,8 +2220,11 @@ public partial class SqliteRepository : IDatabaseRepository
         var target = Matcher.NormalizeTitle(name);
         if (string.IsNullOrEmpty(target)) return null;
 
+        // ⚠️ 2026-10-11：必须排除已归档（用户已删除）的行，否则"未绑定同名兜底"会把
+        //    已删除的游戏重新当成活动实体复用（Notion 导入路径的复活向量）。
         var unbound = await conn.QueryAsync<GameRecord>(
-            "SELECT * FROM games WHERE coalesce(notion_page_id, '') = '';");
+            "SELECT * FROM games WHERE coalesce(notion_page_id, '') = '' "
+            + $"AND {GameTimeTracker.Core.DeviceSync.GameStatuses.NormalGamePredicate};");
 
         // 两边都要剥一次时长后缀再比。
         // 幽灵行的名字是**旧版本程序**写进去的（那时 StripSuffix 还认不出
@@ -1796,6 +2270,12 @@ public partial class SqliteRepository : IDatabaseRepository
                 "SELECT COUNT(*) FROM daily_summary WHERE game_id = @id;", new { id = gameId }) > 0) return;
         if (await conn.ExecuteScalarAsync<int>(
                 "SELECT COUNT(*) FROM sessions WHERE game_id = @id;", new { id = gameId }) > 0) return;
+
+        // ⚠️ 2026-10-11：adjustment 也是**持久化事实**（它没有外键，物理删 games 不会连带删它，
+        //    但会把它变成谁也认领不了的孤儿）。migration 011 的守卫已把"仍有 adjustment 的 games 行"
+        //    也纳入保护 ⇒ 幽灵行判定必须同样要求"无 adjustment"，否则这条合法清理会被守卫挡住。
+        if (await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM daily_duration_adjustments WHERE game_id = @id;", new { id = gameId }) > 0) return;
 
         await conn.ExecuteAsync(
             """
