@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace GameTimeTracker.Infrastructure.Process;
@@ -168,6 +169,57 @@ public static class ProcessFilter
             {
                 if (normPath.Contains(kw)) return true;
             }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 反作弊 / 运行库 / 启动器**目录**关键字。
+    /// </summary>
+    private static readonly string[] EcosystemPathKeywords = new[]
+    {
+        @"\easyanticheat",   // 同时覆盖 EasyAntiCheat\ 与 EasyAntiCheat_EOS\
+        @"\battleye",
+        @"\anticheat",
+        @"\start_protected_game"
+    };
+
+    /// <summary>
+    /// 判定一个 exe 是「**游戏生态组件**」（反作弊 / 启动器 / 辅助进程），而不是**游戏本体**。
+    ///
+    /// <para>
+    /// 为什么必须单独有这一条：组件 exe 常常**就住在游戏安装目录里**、或与游戏**同时运行**，
+    /// 所以"按安装目录前缀匹配已知游戏"会把它们误认成这款游戏，进而让它们的 exe 路径
+    /// 进入游戏身份（<c>games.executable_path</c>）—— 最典型的后果是**抠出来的图标是反作弊的 logo**：
+    /// Halo: The Master Chief Collection 真机实测（2026-10-05）就是显示了 Easy Anti-Cheat 的图标。
+    /// </para>
+    ///
+    /// <para>
+    /// 判据与 <see cref="IsBlacklisted"/> **共用同一批集合**（启动器 / 辅助进程 / 工具名正则），
+    /// 只是把"是否要计入游玩"的判定改成了"是否属于游戏本体"的判定 —— 这样两处永远不会漂移。
+    /// 额外补上路径型关键字：反作弊常安装在 Program Files 下的独立目录（如
+    /// <c>C:\Program Files (x86)\EasyAntiCheat_EOS</c>），只有按目录名才认得出来。
+    /// </para>
+    /// </summary>
+    public static bool IsEcosystemComponent(string? exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath)) return false;
+
+        var fileName = Path.GetFileName(exePath);
+        if (string.IsNullOrWhiteSpace(fileName)) return false;
+
+        if (Launchers.Contains(fileName) ||
+            AuxiliaryProcesses.Contains(fileName) ||
+            ToolNamePatterns.IsMatch(fileName))
+        {
+            return true;
+        }
+
+        var normPath = exePath.ToLowerInvariant();
+        foreach (var kw in EcosystemPathKeywords)
+        {
+            if (normPath.Contains(kw)) return true;
         }
 
         return false;

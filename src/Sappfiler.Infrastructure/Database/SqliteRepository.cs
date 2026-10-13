@@ -11,7 +11,7 @@ namespace GameTimeTracker.Infrastructure.Database;
 
 // partial：设备同步的存储层放在 SqliteRepository.DeviceSync.cs（新文件），
 // 这样本文件与 feature/multi-backend-sync 分支的改动区域几乎不重叠，便于将来合并。
-public partial class SqliteRepository : IDatabaseRepository
+public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Core.Notion.INotionIconMappingStore
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -2497,6 +2497,42 @@ public partial class SqliteRepository : IDatabaseRepository
         using var conn = CreateConnection();
         return await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT value FROM settings WHERE key = @key;", new { key });
+    }
+
+    /// <summary>
+    /// 按 <c>sessions.process_name</c> 统计次数 —— 本体裁决的历史证据。
+    /// **只读**：不写库、不改 schema（2026-10-07 C2）。
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, int>> GetSessionProcessCountsAsync()
+    {
+        using var conn = CreateConnection();
+        var rows = await conn.QueryAsync<(string ProcessName, int Cnt)>(
+            "SELECT process_name AS ProcessName, COUNT(*) AS Cnt FROM sessions GROUP BY process_name;");
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, cnt) in rows)
+        {
+            if (!string.IsNullOrWhiteSpace(name)) map[name] = cnt;
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// 删除一个 settings 键。用于「封面 → FileUpload 映射」失效时清掉旧值，让下次同步重新上传。
+    /// </summary>
+    public async Task DeleteSettingAsync(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return;
+
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            await conn.ExecuteAsync("DELETE FROM settings WHERE key = @key;", new { key });
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public async Task SetSettingAsync(string key, string value)
