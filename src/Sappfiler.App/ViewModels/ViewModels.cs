@@ -143,7 +143,8 @@ public partial class HomeViewModel : ObservableObject
     [ObservableProperty] public partial string WeekDeltaIconData { get; set; } = TablerDashPath;
     [ObservableProperty] public partial Microsoft.UI.Xaml.Media.Brush WeekDeltaBrush { get; set; } = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81));
 
-    [ObservableProperty] public partial int StreakDays { get; set; } = 3;
+    // 初始值与下方 Math.Max(streak, 1) 保持一致：新用户/首次刷新前显示 1 天（Lv.1 起点），不显示遗留占位值
+    [ObservableProperty] public partial int StreakDays { get; set; } = 1;
     [ObservableProperty] public partial string StreakRankTitle { get; set; } = "🎮 Lv.1 愿望单收集家";
     [ObservableProperty] public partial string NextMilestoneText { get; set; } = "下一个里程碑：6 天 (🌿 Lv.2)";
     [ObservableProperty] public partial double NextMilestoneTarget { get; set; } = 6;
