@@ -818,7 +818,8 @@ public class NotionClient : INotionClient
                 AppLog.Warn($"[DailyIcon] /send 失败: HTTP {(int)resp.StatusCode}");
                 return false;
             }
-            catch (Exception ex) when (attempt < _maxRetries)
+            // 过滤器分支只负责"退避后重试"，不使用异常对象；下方分支才记录原因 ⇒ 不声明变量（CS0168）
+            catch (Exception) when (attempt < _maxRetries)
             {
                 await Task.Delay(TimeSpan.FromSeconds(attempt));
             }
