@@ -59,6 +59,24 @@ public sealed partial class PendingPage : Page
     private async Task LoadPendingGamesAsync()
     {
         if (_repo == null) return;
+
+        // ⚠️ 2026-10-12（产品语义，用户明确）：「待处理」= **未绑定到 Notion 游戏总表**的游戏
+        //    （未来接入思源 / Obsidian 等其他 Provider 时同理）。
+        //    本机没绑定 Notion ⇒ 这里根本没有需要处理的内容：如实说明并清空列表，
+        //    **不得**落到下面那条"所有游戏均已完成 Notion 绑定"的空态文案（那会误导用户）。
+        //    判据用 _syncService（两条导航重载都会赋值；_config 仅在 5 参重载里存在）。
+        if (_syncService?.IsNotionConfigured == false)
+        {
+            NotionNotBoundNotice.Visibility = Visibility.Visible;
+            EmptyNotice.Visibility = Visibility.Collapsed;
+            PendingRepeater.ItemsSource = null;
+            IgnoredRepeater.ItemsSource = null;
+            IgnoredSection.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        NotionNotBoundNotice.Visibility = Visibility.Collapsed;
+
         var pending = await _repo.GetPendingGamesAsync();
         var activePending = pending.Where(p => p.Status != "ignored").ToList();
         _ignoredGames = pending.Where(p => p.Status == "ignored").ToList();
@@ -221,6 +239,14 @@ public sealed partial class PendingPage : Page
 
         try
         {
+            // 🛡️ 2026-10-12：删除游戏**之前**先按既有规则结束该游戏的活跃会话
+            //    （落尾段 daily + 跨日切分 + 同步入队）。否则删除归档后重新启动游戏会**复用**这条旧会话，
+            //    新计时就接在了旧起点上。只影响这一个游戏，其它游戏的活跃会话不受影响。
+            if (MainWindow.CurrentWindow is { } mainWindow)
+            {
+                await mainWindow.EndGameSessionsForDeleteAsync(game.Id);
+            }
+
             if (_syncService == null)
             {
                 await _repo.DeleteGameAsync(game.Id);

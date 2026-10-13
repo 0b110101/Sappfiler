@@ -5,10 +5,27 @@ using GameTimeTracker.Core.Interfaces;
 using GameTimeTracker.Core.Models;
 using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure.Covers;
+using GameTimeTracker.Infrastructure.DeviceSync;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 
 namespace GameTimeTracker.App.ViewModels;
+
+/// <summary>
+/// 「立即同步」反馈的严重级别（2026-10-12）。今日页据此选择提示窗的 Severity ——
+/// ViewModel 不引用任何 WinUI 控件类型，映射由页面负责。
+/// </summary>
+public enum SyncFeedbackKind
+{
+    /// <summary>中性信息：未启用同步 / 同步进行中 / 已是最新（无传输）。</summary>
+    Info,
+
+    /// <summary>本轮确实发生了传输（上传 / 下载 / 延后 / 墓碑传播）。</summary>
+    Success,
+
+    /// <summary>失败或异常 —— 必须让用户看见并能照着重试。</summary>
+    Warning
+}
 
 public partial class HeatmapCellViewModel : ObservableObject
 {
@@ -151,26 +168,53 @@ public partial class HomeViewModel : ObservableObject
     [ObservableProperty] public partial string NotionLastSyncText { get; set; } = "";
     [ObservableProperty] public partial string NotionStatusBrushKey { get; set; } = "TextPrimaryBrush";
 
-    public Microsoft.UI.Xaml.Media.Brush NotionStatusBrush
+    public Microsoft.UI.Xaml.Media.Brush NotionStatusBrush => ResolveStatusBrush(NotionStatusBrushKey);
+
+    /// <summary>
+    /// 由画刷 key（如 <c>StatusGreenBrush</c>）解析出实际画刷：优先应用资源（跟随主题），
+    /// 资源缺失时退回与设计稿一致的固定色 —— 绝不因为资源找不到就把状态点画成透明或抛异常。
+    ///
+    /// <para>2026-10-12：从 <c>NotionStatusBrush</c> 的属性体提出来，供主窗口左下角状态胶囊复用
+    /// （两处必须同色，否则会出现"卡片绿、侧栏橙"这种自相矛盾）。</para>
+    /// </summary>
+    public static Microsoft.UI.Xaml.Media.Brush ResolveStatusBrush(string? key)
     {
-        get
+        key = string.IsNullOrEmpty(key) ? "TextPrimaryBrush" : key;
+
+        if (Microsoft.UI.Xaml.Application.Current?.Resources is { } resources
+            && resources.TryGetValue(key, out var res)
+            && res is Microsoft.UI.Xaml.Media.Brush themed)
         {
-            var key = string.IsNullOrEmpty(NotionStatusBrushKey) ? "TextPrimaryBrush" : NotionStatusBrushKey;
-            if (Microsoft.UI.Xaml.Application.Current.Resources.TryGetValue(key, out var res) && res is Microsoft.UI.Xaml.Media.Brush b)
-            {
-                return b;
-            }
-            return key switch
-            {
-                "StatusGreenBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x34, 0xD3, 0x99)),
-                "StatusOrangeBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xFB, 0x92, 0x3C)),
-                "StatusRedBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xF8, 0x71, 0x71)),
-                _ => new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                    Microsoft.UI.Xaml.Application.Current?.RequestedTheme == Microsoft.UI.Xaml.ApplicationTheme.Dark
-                        ? Windows.UI.Color.FromArgb(255, 0xCC, 0xCC, 0xFF)
-                        : Windows.UI.Color.FromArgb(255, 0x0F, 0x17, 0x2A))
-            };
+            return themed;
         }
+
+        return key switch
+        {
+            "StatusGreenBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x34, 0xD3, 0x99)),
+            "StatusOrangeBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xFB, 0x92, 0x3C)),
+            "StatusRedBrush" => new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 0xF8, 0x71, 0x71)),
+            _ => new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                Microsoft.UI.Xaml.Application.Current?.RequestedTheme == Microsoft.UI.Xaml.ApplicationTheme.Dark
+                    ? Windows.UI.Color.FromArgb(255, 0xCC, 0xCC, 0xFF)
+                    : Windows.UI.Color.FromArgb(255, 0x0F, 0x17, 0x2A))
+        };
+    }
+
+    /// <summary>
+    /// 人话版相对时间（"刚刚 / N 分钟前 / N 小时前 / yyyy-MM-dd HH:mm"）。
+    /// 2026-10-12 提取为**唯一实现**：主窗口左下角状态胶囊与「多设备同步设置」页共用，
+    /// 避免两处各写一份导致口径漂移。
+    /// </summary>
+    public static string FormatRelativeTime(DateTimeOffset? at)
+    {
+        if (at is null) return "从未";
+
+        var delta = DateTimeOffset.UtcNow - at.Value;
+        if (delta < TimeSpan.Zero) return "刚刚";
+        if (delta < TimeSpan.FromMinutes(1)) return "刚刚";
+        if (delta < TimeSpan.FromHours(1)) return $"{delta.TotalMinutes:0} 分钟前";
+        if (delta < TimeSpan.FromDays(1)) return $"{delta.TotalHours:0} 小时前";
+        return at.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
     }
 
     partial void OnNotionStatusBrushKeyChanged(string value)
@@ -216,6 +260,44 @@ public partial class HomeViewModel : ObservableObject
     public Action<string>? RequestNavigate { get; set; }
     public Func<Func<Task>, Task>? HeroTransitionHandler { get; set; }
 
+    /// <summary>
+    /// 「立即同步」的结果通知（2026-10-12）。今日页据此弹**右下角提示窗** ——
+    /// 此前点完只在卡片里换一行小字，用户普遍反馈"点了没有反应"。
+    ///
+    /// <para>
+    /// 文案沿用 <see cref="SyncNowMessage"/>（与「多设备同步设置」页同一套），
+    /// 本类只负责"什么时候告诉用户什么"，不关心怎么显示（不引用 WinUI 控件类型）。
+    /// </para>
+    /// </summary>
+    public event Action<SyncFeedbackKind, string>? SyncNowReported;
+
+    /// <summary>在 UI 线程上抛出「立即同步」结果（订阅方为空即静默忽略）。</summary>
+    private void ReportSync(SyncFeedbackKind kind, string message)
+    {
+        if (SyncNowReported is null) return;
+
+        _dispatcherQueue.TryEnqueue(() => SyncNowReported?.Invoke(kind, message));
+    }
+
+    /// <summary>
+    /// 「上次真正同步成功」的事实时间戳（2026-10-12）。
+    /// 写在这里是因为它是**跨重启的事实**，不能靠内存里的文本 ——
+    /// 否则重启后左下角状态框又会变成"没有依据的时间"。
+    /// </summary>
+    internal const string SettingKeyLastNotionSyncUtc = "last_notion_sync_utc";
+
+    private async Task MarkNotionSyncedAsync()
+    {
+        try
+        {
+            await _repo.SetSettingAsync(SettingKeyLastNotionSyncUtc, DateTime.UtcNow.ToString("O"));
+        }
+        catch
+        {
+            // 记录失败绝不能影响同步本身（提示时间只是展示用）。
+        }
+    }
+
     private readonly DispatcherTimer _secondTimer;
     private readonly DispatcherTimer _dayBoundaryTimer;
     private DateTime _loadedAccountingDate = DateTime.MinValue;
@@ -229,18 +311,27 @@ public partial class HomeViewModel : ObservableObject
     private string? _activeGameExePath;
     private bool _coverRefreshQueued;
 
+    /// <summary>
+    /// 设备同步（WebDAV）门面：Notion 未配置但设备同步已启用时，「立即同步」走它
+    /// （**复用同一套实现**，绝不在这里复制一份同步逻辑）。
+    /// 为 <c>null</c>（例如未装配 / 测试环境）时保持既有"本地模式"行为。
+    /// </summary>
+    private readonly DeviceSyncService? _deviceSyncService;
+
     public HomeViewModel(
         IDatabaseRepository repo,
         GameSessionManager sessionManager,
         INotionSyncService syncService,
         CoverCacheService coverCache,
-        IGameArtworkService? artworkService = null)
+        IGameArtworkService? artworkService = null,
+        DeviceSyncService? deviceSyncService = null)
     {
         _repo = repo;
         _sessionManager = sessionManager;
         _syncService = syncService;
         _coverCache = coverCache;
         _artworkService = artworkService;
+        _deviceSyncService = deviceSyncService;
         _matcher = new GameMatcher();
         _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
 
@@ -483,7 +574,8 @@ public partial class HomeViewModel : ObservableObject
         }
 
         // Active recorded days count (days with > 0 minutes)
-        var activeDays = allSummaries.Where(s => s.DurationMinutes > 0).Select(s => s.Date).Distinct().Count();
+        // 存在性用秒：<60 秒的一天也算"玩过"（不能因为分钟为 0 就被判成没玩）
+        var activeDays = allSummaries.Where(s => s.DurationSeconds > 0).Select(s => s.Date).Distinct().Count();
 
         // 2. Dispatch UI mutations safely to UI Thread
         _dispatcherQueue.TryEnqueue(() =>
@@ -964,18 +1056,79 @@ public partial class HomeViewModel : ObservableObject
                 NotionStatusText = "同步进行中…";
                 NotionLastSyncText = "进行中";
             });
+            ReportSync(SyncFeedbackKind.Info, "上一次同步还在进行中，请稍候再试。");
             return;
         }
 
-        // Notion 未配置（Token 或任一数据库 ID 缺失）时不上网，直接给出本地模式提示。
+        // 分流（2026-10-11 用户裁定）：
+        //   ① Notion 已配置            → 保持原有 Notion 同步链路（下面一字未改）
+        //   ② Notion 未配置 + 设备同步已启用 → 复用 DeviceSyncService（同一套实现，不复制逻辑、不绕过门面）
+        //   ③ 两者都没有               → 保持既有"本地模式"提示，不发起任何同步
         if (!_syncService.IsNotionConfigured)
         {
-            _dispatcherQueue.TryEnqueue(() =>
+            var deviceSyncEnabled = false;
+            if (_deviceSyncService is not null)
             {
-                NotionStatusText = "未绑定 Notion · 本地模式";
-                NotionLastSyncText = "";
-            });
-            await RefreshAllDataAsync();
+                var deviceSettings = await _deviceSyncService.LoadSettingsAsync();
+                deviceSyncEnabled = deviceSettings.Enabled;
+            }
+
+            if (!deviceSyncEnabled)
+            {
+                _dispatcherQueue.TryEnqueue(() =>
+                {
+                    NotionStatusText = "未绑定 Notion · 本地模式";
+                    NotionLastSyncText = "";
+                });
+                ReportSync(SyncFeedbackKind.Info,
+                    "未启用同步：请先在「设置 → 同步」里绑定 Notion，或配置 WebDAV 多设备同步。");
+                await RefreshAllDataAsync();
+                return;
+            }
+
+            _isSyncing = true;
+            try
+            {
+                var result = await _deviceSyncService!.SyncNowAsync();
+
+                // ⚠️ 「已是最新」与否看**待发队列真实状态**（真查库），不靠零计数推断。
+                var status = await _deviceSyncService.GetStatusAsync();
+
+                var deviceMessage = result.Error is not null
+                    ? $"设备同步失败：{result.Error}"
+                    : SyncNowMessage.Build(result, status.Pending);
+
+                _dispatcherQueue.TryEnqueue(() =>
+                {
+                    NotionStatusText = deviceMessage;
+                    NotionLastSyncText = $"上次同步 {DateTime.Now:HH:mm}";
+                });
+
+                // 结果必须让用户看见：成功（真传输）/ 中性（已是最新）/ 警告（失败）三档。
+                ReportSync(
+                    result.Error is not null
+                        ? SyncFeedbackKind.Warning
+                        : SyncNowMessage.HasTransfer(result) ? SyncFeedbackKind.Success : SyncFeedbackKind.Info,
+                    deviceMessage);
+
+                await RefreshAllDataAsync();
+            }
+            catch (Exception ex)
+            {
+                var failure = string.IsNullOrWhiteSpace(ex.Message) ? "设备同步失败" : ex.Message;
+
+                _dispatcherQueue.TryEnqueue(() =>
+                {
+                    NotionStatusText = failure;
+                    NotionLastSyncText = "同步异常";
+                });
+                ReportSync(SyncFeedbackKind.Warning, failure);
+            }
+            finally
+            {
+                _isSyncing = false;
+            }
+
             return;
         }
 
@@ -994,22 +1147,32 @@ public partial class HomeViewModel : ObservableObject
             // 手动同步也要回刷标题，否则用户在总表改名后点「立即同步」看不到任何变化。
             await _syncService.RefreshDailyTitlesFromMasterAsync();
             _ = _coverCache.EnsureLibraryCoversAsync(_repo);
+            var notionMessage = reconciled.HasChanges
+                ? $"已同步（清理 {reconciled.DeletedGames} 款游戏 / {reconciled.DeletedDailyRecords} 条记录）"
+                : "已同步到 Notion";
+
+            // 事实时间戳：跨重启可用（否则重启后左下角状态框只剩一句没有依据的"已同步"）。
+            await MarkNotionSyncedAsync();
+
             _dispatcherQueue.TryEnqueue(() =>
             {
-                NotionStatusText = reconciled.HasChanges
-                    ? $"已同步（清理 {reconciled.DeletedGames} 款游戏 / {reconciled.DeletedDailyRecords} 条记录）"
-                    : "已同步到 Notion";
+                NotionStatusText = notionMessage;
                 NotionLastSyncText = $"上次同步 {DateTime.Now:HH:mm}";
             });
+            ReportSync(SyncFeedbackKind.Success, notionMessage);
+
             await RefreshAllDataAsync();
         }
         catch (Exception ex)
         {
+            var failure = string.IsNullOrWhiteSpace(ex.Message) ? "同步失败" : ex.Message;
+
             _dispatcherQueue.TryEnqueue(() =>
             {
-                NotionStatusText = string.IsNullOrWhiteSpace(ex.Message) ? "同步失败" : ex.Message;
+                NotionStatusText = failure;
                 NotionLastSyncText = "同步异常";
             });
+            ReportSync(SyncFeedbackKind.Warning, failure);
         }
         finally
         {
@@ -1106,12 +1269,28 @@ public partial class HomeViewModel : ObservableObject
             Infrastructure.AppLog.Info($"[同步] {status}");
         }
 
+        // 「上次真正同步成功」的事实时间戳（2026-10-12）。
+        // ⚠️ 只有**真实结果且不是失败**才落库：进度提示（"正在…"）与异常都不代表"同步成功过"，
+        //    拿它们当依据就是"不是基于事实的时间"—— 正是用户反馈的那个毛病。
+        //    关键词口径与 UpdateNotionStatusBrush 保持一致。
+        if (!IsProgressMessage(status) && !LooksLikeSyncFailure(status))
+        {
+            _ = MarkNotionSyncedAsync();
+        }
+
         _dispatcherQueue.TryEnqueue(() =>
         {
             NotionStatusText = status;
             NotionLastSyncText = $"上次同步 {DateTime.Now:HH:mm}";
         });
     }
+
+    /// <summary>
+    /// 失败 / 异常型同步状态文案。与 <see cref="UpdateNotionStatusBrush"/> 同一套关键词口径 ——
+    /// 两处必须一致，否则会出现"显示绿色已同步、却当成失败不记录时间"这类自相矛盾。
+    /// </summary>
+    private static bool LooksLikeSyncFailure(string status)
+        => status.Contains("异常") || status.Contains("失败") || status.Contains("错误");
 
     /// <summary>
     /// 判断是否是"正在进行…"型进度提示（只用于刷新界面，不值得写日志）。

@@ -191,6 +191,14 @@ public sealed partial class MappingsPage : Page
 
         try
         {
+            // 🛡️ 2026-10-12：删除游戏**之前**先按既有规则结束该游戏的活跃会话
+            //    （落尾段 daily + 跨日切分 + 同步入队）。否则删除归档后重新启动游戏会**复用**这条旧会话，
+            //    新计时就接在了旧起点上。只影响这一个游戏，其它游戏的活跃会话不受影响。
+            if (MainWindow.CurrentWindow is { } mainWindow)
+            {
+                await mainWindow.EndGameSessionsForDeleteAsync(game.Id);
+            }
+
             if (_syncService == null)
             {
                 await _repo.DeleteGameAsync(game.Id);

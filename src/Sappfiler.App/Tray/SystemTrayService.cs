@@ -151,14 +151,13 @@ public class SystemTrayService : IDisposable
         _sessionManager.SessionEnded += async (s, session) => await RefreshStateAsync();
         _syncService.SyncStatusChanged += async (s, status) =>
         {
-            if (status.Contains("异常") || status.Contains("失败"))
-            {
-                _lastSyncFailed = true;
-            }
-            else if (status.Contains("成功") || status.Contains("就绪") || status.Contains("完成"))
-            {
-                _lastSyncFailed = false;
-            }
+            // ⚠️ 2026-10-13（真机反馈修复）：判定逻辑下沉到 TrayStateRules（可测）——
+            //    · 未绑定总表 ⇒ 不记录失败，并清除旧结论（没有总表就没有"同步失败"这回事）；
+            //    · 失败优先于成功 ⇒「…规范化完成！…失败 2 条」这类复合消息不得当作全成功；
+            //    · 纯进度 / 未知文案 ⇒ 不改变已有结论。
+            _lastSyncFailed = TrayStateRules.ApplyStatusMessage(
+                _lastSyncFailed, _syncService.IsNotionConfigured, status);
+
             await RefreshStateAsync();
         };
     }
@@ -166,38 +165,37 @@ public class SystemTrayService : IDisposable
     public async Task RefreshStateAsync()
     {
         var active = _sessionManager.GetActiveSessions();
-        if (active.Count > 0)
-        {
-            UpdateState("gaming");
-            return;
-        }
+        var hasActiveSession = _sessionManager.GetActiveSessions().Count > 0;
+        var notionConfigured = _syncService.IsNotionConfigured;
 
-        if (_lastSyncFailed)
+        // ⚠️ 2026-10-13（真机反馈修复）：状态由 TrayStateRules 统一裁决（可测），此处只负责取数。
+        //    · 「同步异常」必须**同时**满足"最近一次同步失败"与"当前绑定了总表"——
+        //      原先只看 _lastSyncFailed，导致解绑后仍长期显示红色「同步异常」（历史失败残留）；
+        //    · 「等待绑定」只在绑定了总表时才有意义（未绑定 ⇒ 没有"待绑定"这回事）。
+        //    只有结论真的可能是 pending 时才去读库（其它分支的结果与数量无关）。
+        var unhandledPendingCount = 0;
+        if (!hasActiveSession && notionConfigured && !_lastSyncFailed)
         {
-            UpdateState("error");
-            return;
-        }
-
-        try
-        {
-            var pending = await _repo.GetPendingGamesAsync();
-            var unhandled = pending.Where(p => p.Status != "ignored").ToList();
-            if (unhandled.Count > 0)
+            try
             {
-                UpdateState("pending");
-                return;
+                var pending = await _repo.GetPendingGamesAsync();
+                unhandledPendingCount = pending.Count(p => p.Status != "ignored");
+            }
+            catch
+            {
+                // 读库失败不能把托盘卡在旧状态：按"无待处理"继续，最终落到空闲。
             }
         }
-        catch
-        {
-        }
 
-        UpdateState("idle");
+        UpdateState(TrayStateRules.Resolve(
+            hasActiveSession, _lastSyncFailed, notionConfigured, unhandledPendingCount));
     }
 
     public void UpdateState(string state)
     {
         if (_currentState == state && _currentIconHandle != IntPtr.Zero) return;
+
+        var previousState = _currentState;
         _currentState = state;
 
         var oldIcon = _currentIconHandle;
@@ -206,12 +204,16 @@ public class SystemTrayService : IDisposable
         _nid.hIcon = _currentIconHandle;
         _nid.szTip = state switch
         {
-            "gaming" => "Sappfiler - 游戏中",
-            "pending" => "Sappfiler - 等待绑定",
-            "error" => "Sappfiler - 同步异常",
+            TrayStateRules.Gaming => "Sappfiler - 游戏中",
+            TrayStateRules.Pending => "Sappfiler - 等待绑定",
+            TrayStateRules.Error => "Sappfiler - 同步异常",
             _ => "Sappfiler - 空闲中"
         };
         Shell_NotifyIcon(NIM_MODIFY, ref _nid);
+
+        // 只在**真正变化**时记一行（上面已对"未变化"提前返回，不会刷屏）。
+        // 托盘的图标颜色与悬浮提示无法被自动化测试读取 ⇒ 出问题时这是唯一的取证线索（2026-10-13）。
+        GameTimeTracker.Infrastructure.AppLog.Info($"[托盘] 状态 {previousState} → {state}（提示：{_nid.szTip}）");
 
         if (oldIcon != IntPtr.Zero)
         {
@@ -292,13 +294,20 @@ public class SystemTrayService : IDisposable
         // 2. Today's Total
         var todayDateStr = AccountingDateHelper.GetAccountingDateString(DateTime.Now, _sessionManager.DailyCutoffHour);
         var todaySummaries = await _repo.GetDailySummariesByDateAsync(todayDateStr);
-        var todayMins = todaySummaries.Sum(s => s.DurationMinutes);
+        // 先按秒求和、最后除以 60 一次（绝不逐行截断再相加）
+        var todayMins = GameTimeTracker.Core.Services.DurationMath.MinutesFromSeconds(
+            GameTimeTracker.Core.Services.DurationMath.SumSeconds(todaySummaries, s => s.DurationSeconds));
         AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)11, $"📅 今日总计: {DailyAggregator.FormatDuration(todayMins)}");
 
         // 3. Pending count (过滤掉已忽略的游戏，与主界面角标与待处理页保持一致)
-        var pending = await _repo.GetPendingGamesAsync();
-        var pendingCount = pending.Count(p => p.Status != "ignored");
-        AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)12, $"⚠️ 待处理: {pendingCount}");
+        //    ⚠️ 2026-10-12：只在**绑定了 Notion** 时才有"待处理"这回事 ——
+        //    未绑定时整条菜单项不显示，避免出现一个语义不成立的数字。
+        if (_syncService.IsNotionConfigured)
+        {
+            var pending = await _repo.GetPendingGamesAsync();
+            var pendingCount = pending.Count(p => p.Status != "ignored");
+            AppendMenu(hMenu, MF_STRING | MF_DISABLED | MF_GRAYED, (IntPtr)12, $"⚠️ 待处理: {pendingCount}");
+        }
 
         AppendMenu(hMenu, MF_SEPARATOR, IntPtr.Zero, "");
 

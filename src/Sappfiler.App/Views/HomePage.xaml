@@ -17,6 +17,9 @@
          再叠加上下面的窄/宽布局判定（< 880 才切窄），就会在"热力图数据加载出来"的
          瞬间把右列甩到屏幕外 —— 表现为"数据一多，右边的区块就掉了"。
          见 2026-09-19 用户反馈的截图。 -->
+    <!-- ⚠️ 外层 Grid 是**刻意**的：状态提示窗必须挂在 ScrollViewer **之外**（见文件末尾），
+         否则用户滚到页面下方点「立即同步」时提示不在视野里 —— 与「多设备同步设置」页同一做法。 -->
+    <Grid>
     <ScrollViewer x:Name="RootScroll"
                   VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                   HorizontalScrollMode="Disabled" VerticalScrollMode="Enabled"
@@ -617,4 +620,19 @@
 
         </Grid>
     </ScrollViewer>
+
+        <!-- ==================== 悬浮状态提示（固定右下角，不受滚动影响） ====================
+             与「多设备同步设置」页同款：点右上角「立即同步」的结果在这里出现 ——
+             此前点完只在卡片里换一行小字，用户普遍反馈"点了没有反应"（2026-10-12）。
+             收起规则：成功 8 秒后自动收起；进行中 / 警告 / 错误保持可见（长任务要看到进展，
+             错误往往要读全并照着重试）。 -->
+        <InfoBar x:Name="SyncToastBar"
+                 IsOpen="False"
+                 IsClosable="True"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Bottom"
+                 MinWidth="300"
+                 MaxWidth="440"
+                 Margin="24,0,24,24" />
+    </Grid>
 </Page>

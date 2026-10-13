@@ -26,6 +26,23 @@
                 </StackPanel>
             </Border>
 
+            <!-- ⚠️ 2026-10-12（产品语义）：「待处理」= 未绑定到 Notion 游戏总表的游戏。
+                 本机**没有绑定 Notion** 时这里根本没有"待处理"这回事 ⇒ 如实说明，
+                 **不能**复用上面那条"所有游戏均已完成绑定"（那会让用户误以为一切正常）。 -->
+            <Border x:Name="NotionNotBoundNotice" Visibility="Collapsed" CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1" Padding="20">
+                <StackPanel Spacing="6">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <FontIcon Glyph="&#xE946;" FontSize="20" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        <TextBlock Text="尚未绑定 Notion，因此没有待处理内容" FontSize="15" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock Text="「待处理」的作用是把本机自动检测到的新游戏确认绑定到 Notion 游戏总表。没有绑定总表时不存在「待绑定」这回事，所以这里不会列出任何游戏。绑定 Notion 后本页才会开始工作。"
+                               FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
             <!-- Pending Games ItemsRepeater -->
             <ItemsRepeater x:Name="PendingRepeater">
                 <ItemsRepeater.ItemTemplate>

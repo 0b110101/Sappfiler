@@ -1,4 +1,5 @@
 using GameTimeTracker.App.ViewModels;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 
@@ -12,18 +13,68 @@ public sealed partial class HomePage : Page
         get => _viewModel;
         set
         {
+            // ⚠️ 页面 NavigationCacheMode = Required ⇒ 实例会被复用，ViewModel 可能被换掉。
+            //    必须先把旧订阅摘干净，否则会重复弹提示（甚至持有已失效的页面）。
+            if (_viewModel is not null)
+            {
+                _viewModel.SyncNowReported -= OnSyncNowReported;
+            }
+
             _viewModel = value;
+
+            if (_viewModel is not null)
+            {
+                _viewModel.SyncNowReported += OnSyncNowReported;
+            }
+
             HookHeroTransitionHandler();
         }
     }
 
     private bool _isNarrowLayout;
 
+    /// <summary>
+    /// 右下角同步提示的自动渐隐（2026-10-13）：成功 / 信息静止 3 秒后缓慢渐隐，
+    /// 鼠标移上去不消失、移开重新倒数；警告不自动收起。规则实现见 <see cref="ToastAutoFade"/>。
+    /// </summary>
+    private ToastAutoFade? _syncToast;
+
     public HomePage()
     {
         InitializeComponent();
         NavigationCacheMode = NavigationCacheMode.Required;
         Loaded += (s, e) => HookHeroTransitionHandler();
+    }
+
+    /// <summary>
+    /// 「立即同步」结果 → 右下角悬浮提示（与「多设备同步设置」页同款、同一套文案）。
+    ///
+    /// <para>
+    /// 收起规则刻意与同步设置页一致：成功 / 信息 8 秒后自动收起；
+    /// **警告（失败）保持可见** —— 错误往往要读全并照着重试。
+    /// </para>
+    /// </summary>
+    private void OnSyncNowReported(SyncFeedbackKind kind, string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+
+        _syncToast ??= new ToastAutoFade(SyncToastBar);
+        _syncToast.Show(
+            title: kind switch
+            {
+                SyncFeedbackKind.Success => "同步完成",
+                SyncFeedbackKind.Warning => "同步失败",
+                _ => "同步"
+            },
+            message: message,
+            severity: kind switch
+            {
+                SyncFeedbackKind.Success => InfoBarSeverity.Success,
+                SyncFeedbackKind.Warning => InfoBarSeverity.Warning,
+                _ => InfoBarSeverity.Informational
+            },
+            // 失败不自动收起（要看全、照着重试）；成功与信息 3 秒后缓慢渐隐。
+            autoHide: kind != SyncFeedbackKind.Warning);
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)

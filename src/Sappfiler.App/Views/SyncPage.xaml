@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="GameTimeTracker.App.Views.SyncPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- ⚠️ 外层 Grid 是**刻意**的：状态提示窗必须挂在 ScrollViewer **之外**（见文件末尾），
+         否则用户滚到页面下方点「测试连接 / 立即同步」时，顶部那条提示根本不在视野里。 -->
+    <Grid>
+    <ScrollViewer Padding="24" VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="20" MaxWidth="640" HorizontalAlignment="Left">
+            <StackPanel Spacing="8">
+                <Button x:Name="BackBtn" Click="OnBackClicked" Content="← 设置" CornerRadius="8" Padding="12,6" />
+                <TextBlock Text="同步" FontSize="22" FontWeight="Bold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                <TextBlock Text="在多台设备之间同步你的 Sappfiler 数据" FontSize="14" Foreground="{ThemeResource TextSecondaryBrush}" />
+            </StackPanel>
+
+            <!-- ==================== 同步状态 ==================== -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="同步状态" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="状态" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="是否已启用设备同步" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <TextBlock x:Name="EnabledText" Grid.Column="1" VerticalAlignment="Center"
+                                   FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Text="未启用" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="同步方式" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="当前使用的同步后端" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <TextBlock x:Name="BackendText" Grid.Column="1" VerticalAlignment="Center"
+                                   FontSize="15" Foreground="{ThemeResource TextSecondaryBrush}" Text="WebDAV · 坚果云" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="上次同步" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="最近一次成功同步的时间" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <TextBlock x:Name="LastSyncText" Grid.Column="1" VerticalAlignment="Center"
+                                   FontSize="15" Foreground="{ThemeResource TextSecondaryBrush}" Text="从未" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="待同步" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="尚未送出 / 等待重试的变更条数" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                        </StackPanel>
+                        <TextBlock x:Name="PendingText" Grid.Column="1" VerticalAlignment="Center"
+                                   FontSize="15" Foreground="{ThemeResource TextSecondaryBrush}" Text="0" />
+                    </Grid>
+
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+
+                    <!-- 常驻：最近一次同步结果（口径 = 真实一轮 DeviceSyncRunResult；停用后仍然显示） -->
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="3">
+                                <TextBlock Text="最近一次同步结果" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                                <TextBlock Text="本轮的上传 / 下载 / 延迟 / Deferred / 失败条数" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3" HorizontalAlignment="Right">
+                                <TextBlock x:Name="LastOutcomeText" HorizontalAlignment="Right"
+                                           FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" Text="未同步" />
+                                <TextBlock x:Name="LastOutcomeAtText" HorizontalAlignment="Right"
+                                           FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" Text="从未" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="LastOutcomeCountsText" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}"
+                                   TextWrapping="Wrap" Text="上传 0 · 下载 0 · 延迟 0 · Deferred 0 · 失败 0" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="ErrorPanel" Spacing="4" Visibility="Collapsed">
+                        <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+                        <TextBlock Text="最近一次错误" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                        <TextBlock x:Name="ErrorText" FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="DeviceIdText" FontSize="12" Foreground="{ThemeResource TextSecondaryBrush}"
+                               FontFamily="Consolas" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <!-- ==================== 配置 ==================== -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="配置" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+
+                    <ComboBox x:Name="ServiceTypeCombo" Header="服务类型" MinWidth="220"
+                              SelectionChanged="OnServiceTypeChanged" MaxWidth="520" HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="坚果云" />
+                        <ComboBoxItem Content="自定义 WebDAV" />
+                    </ComboBox>
+
+                    <!-- ⚠️ 这三个都是**技术性输入**（URL / 账号 / 目录名），不是自然语言：
+                         必须关掉拼写检查，否则邮箱号、URL、路径都会被标红波浪线（实测反馈）。
+                         2026-10-12：账号框尤其明显 —— 国外云盘账号几乎都是邮箱号。 -->
+                    <TextBox x:Name="ServerUrlInput" Header="服务器地址" MaxWidth="520" HorizontalAlignment="Stretch"
+                             IsSpellCheckEnabled="False" />
+
+                    <TextBox x:Name="AccountInput" Header="账号" PlaceholderText="坚果云为注册邮箱"
+                             MaxWidth="520" HorizontalAlignment="Stretch"
+                             IsSpellCheckEnabled="False" />
+
+                    <PasswordBox x:Name="PasswordInput" Header="应用密码"
+                                 PlaceholderText="坚果云：账户信息 → 安全选项 → 第三方应用管理 → 添加应用密码"
+                                 MaxWidth="520" HorizontalAlignment="Stretch" />
+
+                    <TextBox x:Name="SyncDirInput" Header="同步目录" PlaceholderText="Sappfiler"
+                             MaxWidth="520" HorizontalAlignment="Stretch"
+                             IsSpellCheckEnabled="False" />
+
+                    <TextBlock Text="密码只保存在本机（Windows DPAPI 加密，绑定当前用户），不会上传，也不会写进日志。"
+                               FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                        <Button x:Name="SaveBtn" Click="OnSaveClicked" Content="保存并启用" CornerRadius="8"
+                                Background="{ThemeResource AccentBlueBrush}" Foreground="White" Padding="16,8" />
+                        <Button x:Name="TestBtn" Click="OnTestConnectionClicked" Content="测试连接" CornerRadius="8" Padding="16,8" />
+                        <Button x:Name="SyncNowBtn" Click="OnSyncNowClicked" Content="立即同步" CornerRadius="8" Padding="16,8" />
+                        <Button x:Name="ToggleEnabledBtn" Click="OnToggleEnabledClicked" Content="停用同步" CornerRadius="8" Padding="16,8" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- ==================== 同步方式（说明性内容，放在页面最底部） ==================== -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="同步方式" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="WebDAV" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                        <TextBlock Text="支持标准 WebDAV 服务（坚果云 / InfiniCLOUD / Koofr / Nextcloud / NAS 等），并针对常见服务做过兼容性验证。"
+                                   FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="同步的是 Sappfiler 数据，不是 SQLite 数据库文件。"
+                                   FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="不需要任何付费会员：坚果云免费账户即可使用（其 WebDAV 限制为 600 次请求 / 30 分钟，本应用已按此优化同步频率）；也可以填自建 NAS / Nextcloud 的地址。"
+                                   FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="首次启用会把本机已有的游戏与历史会话记录上传，建议先备份本地数据。"
+                                   FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="请勿把数据目录复制到另一台机器：两台机器使用同一个设备身份会互相覆盖。"
+                                   FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+
+        <!-- ==================== 悬浮状态提示（固定右下角，不受滚动影响） ====================
+             放在 ScrollViewer **之外**，所以滚轮滚动时它原地不动；
+             点「测试连接」「保存并启用」「立即同步」的结果都会在这里出现。
+             收起规则：成功 8 秒后自动收起；进行中 / 警告 / 错误保持可见
+             （长任务需要看到"正在进行"，错误往往要读全并照着重试）。 -->
+        <InfoBar x:Name="StatusInfoBar"
+                 IsOpen="False"
+                 IsClosable="True"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Bottom"
+                 MinWidth="300"
+                 MaxWidth="440"
+                 Margin="24,0,24,24" />
+    </Grid>
+</Page>

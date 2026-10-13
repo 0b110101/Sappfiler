@@ -79,6 +79,31 @@
                 </StackPanel>
             </Border>
 
+            <!-- Device Sync Card（多设备同步设置独立成页，这里只放入口） -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="多设备同步" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock Text="WebDAV 设备同步" FontSize="15" FontWeight="Medium" Foreground="{ThemeResource TextPrimaryBrush}" />
+                            <TextBlock Text="在多台电脑之间同步游戏库与历史会话记录（坚果云 / Nextcloud / NAS）"
+                                       FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button x:Name="OpenSyncBtn" Grid.Column="1" Click="OnOpenSyncClicked" Content="同步设置"
+                                CornerRadius="8" Padding="16,8" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- Notion Title Normalization Card -->
             <Border CornerRadius="14"
                     BorderBrush="{ThemeResource CardBorderBrush}"
@@ -167,6 +192,31 @@
                         <Button x:Name="ResetStorageBtn" Grid.Column="2" Content="恢复默认" CornerRadius="8" Padding="14,6"
                                 Margin="8,0,0,0" Click="OnResetStorageClicked" Visibility="Collapsed" />
                     </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Data Management Card -->
+            <Border CornerRadius="14"
+                    BorderBrush="{ThemeResource CardBorderBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundBrush}"
+                    Padding="22">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="数据管理" FontSize="17" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
+                    <TextBlock Text="导出独立备份文件，或从备份文件恢复 / 迁移数据。备份包含游玩记录与统计事实，但**不含任何认证凭据**（Notion Token、WebDAV 密码）。"
+                               FontSize="13" Foreground="{ThemeResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    <Border Background="{ThemeResource CardBorderBrush}" Opacity="0.35" Height="1" />
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="ExportBackupBtn" Content="导出备份…" CornerRadius="8" Padding="14,6"
+                                Click="OnExportBackupClicked" />
+                        <Button x:Name="ImportBackupBtn" Content="导入备份…" CornerRadius="8" Padding="14,6"
+                                Click="OnImportBackupClicked" />
+                        <ProgressBar x:Name="DataMgmtProgressBar" Width="160" VerticalAlignment="Center"
+                                     IsIndeterminate="True" Visibility="Collapsed" />
+                    </StackPanel>
+                    <TextBlock x:Name="DataMgmtStatusText" FontSize="12"
+                               Foreground="{ThemeResource TextSecondaryBrush}"
+                               TextWrapping="Wrap" Visibility="Collapsed" />
                 </StackPanel>
             </Border>
 

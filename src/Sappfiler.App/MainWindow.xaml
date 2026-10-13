@@ -275,14 +275,33 @@
                             </Grid>
                         </Button>
 
-                        <!-- 3. Notion 同步状态 Capsule -->
+                        <!-- 3. 同步状态 Capsule
+                             ⚠️ 2026-10-12 重做：此前写死了「Notion 已同步 / 上次同步 10:24」——
+                                既**不是基于事实**，在用户**根本没绑定 Notion** 时也照显（错上加错）。
+                                现在文字与颜色一律由 MainWindow.RefreshSidebarSyncStatusAsync 按事实填充：
+                                  绑定 Notion          → Notion 的真实同步状况 + 上次真正同步成功的时间
+                                  否则启用 WebDAV      → 设备同步状态 + 上次同步时间
+                                  两者都没有           → 本地模式 + 上次导出备份时间
+                                ⚠️ 布局用 Grid（不是横向 StackPanel）：横向 StackPanel 以无限宽测量子元素，
+                                   TextTrimming 永远不会生效。配合 ToolTip 悬停看全文。 -->
                         <Border CornerRadius="12" Background="{ThemeResource CardBackgroundBrush}" BorderBrush="{ThemeResource CardBorderBrush}" BorderThickness="1" Padding="12,10">
                             <StackPanel Spacing="3">
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <Ellipse Width="8" Height="8" Fill="{ThemeResource StatusGreenBrush}" VerticalAlignment="Center" />
-                                    <TextBlock x:Name="SidebarNotionStatus" Text="Notion 已同步" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextPrimaryBrush}" />
-                                </StackPanel>
-                                <TextBlock x:Name="SidebarNotionTime" Text="上次同步 10:24" FontSize="10" Foreground="{ThemeResource TextSecondaryBrush}" Margin="14,0,0,0" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Ellipse x:Name="SidebarSyncDot" Grid.Column="0" Width="8" Height="8"
+                                             Fill="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center"
+                                             Margin="0,0,6,0" />
+                                    <TextBlock x:Name="SidebarSyncStatus" Grid.Column="1" Text=""
+                                               FontSize="12" FontWeight="SemiBold"
+                                               Foreground="{ThemeResource TextPrimaryBrush}"
+                                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                </Grid>
+                                <TextBlock x:Name="SidebarSyncTime" Text="" FontSize="10"
+                                           Foreground="{ThemeResource TextSecondaryBrush}" Margin="14,0,0,0"
+                                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                             </StackPanel>
                         </Border>
                     </StackPanel>

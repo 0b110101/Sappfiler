@@ -1,7 +1,9 @@
 using System.Runtime.InteropServices;
 using System.Threading;
 using GameTimeTracker.App.Services;
+using GameTimeTracker.Core.Services;
 using GameTimeTracker.Infrastructure;
+using GameTimeTracker.Infrastructure.Backup;
 using Windows.ApplicationModel;
 using Windows.ApplicationModel.Activation;
 using Windows.Foundation;
@@ -115,6 +117,21 @@ public partial class App : Application
         var isAutoStart = cmdArgs.Any(a =>
             string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(a, "--autostart", StringComparison.OrdinalIgnoreCase));
+
+        // ⚠️ 2026-10-11：恢复备份的**文件替换**只能在启动的这一瞬间做 ——
+        //    此时还没有任何 SqliteRepository（尤其后台 5 秒心跳）在写库，
+        //    这是进程生命周期里唯一"无并发写"的窗口。
+        //    内部状态机可重复执行（staged → applying → 校验 → applied / 回滚），
+        //    断电或崩溃后下次启动会自动续跑/回滚，绝不留下不可检测的半完成状态。
+        try
+        {
+            MainWindow.PendingRestoreOutcome = RestoreBootstrapper.ApplyPendingRestore(
+                AppPaths.DataDir, AppPaths.DbPath);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("[启动] 应用待处理的数据恢复时发生未预期异常", ex);
+        }
 
         var mainWindow = new MainWindow();
         _window = mainWindow;
