@@ -238,6 +238,22 @@ public sealed class NotionDeleteResult
     /// <summary>本地删除的每日汇总条数。</summary>
     public int LocalDailyRecordsDeleted { get; set; }
 
+    /// <summary>
+    /// 本地该日时长是否**已完全退出统计**（2026-10-11）。
+    /// <c>false</c> ⇒ 只做到**部分删除**（该日仍有无法归属的历史残差，或存在进行中的会话），
+    /// 界面必须显示警告而不是"删除成功"。
+    /// </summary>
+    public bool LocalPlayRecordFullyDeleted { get; set; } = true;
+
+    /// <summary>部分删除时该日仍参与统计的剩余秒数（0 = 完全删除）。</summary>
+    public int LocalRemainingSeconds { get; set; }
+
+    /// <summary>因"进行中、时长未定型"而被跳过的会话条数（&gt;0 ⇒ 结束游戏后可再次删除完成清理）。</summary>
+    public int LocalActiveSessionsSkipped { get; set; }
+
+    /// <summary>本地删除的说明文案（含部分删除原因）。</summary>
+    public string LocalDeletionNote { get; set; } = "";
+
     /// <summary>在 Notion 上成功归档的每日记录条数。</summary>
     public int NotionDailyRecordsArchived { get; set; }
 

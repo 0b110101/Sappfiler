@@ -111,6 +111,29 @@ public partial class SqliteRepository
                """,
                new { gid = sessionGlobalId, d = statisticalDate }, tx) > 0;
 
+    /// <summary>
+    /// 写入一条排除事实（幂等：<c>ON CONFLICT DO NOTHING</c>）。
+    /// 返回 <c>true</c> = 这次真的插入了新行（调用方需要因此重算该会计日）。
+    /// </summary>
+    internal static bool InsertDailyPlayExclusionCore(
+        SqliteConnection conn, SqliteTransaction tx, string exclusionGlobalId, long gameId,
+        string statisticalDate, string sessionGlobalId, string deviceId, string createdAtUtc)
+        => conn.Execute(
+            """
+            INSERT INTO daily_play_exclusions
+                (exclusion_global_id, game_id, statistical_date, session_global_id, device_id, created_at_utc)
+            VALUES (@id, @gameId, @date, @sessionGlobalId, @deviceId, @at)
+            ON CONFLICT(exclusion_global_id) DO NOTHING;
+            """,
+            new
+            {
+                id = exclusionGlobalId,
+                gameId,
+                date = statisticalDate,
+                sessionGlobalId,
+                deviceId,
+                at = createdAtUtc
+            }, tx) > 0;
 
 
     private static string Truncate(string value)

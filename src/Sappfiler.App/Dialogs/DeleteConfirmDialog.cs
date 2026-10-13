@@ -91,7 +91,10 @@ internal static class DeleteConfirmDialog
 
         panel.Children.Add(Spacer());
         panel.Children.Add(Note("本地记录不可恢复；Notion 侧 30 天内可恢复。"));
-        panel.Children.Add(Note("当天剩余的游戏时长仍会重新累积并再次同步。"));
+        panel.Children.Add(Note("删除的是本机已知的该日时长。其它设备尚未同步过来的时长不受影响，"
+            + "同步后仍会正常计入该日（那不是已删除的数据复活）。"));
+        panel.Children.Add(Note("当天剩余的游戏时长仍会重新累积并再次同步；若此刻正在玩这款游戏，"
+            + "进行中的会话不会计入本次删除 —— 结束游戏后可再次删除这条记录以完成清理。"));
 
         var dialog = new ContentDialog
         {

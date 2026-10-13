@@ -128,25 +128,54 @@ public sealed partial class HistoryPage : Page
         try
         {
             NotionDeleteResult? result = null;
+            PlayRecordDeletionResult? localDeletion = null;
+
             if (_syncService != null)
             {
                 result = await _syncService.DeleteDailyRecordEverywhereAsync(vm.DailySummaryId);
             }
             else
             {
-                await _repo.DeleteDailySummariesAsync(new[] { vm.DailySummaryId });
+                // 未配置 Notion 时也要走同一条删除链路（作废分片 + 撤回声明 + 重算所有受影响日期），
+                // 否则本地删除会被下一次重算复活。
+                localDeletion = await _repo.DeletePlayRecordAsync(vm.DailySummaryId);
             }
 
             await LoadHistoryAsync();
 
-            StatusInfoBar.Severity = result is { NotionDailyRecordsFailed: > 0 }
-                ? InfoBarSeverity.Warning
-                : InfoBarSeverity.Success;
-            StatusInfoBar.Title = $"已删除 {vm.DateText} 的记录";
-            StatusInfoBar.Message = result == null || result.NotionSkipped
-                ? "Notion 未连接或该记录未同步，仅删除了本地数据。"
+            // ⚠️ 2026-10-11：删除**没有完全生效**时（该日仍有无法归属的历史残差、
+            //    或有进行中的会话未计入），绝不能显示"完全删除成功"。
+            var fullyDeleted = result?.LocalPlayRecordFullyDeleted ?? localDeletion?.FullyDeleted ?? true;
+            var deletionNote = result?.LocalDeletionNote ?? localDeletion?.Note ?? "";
+            var remainingSeconds = result?.LocalRemainingSeconds ?? localDeletion?.RemainingSeconds ?? 0;
+            var activeSkipped = result?.LocalActiveSessionsSkipped ?? localDeletion?.ActiveSessionsSkipped ?? 0;
+
+            var notionText = result == null || result.NotionSkipped
+                ? "Notion 未连接或该记录未同步，仅处理了本地数据。"
                 : $"Notion：归档 {result.NotionDailyRecordsArchived} 条" +
-                  (result.NotionDailyRecordsFailed > 0 ? $"，{result.NotionDailyRecordsFailed} 条失败" : "。");
+                  (result.NotionDailyRecordsFailed > 0 ? $"，{result.NotionDailyRecordsFailed} 条失败。" : "。");
+
+            if (!fullyDeleted)
+            {
+                // 2026-10-11：部分删除必须给出**可预期的完成方式**，否则用户只看到"没删干净"。
+                var completionHint = activeSkipped > 0
+                    ? "结束游戏后可再次删除这条记录以完成清理。"
+                    : "该日仍有无法归属的历史时长，不会被删除。";
+
+                StatusInfoBar.Severity = InfoBarSeverity.Warning;
+                StatusInfoBar.Title = $"已部分删除 {vm.DateText} 的记录";
+                StatusInfoBar.Message =
+                    $"{deletionNote}（剩余约 {remainingSeconds} 秒仍在统计中）{completionHint}{notionText}";
+            }
+            else
+            {
+                StatusInfoBar.Severity = result is { NotionDailyRecordsFailed: > 0 }
+                    ? InfoBarSeverity.Warning
+                    : InfoBarSeverity.Success;
+                StatusInfoBar.Title = $"已删除 {vm.DateText} 的记录";
+                StatusInfoBar.Message = notionText;
+            }
+
             StatusInfoBar.IsOpen = true;
         }
         catch (Exception ex)
