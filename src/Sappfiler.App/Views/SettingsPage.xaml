@@ -223,9 +223,17 @@
             <!-- Version footer -->
             <TextBlock x:Name="VersionText"
                        HorizontalAlignment="Center"
-                       Margin="0,4,0,8"
+                       Margin="0,4,0,0"
                        FontSize="12"
                        Foreground="{ThemeResource TextSecondaryBrush}" />
+            <!-- 第三方字体/图标声明（OPPO Sans 许可要求在软件内做出显著声明；完整许可原文见随包《第三方组件声明.md》） -->
+            <TextBlock HorizontalAlignment="Center"
+                       Margin="0,0,0,8"
+                       FontSize="11"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextSecondaryBrush}"
+                       Text="本软件使用 OPPO Sans、Geist 字体与 Tabler Icons 图标；版权与许可声明见随包《第三方组件声明.md》。" />
         </StackPanel>
     </ScrollViewer>
 </Page>

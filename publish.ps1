@@ -240,11 +240,14 @@ if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish 失败' }
 # 用户拿到 zip 后应能直接看说明，不必回头找仓库。
 #   · README.md    —— 面向使用者（安装、Notion/WebDAV 配置、常见问题）；
 #   · CHANGELOG.md —— **公开**更新日志（本版对用户可见的变更），随包改名「更新说明.md」。
+#   · THIRD-PARTY-NOTICES.md —— 第三方字体/图标版权与许可声明（OPPO Sans 的许可要求"随软件做显著声明"，
+#     因此必须随包分发），随包改名「第三方组件声明.md」。
 # ⚠️ 不得引用内部 QA 文档（CHANGELOG-QA.md 等不公开资料）：公开仓库里不存在它们，
 #    打包时必须能在缺少这些文件的情况下正常工作（下方逐个文件判存在，缺失只提示不失败）。
 $docCopies = @(
-    @{ Src = (Join-Path $repoRoot 'README.md');        Dst = 'README.md' },
-    @{ Src = (Join-Path $repoRoot 'CHANGELOG.md');     Dst = '更新说明.md' }
+    @{ Src = (Join-Path $repoRoot 'README.md');               Dst = 'README.md' },
+    @{ Src = (Join-Path $repoRoot 'CHANGELOG.md');            Dst = '更新说明.md' },
+    @{ Src = (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md');  Dst = '第三方组件声明.md' }
 )
 foreach ($d in $docCopies) {
     if (Test-Path $d.Src) {
@@ -253,7 +256,7 @@ foreach ($d in $docCopies) {
         Write-Host "  提示: 未找到 $($d.Src)，跳过" -ForegroundColor Yellow
     }
 }
-Write-Host "已随包附带 README.md 与 更新说明.md" -ForegroundColor DarkGray
+Write-Host "已随包附带 README.md、更新说明.md 与 第三方组件声明.md" -ForegroundColor DarkGray
 
 # 清理非必需的 pdb 调试符号文件
 # ⚠️ 必须用 ForEach-Object + -LiteralPath：

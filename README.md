@@ -365,6 +365,11 @@ dotnet run --project src/Sappfiler.App
 
 完整法律文本请参阅仓库根目录下的 [LICENSE](LICENSE) 文件。
 
+### 第三方组件与字体
+本软件随包分发第三方字体与图标：**OPPO Sans 4.0**（版权归 OPPO 所有）、**Geist**（SIL OFL 1.1）
+与 **Tabler Icons**（MIT）。完整的版权与许可原文见根目录
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)（发布包内为《第三方组件声明.md》）。
+
 ---
 
 ## 🙏 致谢
