@@ -3082,9 +3082,22 @@ public partial class SqliteRepository
         await _writeLock.WaitAsync();
         try
         {
+            // 🛡️ 2026-10-15（用户裁定 · 方案 1）：**删除类墓碑永久保留**（零协议改动、无 schema 变更）。
+            //    「用户删除了记录，不能因为某台设备离线很久而重新出现」——当前协议**没有**记录"对端已消费"
+            //    的证据（对端水位只说明我们见过它，不说明它取走过墓碑；墓碑本身也不参与传输、是本地防线），
+            //    所以拿"30 天年龄"清理会造成：离线超过 30 天的设备上线后把已删数据当新数据重新上传。
+            //    本方法**精准限定**为：只清理"非删除类"墓碑 —— 删除类按 entity_type 明确排除在白名单外，
+            //    绝不误伤；写墓碑的全部调用点（Game / Session / DailyAdjustment / DailyPlayExclusion …）都在白名单里。
+            //    ⚠️ 其它清理逻辑（尤其已完成 Outbox 的 7 天策略 PruneCompletedOutboxAsync）**保持不变**。
             using var conn = CreateConnection();
             return await conn.ExecuteAsync(
-                "DELETE FROM sync_tombstones WHERE deleted_at_utc < @cutoff;",
+                """
+                DELETE FROM sync_tombstones
+                WHERE deleted_at_utc < @cutoff
+                  AND entity_type IN (
+                      ''
+                  );
+                """,
                 new { cutoff = UtcNowIso(DateTime.UtcNow - SyncOutboxPolicy.TombstoneRetention) });
         }
         finally

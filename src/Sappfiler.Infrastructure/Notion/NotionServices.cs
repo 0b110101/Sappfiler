@@ -3386,10 +3386,41 @@ public class NotionSyncService : INotionSyncService
                 //    会话派生的时长**原样留住**（页面被删 ≠ 没玩过）。
                 //    撤销沿用同一 identity（设备+游戏+日期+来源），并按既有同步协议入队传播；
                 //    只针对 Notion 来源，绝不误伤同一天同游戏的手工声明。
+                // 🔒 2026-10-15（用户裁定「方案 2」）：Notion 页面被删 ⇒ 本地**连同会话事实一起删除**并传播。
+                //    旧实现只删派生行 + 撤回声明，会话派生时长原样留住 ⇒ 下一轮同步会把它重新派生为
+                //    pending 并**再次写回 Notion**（用户实测：Notion 删掉的记录又回来了）。
+                //    现在改走与应用内「删除该日记录」**完全相同**的事实层删除：
+                //    作废该会计日的会话分片（daily_play_exclusions）+ 撤回声明 + 重算 + 写墓碑与同步队列
+                //    （多设备同步与导出随之生效）⇒ 不会再被派生、也不会复活。
                 if (orphanRows.Count > 0)
                 {
-                    result.DeletedDailyRecords =
-                        await _repo.DeleteDailySummariesAsync(orphanRows.Select(r => r.Id));
+                    var deletedWithFacts = 0;
+                    foreach (var row in orphanRows)
+                    {
+                        try
+                        {
+                            // 🛡️ 2026-10-15（撤回传播缺口修复）：**必须先显式撤回，再做事实层删除**。
+                            //    事实层删除内部也会撤回本机声明，但它写出的墓碑只带**本机 identity**
+                            //    （DailyAdjustmentGlobalId = f(设备, 游戏, 日期, 来源)）——只能清掉本机那一条。
+                            //    旧实现里"让对端也撤回它自己那条"的效果来自下面这次显式撤回（按 游戏+日期+来源
+                            //    生成 identity 并广播撤销）；一旦先跑事实层删除把本机声明清掉，显式撤回就会
+                            //    命中 `exists == 0` 提前返回、**不再广播**（DailyAdjustments.cs 幂等早退）
+                            //    ⇒ 对端会永久保留它自己的那 480 秒（实测：对端 780→480 却收敛不到 0）。
+                            // 🛡️ 2026-10-15（方案 A+B，原子化）：撤回（墓碑 + 队列广播）与事实层删除
+                            //    **在同一个事务里**完成（见 ApplyRemoteDeletedDailyAsync）——要么全有、要么全无。
+                            //    撤回不再要求"本机声明仍存在"（对端那条也照样广播）；本地记录照删，
+                            //    不再靠"跳过删除"换取重试：撤销靠队列/墓碑重试到对端 ACK 为止。
+                            var outcome = await _repo.ApplyRemoteDeletedDailyAsync(row.Id);
+                            if (outcome.Found) deletedWithFacts++;
+                            AppLog.Info($"[删除对账] Notion 页面已删除 ⇒ 本地按事实层删除「{row.Date} {row.GameName}」："
+                                        + $"作废会话分片 {outcome.SessionsExcluded} 条、新写排除 {outcome.ExclusionsWritten} 条（删除已入队传播）");
+                        }
+                        catch (Exception ex)
+                        {
+                            AppLog.Warn($"[删除对账] 事实层删除失败（{row.Date} {row.GameName}）：{ex.Message}");
+                        }
+                    }
+                    result.DeletedDailyRecords = deletedWithFacts;
                 }
 
                 foreach (var row in orphanRows)

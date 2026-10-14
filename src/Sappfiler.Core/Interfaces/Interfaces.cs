@@ -54,6 +54,13 @@ public interface IDatabaseRepository
     Task<PlayRecordDeletionResult> DeletePlayRecordAsync(int dailySummaryId);
 
     /// <summary>
+    /// 删除对账 A 段专用：Notion 页面已确认删除 ⇒ 在**同一事务**里完成
+    /// 「撤回本机声明（墓碑 + 队列广播，本机声明已不存在也照做）」+「事实层删除（会话作废 + 删派生行）」。
+    /// 要么全部提交、要么全部回滚；本地照删，不依赖"跳过删除"换取重试（撤销靠队列重试到 ACK）。
+    /// </summary>
+    Task<PlayRecordDeletionResult> ApplyRemoteDeletedDailyAsync(int dailySummaryId);
+
+    /// <summary>
     /// <b>撤回本机某条外部时长声明</b>（2026-10-11，schema 3）。
     ///
     /// <para>

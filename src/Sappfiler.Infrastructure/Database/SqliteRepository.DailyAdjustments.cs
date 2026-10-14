@@ -563,6 +563,36 @@ public partial class SqliteRepository
 
             var revocationAtUtc = UtcNowIso();
 
+            await RevokeAdjustmentCoreAsync(
+                conn, tx, gameId, statisticalDate, source,
+                globalId, gameGlobalId!, deviceId!, residual, declarationExists: true);
+
+            tx.Commit();
+            AppLog.Info($"[设备同步] 已撤回外部声明：{statisticalDate} game={gameId} source={source}"
+                + $"（identity={globalId[..8]}…，daily 已按事实重算，撤销已入队）");
+            return true;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 撤销一条外部声明的**核心**（调用方已持有写锁与事务）：删声明（若在）→ 写墓碑 → 按事实重算 →
+    /// 把撤销变更**入队或就地改写**（原声明已推成功 ⇒ 必须追加一条新变更，否则对端永久多算）。
+    /// 抽出来是为了让「删除对账」能在**同一事务**里完成"撤回 + 事实层删除"（原子性），**不另写一套机制**。
+    /// </summary>
+    internal static async Task RevokeAdjustmentCoreAsync(
+        SqliteConnection conn, SqliteTransaction tx,
+        int gameId, string statisticalDate, string source,
+        string globalId, string gameGlobalId, string deviceId,
+        int preservedResidualSeconds, bool declarationExists)
+    {
+        var revocationAtUtc = UtcNowIso();
+
+        if (declarationExists)
+        {
             await conn.ExecuteAsync(
                 "DELETE FROM daily_duration_adjustments WHERE adjustment_global_id = @id;",
                 new { id = globalId }, tx);
@@ -575,84 +605,153 @@ public partial class SqliteRepository
                 TombstoneId = Guid.NewGuid().ToString("N"),
                 EntityType = nameof(SyncEntityType.DailyAdjustment),
                 EntityGlobalId = globalId,
-                DeviceId = deviceId!,
+                DeviceId = deviceId,
                 DeletedAtUtc = revocationAtUtc,
                 CreatedAtUtc = revocationAtUtc
             });
 
             RecomputeDailySummaryForGameDate(
                 conn, tx, gameId, statisticalDate, ReadDailyCutoffHour(conn, tx),
-                preservedResidualSeconds: residual);
+                preservedResidualSeconds: preservedResidualSeconds);
+        }
 
-            var queueType = nameof(SyncEntityType.DailyAdjustment);
-            var revocationPayload = SyncPayloads.Serialize(new DailyAdjustmentSyncPayload
-            {
-                SchemaVersion = DeviceSyncConstants.CurrentSchemaVersion,
-                Revoked = true,
-                GlobalId = globalId,
-                GameGlobalId = gameGlobalId!,
-                StatisticalDate = statisticalDate,
-                DeviceId = deviceId,
-                DurationSeconds = 0,
-                Source = source,
-                CreatedAtUtc = UtcNowIso()
-            });
+        var queueType = nameof(SyncEntityType.DailyAdjustment);
+        var revocationPayload = SyncPayloads.Serialize(new DailyAdjustmentSyncPayload
+        {
+            SchemaVersion = DeviceSyncConstants.CurrentSchemaVersion,
+            Revoked = true,
+            GlobalId = globalId,
+            GameGlobalId = gameGlobalId,
+            StatisticalDate = statisticalDate,
+            DeviceId = deviceId,
+            DurationSeconds = 0,
+            Source = source,
+            CreatedAtUtc = UtcNowIso()
+        });
 
-            // ⚠️ 关键：原声明**已经推成功**（队列行 Completed）时，绝不能因为"队列里已有这个 identity"就跳过 ——
-            //    那样撤销永远不会被推出去（对端永久多算，正是本次实机事故）。此时必须**追加一条新变更**，
-            //    因为推送按 rowid 排序 ⇒ 对端必然是"先收到声明、再收到撤销"，顺序天然正确。
-            //    只有"还没发出去"的变更才就地改写成撤销（最新状态覆盖，不新增行）。
-            var pendingQueueId = await conn.QuerySingleOrDefaultAsync<string>(
+        // ⚠️ 关键：原声明**已经推成功**（队列行 Completed）时，绝不能因为"队列里已有这个 identity"就跳过 ——
+        //    那样撤销永远不会被推出去（对端永久多算，正是本次实机事故）。此时必须**追加一条新变更**，
+        //    因为推送按 rowid 排序 ⇒ 对端必然是"先收到声明、再收到撤销"，顺序天然正确。
+        //    只有"还没发出去"的变更才就地改写成撤销（最新状态覆盖，不新增行）。
+        var pendingQueueId = await conn.QuerySingleOrDefaultAsync<string>(
+            """
+            SELECT queue_id FROM sync_queue
+            WHERE entity_type = @type AND entity_global_id = @gid AND status <> @completed
+            LIMIT 1;
+            """,
+            new { type = queueType, gid = globalId, completed = (int)SyncQueueStatus.Completed }, tx);
+
+        if (!string.IsNullOrEmpty(pendingQueueId))
+        {
+            await conn.ExecuteAsync(
                 """
-                SELECT queue_id FROM sync_queue
-                WHERE entity_type = @type AND entity_global_id = @gid AND status <> @completed
-                LIMIT 1;
+                UPDATE sync_queue
+                SET payload = @payload, created_at_utc = @now,
+                    retry_count = 0, next_retry_at_utc = NULL, last_error = NULL
+                WHERE queue_id = @id;
                 """,
-                new { type = queueType, gid = globalId, completed = (int)SyncQueueStatus.Completed }, tx);
+                new { payload = revocationPayload, now = UtcNowIso(), id = pendingQueueId }, tx);
+        }
+        else
+        {
+            var now = UtcNowIso();
 
-            if (!string.IsNullOrEmpty(pendingQueueId))
+            await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
             {
-                await conn.ExecuteAsync(
-                    """
-                    UPDATE sync_queue
-                    SET payload = @payload, created_at_utc = @now,
-                        retry_count = 0, next_retry_at_utc = NULL, last_error = NULL
-                    WHERE queue_id = @id;
-                    """,
-                    new { payload = revocationPayload, now = UtcNowIso(), id = pendingQueueId }, tx);
-            }
-            else
+                QueueId = SyncHashing.BackfillQueueId(queueType, globalId),
+                EntityType = queueType,
+                EntityGlobalId = globalId,
+                Operation = SyncOperation.Create,
+                BaseVersion = 2,
+                Payload = revocationPayload,
+                CreatedAtUtc = now,
+                Status = SyncQueueStatus.Pending
+            });
+        }
+    }
+
+    /// <summary>
+    /// 在**调用方事务内**对某来源执行撤回（删除对账专用）。
+    /// <paramref name="enqueueWhenAbsent"/>=true 时：**本机声明已不存在也照样写墓碑并把撤销入队** ——
+    /// 对端可能仍持有它自己那条（identity 含设备维度），不广播就会让它永久多算；
+    /// 这正是 <c>exists == 0</c> 设计边界的收口。
+    /// </summary>
+    internal async Task<bool> RevokeAdjustmentInTxCoreAsync(
+        SqliteConnection conn, SqliteTransaction tx, int gameId, string statisticalDate, string source,
+        bool enqueueWhenAbsent)
+    {
+        if (string.IsNullOrWhiteSpace(statisticalDate) || string.IsNullOrWhiteSpace(source)) return false;
+
+        var deviceId = await conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT value FROM settings WHERE key = @k;",
+            new { k = DeviceSyncConstants.SettingKeyDeviceId }, tx);
+        if (string.IsNullOrWhiteSpace(deviceId))
+        {
+            deviceId = DeviceSyncSchema.EnsureLocalDevice(conn, tx);
+        }
+
+        var gameGlobalId = await conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT global_id FROM games WHERE id = @id;", new { id = gameId }, tx);
+        if (string.IsNullOrWhiteSpace(gameGlobalId)) return false;
+
+        var globalId = DailyAdjustmentGlobalId.For(deviceId, gameGlobalId!, statisticalDate, source);
+        var declarationExists = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM daily_duration_adjustments WHERE adjustment_global_id = @id;",
+            new { id = globalId }, tx) > 0;
+        if (!declarationExists && !enqueueWhenAbsent) return false;
+
+        // 与公共方法同口径：残差必须在删声明**之前**量（撤销的秒数仍能精确消失）。
+        var existingDaily = await conn.ExecuteScalarAsync<int?>(
+            "SELECT duration_seconds FROM daily_summary WHERE date = @d AND game_id = @g;",
+            new { d = statisticalDate, g = gameId }, tx) ?? 0;
+        var residual = existingDaily > 0
+            ? Math.Max(0, existingDaily - ComputeEffectiveDailySeconds(
+                conn, tx, gameId, statisticalDate, ReadDailyCutoffHour(conn, tx)))
+            : 0;
+
+        await RevokeAdjustmentCoreAsync(
+            conn, tx, gameId, statisticalDate, source,
+            globalId, gameGlobalId!, deviceId!, residual, declarationExists);
+        return true;
+    }
+
+    /// <summary>
+    /// 「Notion 页面已确认删除」的**原子**本地处理（单连接 + 单事务 + 写锁一次）：
+    /// ① 对 <c>Notion</c> / <c>NotionExternal</c> 两个来源**无条件**写墓碑并广播撤销
+    /// （本机声明已不存在也照做 ⇒ 对端不会永久多算）；
+    /// ② 复用既有事实层删除：作废该会计日的会话分片 + 删派生行 + 记录级入队；
+    /// 任一步失败 ⇒ 整笔回滚（墓碑 / 队列项 / 会话作废 / 派生行删除 **要么全有要么全无**）。
+    /// </summary>
+    public async Task<PlayRecordDeletionResult> ApplyRemoteDeletedDailyAsync(int dailySummaryId)
+    {
+        await _writeLock.WaitAsync();
+        try
+        {
+            using var conn = CreateConnection();
+            using var tx = conn.BeginTransaction();
+
+            var locator = conn.QuerySingleOrDefault<PlayRecordLocator>(
+                "SELECT game_id AS GameId, date AS Date FROM daily_summary WHERE id = @id LIMIT 1;",
+                new { id = dailySummaryId }, tx);
+            if (locator is null)
             {
-                var now = UtcNowIso();
-
-                await EnqueueOutboxCoreAsync(conn, tx, new SyncQueueItem
-                {
-                    QueueId = SyncHashing.BackfillQueueId(nameof(SyncEntityType.DailyAdjustment), globalId),
-                    EntityType = nameof(SyncEntityType.DailyAdjustment),
-                    EntityGlobalId = globalId,
-                    Operation = SyncOperation.Create,
-                    BaseVersion = 2,
-                    Payload = SyncPayloads.Serialize(new DailyAdjustmentSyncPayload
-                    {
-                        SchemaVersion = DeviceSyncConstants.CurrentSchemaVersion,
-                        Revoked = true,
-                        GlobalId = globalId,
-                        GameGlobalId = gameGlobalId!,
-                        StatisticalDate = statisticalDate,
-                        DeviceId = deviceId,
-                        DurationSeconds = 0,
-                        Source = source,
-                        CreatedAtUtc = now
-                    }),
-                    CreatedAtUtc = now,
-                    Status = SyncQueueStatus.Pending
-                });
+                tx.Commit();
+                return new PlayRecordDeletionResult { Note = "记录不存在（可能已被删除）" };
             }
 
+            foreach (var source in new[]
+            {
+                GameTimeTracker.Core.DeviceSync.DailyAdjustmentSources.Notion,
+                GameTimeTracker.Core.DeviceSync.DailyAdjustmentSources.NotionExternal
+            })
+            {
+                await RevokeAdjustmentInTxCoreAsync(
+                    conn, tx, (int)locator.GameId, locator.Date, source, enqueueWhenAbsent: true);
+            }
+
+            var result = await DeletePlayRecordFactsCoreAsync(conn, tx, (int)locator.GameId, locator.Date);
             tx.Commit();
-            AppLog.Info($"[设备同步] 已撤回外部声明：{statisticalDate} game={gameId} source={source}"
-                + $"（identity={globalId[..8]}…，daily 已按事实重算，撤销已入队）");
-            return true;
+            return result;
         }
         finally
         {
