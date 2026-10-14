@@ -235,7 +235,9 @@ public interface INotionClient
     /// 不允许改"数值"。要改数值只能走 <c>UpdateDailyRecordAsync</c>（推送路径），
     /// 那条路径写的是本地确实领先的时长。
     /// </remarks>
-    Task<bool> UpdateDailyRecordTitleAsync(string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态");
+    Task<bool> UpdateDailyRecordTitleAsync(
+        string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态",
+        string? iconFileUploadId = null);
     /// <summary>更新每日记录的「绑定状态」属性（已绑定 / 未绑定），绝不修改时长、日期或标题。</summary>
     Task<bool> UpdateDailyBindingStatusAsync(string pageId, string status);
     Task<string> CreateGameMasterPageAsync(string gameDbId, string gameTitle, string? iconUrl = null, string? coverUrl = null);
@@ -301,11 +303,6 @@ public interface INotionSyncService
     Task<int> PullDailyRecordsFromNotionAsync();
     Task<int> BackfillRelationsAsync();
 
-    /// <summary>
-    /// 回刷：总表改名 / 补 page icon 后，把**已同步**的每日记录标题与图标跟着更新。
-    /// 逐条比对本地快照，只有真的不一致才 PATCH，因此可以安全地放进每轮同步链。
-    /// </summary>
-    Task<int> RefreshDailyTitlesFromMasterAsync();
     Task<int> AutoLinkGamesFromCatalogAsync();
     Task RefreshGameCatalogCacheAsync();
 

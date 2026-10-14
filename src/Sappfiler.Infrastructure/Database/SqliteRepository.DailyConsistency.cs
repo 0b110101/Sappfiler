@@ -81,10 +81,24 @@ public sealed class DailyConsistencyReport
 
     public IReadOnlyList<DailyConsistencyIssue> Orphans { get; init; } = Array.Empty<DailyConsistencyIssue>();
 
+    /// <summary>
+    /// 有**精确对应**删除留底（`deleted_archive(kind='game')` 的 payload 里出现同一个本地 game id）的孤儿事实。
+    /// 它们是"我们确实删过这款游戏"的历史残留，**不是**异常 ⇒ 降级报告（Info 汇总），不再每轮 WARN。
+    /// </summary>
+    public IReadOnlyList<DailyConsistencyIssue> KnownDeletedOrphans { get; init; } = Array.Empty<DailyConsistencyIssue>();
+
+    /// <summary>
+    /// 经**用户显式确认**的历史遗留孤儿（settings 里 <c>notion_daily_known_orphans</c> 清单精确命中者）。
+    /// 与 <see cref="KnownDeletedOrphans"/>（系统删除留底）**分开报告**，便于审计区分"程序删的"与"人工确认的"。
+    /// </summary>
+    public IReadOnlyList<DailyConsistencyIssue> UserConfirmedOrphans { get; init; } = Array.Empty<DailyConsistencyIssue>();
+
     public string Summary
         => $"扫描 {RowsScanned} 行 / 修复 {RowsFixed} 行（补 {RowsInserted} 改 {RowsUpdated}）"
          + $"；事实 {FactSecondsTotal}s，Daily {StoredSecondsBefore}s → {StoredSecondsAfter}s"
-         + $"；孤儿会话 {OrphanSessionCount} 条、孤儿声明 {OrphanAdjustmentCount} 条（{OrphanSeconds}s）";
+         + $"；孤儿会话 {OrphanSessionCount} 条、孤儿声明 {OrphanAdjustmentCount} 条（{OrphanSeconds}s）"
+         + $"；已知删除残留 {KnownDeletedOrphans.Count} 条（降级）"
+         + $"；用户确认的已知遗留 {UserConfirmedOrphans.Count} 条（降级）";
 }
 
 /// <summary>
@@ -137,6 +151,30 @@ public partial class SqliteRepository
 
     /// <summary>孤儿的会话事实（game 行不存在）。</summary>
     public const string IssueOrphanSession = "orphan_session";
+
+    /// <summary>
+    /// 用户**显式确认**的历史遗留孤儿（settings 表里的一份独立清单）。
+    /// <remarks>
+    /// ⚠️ 与 <c>deleted_archive</c> 的"已删除残留"**互不混用**：那份是程序确实删过游戏的系统留底，
+    /// 这份是人工确认（如早期测试遗留）的记录，必须带**理由 + 确认时间**，并绑定**稳定事实身份**
+    /// （<see cref="GlobalId"/>；没有它时要求 <see cref="DurationSeconds"/> 相等）。
+    /// <c>games.id</c> 虽是 AUTOINCREMENT（同库内不复用），但还原路径会写入**显式 id**
+    /// ⇒ 绝不允许只凭 GameId 就把孤儿降级隐藏。
+    /// </remarks>
+    /// </summary>
+    public const string SettingKeyUserConfirmedOrphans = "notion_daily_known_orphans";
+
+    /// <summary>一条"用户确认的已知历史孤儿"记录（可审计：谁、何时、为什么、绑定哪个事实）。</summary>
+    public sealed class UserConfirmedOrphanEntry
+    {
+        public long GameId { get; set; }
+        public string FactKind { get; set; } = "";
+        public string GlobalId { get; set; } = "";
+        public int DurationSeconds { get; set; }
+        public string Reason { get; set; } = "";
+        public string ConfirmedAtUtc { get; set; } = "";
+        public string ConfirmedBy { get; set; } = "user";
+    }
 
     /// <summary>孤儿的调整声明（game 行不存在）。</summary>
     public const string IssueOrphanAdjustment = "orphan_adjustment";
@@ -223,6 +261,7 @@ public partial class SqliteRepository
         var factCounts = new Dictionary<(long GameId, string Date), int>();
         long orphanSeconds = 0;
         var orphanSessions = 0;
+        var knownDeletedOrphans = new List<DailyConsistencyIssue>();
 
         var sessions = conn.Query<SessionFactRow>(
             """
@@ -512,6 +551,12 @@ public partial class SqliteRepository
             ? conn.ExecuteScalar<long>("SELECT COALESCE(SUM(duration_seconds), 0) FROM daily_summary;", transaction: tx)
             : storedSecondsBefore;
 
+        // 分级用的两份**互不混用**的证据（都只读；不删任何事实、不改任何计数）：
+        //   ① 删除留底：结构化解析 + Id 数值相等；
+        //   ② 用户确认的历史遗留：独立清单 + 稳定事实身份校验（绝不只看 GameId）。
+        var deletedGameIds = LoadDeletedGameIdsStructured(conn, tx);
+        var confirmedOrphans = LoadUserConfirmedOrphans(conn, tx);
+
         return new DailyConsistencyReport
         {
             Applied = apply,
@@ -526,11 +571,85 @@ public partial class SqliteRepository
             StoredSecondsAfter = storedSecondsAfter,
             FactSecondsTotal = factSecondsTotal,
             Issues = issues,
-            Orphans = orphans
+            // 🛡️ 2026-10-14（审计分级）：只有**精确对应**的删除留底才算"已知删除残留"（降级），其余仍按真孤儿上报。
+            //    判据 = `deleted_archive(kind='game')` 的 payload 里 **Id 数值相等**（结构化解析；
+            //    旧的子串匹配会让 `"Id":14` 命中 `"Id":141` ⇒ 短 id 的孤儿被别人的留底错误降级）。
+            //    用户确认的历史遗留是**另一份独立清单**（不与删除留底混用），且必须绑定稳定事实身份。
+            Orphans = orphans.Where(o => !deletedGameIds.Contains(o.GameId) && !MatchesUserConfirmed(confirmedOrphans, o)).ToList(),
+            KnownDeletedOrphans = orphans.Where(o => deletedGameIds.Contains(o.GameId)).ToList(),
+            UserConfirmedOrphans = orphans.Where(o => MatchesUserConfirmed(confirmedOrphans, o)).ToList(),
         };
 
         static string NameOf(Dictionary<long, GameLookupRow> games, long gameId)
             => games.TryGetValue(gameId, out var g) ? g.Name : $"(game {gameId} 不存在)";
+
+        /// <summary>
+        /// 删除留底里的"被删游戏 id"集合：逐条**结构化解析** payload 并做 **Id 数值相等** 比较。
+        /// 无效 JSON / 缺 Id / Id 不是数字 ⇒ 不认这条留底（宁可继续 WARN，也不误降级）。
+        /// </summary>
+        static HashSet<long> LoadDeletedGameIdsStructured(SqliteConnection c, SqliteTransaction? t)
+        {
+            var ids = new HashSet<long>();
+            foreach (var json in c.Query<string>(
+                "SELECT payload_json FROM deleted_archive WHERE kind = 'game';", transaction: t))
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+                    if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                        && doc.RootElement.TryGetProperty("Id", out var idEl)
+                        && idEl.ValueKind == System.Text.Json.JsonValueKind.Number
+                        && idEl.TryGetInt64(out var id))
+                    {
+                        ids.Add(id);
+                    }
+                }
+                catch { /* 无效 JSON ⇒ 忽略这条留底 */ }
+            }
+            return ids;
+        }
+
+        /// <summary>
+        /// 读取"用户确认的已知历史孤儿"清单，并**只接受可审计且可核验**的条目：
+        /// 需要 GameId + FactKind + 理由 + 确认时间，且必须有稳定事实身份（GlobalId，或至少 DurationSeconds）。
+        /// </summary>
+        static List<UserConfirmedOrphanEntry> LoadUserConfirmedOrphans(SqliteConnection c, SqliteTransaction? t)
+        {
+            var list = new List<UserConfirmedOrphanEntry>();
+            var raw = c.QueryFirstOrDefault<string>(
+                "SELECT value FROM settings WHERE key = @k;", new { k = SettingKeyUserConfirmedOrphans }, t);
+            if (string.IsNullOrWhiteSpace(raw)) return list;
+
+            try
+            {
+                var entries = System.Text.Json.JsonSerializer.Deserialize<List<UserConfirmedOrphanEntry>>(raw!) ?? new();
+                foreach (var e in entries)
+                {
+                    var auditable = e.GameId > 0
+                                    && !string.IsNullOrWhiteSpace(e.FactKind)
+                                    && !string.IsNullOrWhiteSpace(e.Reason)
+                                    && !string.IsNullOrWhiteSpace(e.ConfirmedAtUtc);
+                    var hasStableIdentity = !string.IsNullOrWhiteSpace(e.GlobalId) || e.DurationSeconds > 0;
+                    if (auditable && hasStableIdentity) list.Add(e);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn($"[日统计审计] 读取「用户确认的已知孤儿」清单失败（按空处理，孤儿继续按真孤儿上报）: {ex.Message}");
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// 孤儿与该条目是否**精确对应**：GameId + 事实类型必须一致，并且稳定身份必须匹配
+        /// （有 GlobalId 就比 GlobalId；否则比时长）。只有全部命中才允许降级。
+        /// </summary>
+        static bool MatchesUserConfirmed(List<UserConfirmedOrphanEntry> entries, DailyConsistencyIssue o)
+            => entries.Any(e => e.GameId == o.GameId
+                                && string.Equals(e.FactKind, o.Kind, StringComparison.Ordinal)
+                                && (e.GlobalId.Length > 0
+                                    ? string.Equals(e.GlobalId, o.GlobalId, StringComparison.OrdinalIgnoreCase)
+                                    : e.DurationSeconds == o.FactSeconds));
     }
 
     /// <summary>

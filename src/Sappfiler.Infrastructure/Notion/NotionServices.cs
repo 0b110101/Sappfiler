@@ -13,10 +13,10 @@ namespace GameTimeTracker.Infrastructure.Notion;
 /// </summary>
 /// <remarks>
 /// 单独抽成一个类，而不是塞在 <see cref="NotionClient"/> 里当私有方法，是因为
-/// **写**标题的 <see cref="NotionClient"/> 和**比对**标题的
-/// <c>NotionSyncService.RefreshDailyTitlesFromMasterAsync</c> 必须共用同一套规则。
+/// **写**标题的 <see cref="NotionClient"/> 与**规范化**历史标题的
+/// <c>NotionSyncService.NormalizeHistoricalDailyTitlesAsync</c>（设置页手工入口）必须共用同一套规则。
 /// 两边各留一份实现的话，只要格式有一点漂移（比如改小数位数、换分隔符），
-/// 回刷就会永远判定"标题不一致"，每轮同步都白打一次 Notion。
+/// 手工规范化就会永远判定"不一致"，把同一批历史记录反复重写。
 /// </remarks>
 internal static class DailyRecordTitle
 {
@@ -437,6 +437,8 @@ public class NotionClient : INotionClient
                     var durationSeconds = RawDurationToSeconds(durationRaw, rawTitle);
                     var gameMasterPageId = ExtractRelationId(props, "关联游戏", "游戏", "游戏总表", "Game");
                     var status = ExtractSelect(props, "绑定状态", "Status");
+                    // 页面当前 Page Icon（2026-10-13）：用于"只在页面没有图标时才补图标"的判定。
+                    var (pageIconUrl, pageIconType) = ExtractPageIcon(page);
 
                     if (!string.IsNullOrWhiteSpace(date) && (!string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(gameMasterPageId)))
                     {
@@ -451,7 +453,9 @@ public class NotionClient : INotionClient
                             DurationSeconds = durationSeconds,
                             DurationUnitIsMinutes = durationUnit == DurationUnit.Minutes,
                             GameMasterPageId = gameMasterPageId,
-                            Status = status
+                            Status = status,
+                            IconType = pageIconType,
+                            IconUrl = pageIconUrl
                         });
                     }
                 }
@@ -629,7 +633,8 @@ public class NotionClient : INotionClient
     ///    那条路径写的是本地确实领先的时长。
     /// </remarks>
     public async Task<bool> UpdateDailyRecordTitleAsync(
-        string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态")
+        string pageId, string title, string? iconUrl = null, string titlePropertyName = "游戏动态",
+        string? iconFileUploadId = null)
     {
         var cleanPageId = pageId.Replace("-", "");
         var propName = string.IsNullOrWhiteSpace(titlePropertyName) ? "游戏动态" : titlePropertyName;
@@ -640,9 +645,12 @@ public class NotionClient : INotionClient
             [propName] = new { title = new[] { new { text = new { content = title } } } }
         };
 
-        var payload = string.IsNullOrWhiteSpace(iconUrl)
+        // 图标同样"不传就不写"：调用方只有在页面当前**没有图标**时才会传 file_upload id。
+        // ⚠️ 这是页面图标（Page Icon），不是封面（Cover），也不是页面内容。
+        var icon = BuildIconObject(iconFileUploadId, iconUrl);
+        var payload = icon is null
             ? (object)new { properties }
-            : new { properties, icon = new { type = "external", external = new { url = iconUrl } } };
+            : new { properties, icon };
 
         using var req = CreateRequest(HttpMethod.Patch, $"/pages/{cleanPageId}", payload);
         var res = await SendWithRetryAsync(req);
@@ -1255,6 +1263,17 @@ public class NotionSyncService : INotionSyncService
     private readonly DailyIconUploadService _iconUploads;
     private List<NotionDailyRecordItem> _lastPulledDailyRecords = new();
 
+    /// <summary>
+    /// 本轮 Pull 里**原始查询**返回的 Page ID 集合（未经过解析丢弃 / 孤儿过滤 / 重复合并）。
+    /// </summary>
+    /// <remarks>
+    /// 🛡️ 2026-10-14：用于区分两种"快照缺项"：
+    /// · 在原始集合里、却不在业务快照里 ⇒ 页面**存在**，只是被解析丢弃/孤儿过滤/合并折叠；
+    /// · 连原始集合里都没有 ⇒ 归档 / 未共享 / 无权限 / 查询不完整 —— **无法**据此认定页面不存在。
+    /// 两种情况都不得直接覆盖远端（见 <see cref="SyncPendingDailyRecordsAsync"/> 的安全分支）。
+    /// </remarks>
+    private HashSet<string> _lastPulledRawPageIds = new();
+
     /// <summary>没有映射存储时的兜底（只会在测试里出现）：永远当作"没有映射"，不做持久化。</summary>
     private sealed class NullIconMappingStore : GameTimeTracker.Core.Notion.INotionIconMappingStore
     {
@@ -1334,6 +1353,37 @@ public class NotionSyncService : INotionSyncService
     /// 拉取失败时宁可这轮不上传（下一轮网络恢复后会补），也不要冒重号的风险。
     /// </summary>
     private bool _lastPullSucceeded = true;
+
+    /// <summary>
+    /// 「删除对账」记住的**已确认同步目标**（归一化后的 Daily 库 id，存 settings 表）。
+    ///
+    /// <para>
+    /// 用途见 <see cref="ReconcileNotionDeletionsAsync"/> 的环境可信判断：库被重建 / 换 workspace /
+    /// 换 Token / 配置被指向另一个同结构库之后，远端查询**仍会成功**（新库合法且已共享），
+    /// 但本地旧 page id 的 <c>GET /pages/{id}</c> 会全部返回 404 —— 不能据此判定"用户删了这些页面"。
+    /// 记住"上一轮确认可信的库"后即可识别这种环境错位；首轮没有历史可比时只记录、不阻拦。
+    /// </para>
+    /// </summary>
+    private const string SettingKeyDailyReconcileTargetDb = "notion_daily_reconcile_target_db";
+
+    /// <summary>
+    /// 「同日同游戏合并」的**待完成吸收记录**（JSON 数组，存 settings 表）。
+    ///
+    /// <para>
+    /// 语义：把重复页的时长并进权威页**之前**先在这里登记"这一页已被权威页吸收、但归档还没成功"，
+    /// 条目带 <c>CanonicalSecondsAfterAbsorb</c>（吸收完成后的权威页秒数）。
+    /// 下一轮判断该页是否真的被吸收，一律**以远端权威页的当前秒数是否已达到该值为准** ——
+    /// 于是"写完权威页但进程崩溃"也能靠远端状态判定，不依赖内存、也不依赖本地写入顺序。
+    /// 归档成功后立刻删除条目；页面消失（归档成功/被删）时也会被清理。
+    /// </para>
+    /// </summary>
+    private const string SettingKeyPendingMergeAbsorb = "notion_daily_pending_merge_absorb";
+
+    /// <summary>游戏总表快照最近一次**成功**刷新的 UTC 时间（ISO-8601）。用于判断目录快照是否可信。</summary>
+    private const string SettingKeyGameCatalogRefreshedAtUtc = "notion_game_catalog_refreshed_at_utc";
+
+    /// <summary>目录快照的"新鲜"窗口：超过它就不再拿这份快照做"总表已不存在"的判定（宁可多导入，不误丢）。</summary>
+    private static readonly TimeSpan CatalogFreshnessWindow = TimeSpan.FromHours(24);
 
     public event EventHandler<string>? SyncStatusChanged;
 
@@ -1474,6 +1524,18 @@ public class NotionSyncService : INotionSyncService
             {
                 await _repo.UpsertCatalogItemsAsync(items);
 
+                // 🛡️ 2026-10-14：记录"这份总表快照是刚刚成功刷新过的" ——
+                //    每日记录导入只会用**新鲜**快照做"总表里已不存在"的判定（见 PullDailyRecordsFromNotionAsync），
+                //    否则会把"本地还没同步到"误判成"总表已删除"而静默丢弃手录记录。
+                try
+                {
+                    await _repo.SetSettingAsync(SettingKeyGameCatalogRefreshedAtUtc, DateTime.UtcNow.ToString("O"));
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[游戏总表] 记录快照刷新时间失败（下一步会按「不新鲜」处理）: {ex.Message}");
+                }
+
                 // 2j：把总表「已忽略」落到本地（该库没有这个属性时整段跳过，老用户零影响）。
                 // 放在这里而不是 Pull 之后：被忽略的游戏不该先被拉出每日记录再被忽略。
                 await ApplyCatalogIgnoredStateAsync(items);
@@ -1513,6 +1575,100 @@ public class NotionSyncService : INotionSyncService
         return clean.Length <= 8 ? clean : clean[..8] + "…";
     }
 
+    /// <summary>一条"已并入权威页、但重复页归档尚未成功"的吸收记录（持久化在 settings 里）。</summary>
+    /// <remarks>
+    /// ⚠️ 2026-10-14 阶段 A（独立差异审查 F1/F2/F3）：**不再用"远端秒数 ≥ 目标"判定写入成功** ——
+    /// 用户手工把时长改大/改小都会落进那个不等式里，导致误归档或覆盖用户手改值。
+    /// 现在记录三样东西，用**整条远端口径指纹**做证据：
+    ///   <see cref="LastSeenSignature"/>        写入前本机看到的远端样子（= 写入没落库时远端应该还是它）；
+    ///   <see cref="ExpectedSignatureAfterWrite"/> 本机写入**之后**远端应有的样子（= 写入确认落库的证据）；
+    /// 两者都不匹配 ⇒ 远端被本机之外改过（用户手改 / 无法确认）⇒ 停止破坏性步骤、保留状态等下轮复核。
+    /// </remarks>
+    private sealed class PendingMergeAbsorb
+    {
+        public string PageId { get; set; } = "";
+        public string CanonicalPageId { get; set; } = "";
+        public int CanonicalSecondsAfterAbsorb { get; set; }
+        public double WrittenHours { get; set; }
+        public string LastSeenSignature { get; set; } = "";
+        public string ExpectedSignatureAfterWrite { get; set; } = "";
+    }
+
+    /// <summary>合并用的"秒"口径（老数据/测试构造的 item 没有 DurationSeconds 时退回 minutes × 60）。</summary>
+    private static int EffectiveSeconds(NotionDailyRecordItem item)
+        => item.DurationSeconds > 0 ? item.DurationSeconds : item.DurationMinutes * 60;
+
+    /// <summary>
+    /// 远端权威页的**指纹**：秒数 | 标题 | Relation | 图标类型。
+    /// 只做"是否与某个已知状态完全一致"的比较，不用大小关系推断"谁写的"。
+    /// 图标只取类型（file_upload 的临时 URL 每天会变，取 URL 会造成假"被改过"）。
+    /// </summary>
+    private static string CanonicalSignatureOf(NotionDailyRecordItem item)
+        => $"{EffectiveSeconds(item)}|{(item.RawTitle ?? item.GameTitle ?? "").Trim()}"
+           + $"|{NormalizePageId(item.GameMasterPageId)}|{item.IconType ?? "-"}";
+
+    /// <summary>
+    /// 本机写入**之后**远端应有的指纹：秒数按 0.01h 分辨率量化、标题按写入 payload 的规则拼装。
+    /// 只有远端整条指纹等于它，才算"本机写入已确认"（也才允许归档重复页）。
+    /// </summary>
+    private static string ExpectedSignatureAfterWrite(
+        NotionDailyRecordItem canonical, int totalSeconds, int totalMinutes,
+        string displayName, string? masterPageId, bool iconWillBeWritten)
+    {
+        var expectedSeconds = (int)Math.Round(DailyRecordTitle.SecondsToHours(totalSeconds) * 3600);
+        var expectedTitle = DailyRecordTitle.Build(displayName, totalMinutes);
+        var expectedIcon = iconWillBeWritten ? "file_upload" : (canonical.IconType ?? "-");
+        return $"{expectedSeconds}|{expectedTitle}|{NormalizePageId(masterPageId)}|{expectedIcon}";
+    }
+
+    private async Task<List<PendingMergeAbsorb>> LoadPendingMergeAbsorbAsync()
+    {
+        try
+        {
+            var json = await _repo.GetSettingAsync(SettingKeyPendingMergeAbsorb);
+            if (string.IsNullOrWhiteSpace(json)) return new List<PendingMergeAbsorb>();
+            return System.Text.Json.JsonSerializer.Deserialize<List<PendingMergeAbsorb>>(json)
+                   ?? new List<PendingMergeAbsorb>();
+        }
+        catch (Exception ex)
+        {
+            // 解析失败按"没有待完成记录"处理：下一轮会重新按远端值推断吸收状态，不会凭坏数据删改任何东西。
+            AppLog.Warn($"[同步] 读取待完成合并记录失败（按空处理）: {ex.Message}");
+            return new List<PendingMergeAbsorb>();
+        }
+    }
+
+    private async Task SavePendingMergeAbsorbAsync(List<PendingMergeAbsorb> entries)
+    {
+        try
+        {
+            // 单条 settings upsert（仓库写入锁内原子完成）：要么整份旧值、要么整份新值，不会写半份。
+            await _repo.SetSettingAsync(SettingKeyPendingMergeAbsorb,
+                System.Text.Json.JsonSerializer.Serialize(entries));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[同步] 保存待完成合并记录失败（不影响本轮，下一轮会按远端值重新推断）: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 本地总表快照是否**新鲜**（最近一次成功刷新在 <see cref="CatalogFreshnessWindow"/> 内）。
+    /// 不新鲜 / 从未刷新 ⇒ 不能拿它判定"总表里没有这个游戏"。
+    /// </summary>
+    private async Task<(bool Fresh, string Description)> IsGameCatalogFreshAsync()
+    {
+        var raw = await _repo.GetSettingAsync(SettingKeyGameCatalogRefreshedAtUtc);
+        if (string.IsNullOrWhiteSpace(raw) ||
+            !DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var at))
+        {
+            return (false, "从未成功刷新过（无时间戳）");
+        }
+
+        var fresh = DateTime.UtcNow - at.ToUniversalTime() <= CatalogFreshnessWindow;
+        return (fresh, $"最近成功刷新 {at.ToUniversalTime():yyyy-MM-dd HH:mm} UTC（{(fresh ? "新鲜" : "已过期")}）");
+    }
+
     public async Task<int> PullDailyRecordsFromNotionAsync()
     {
         if (!_config.IsNotionConfigured) return 0;
@@ -1522,6 +1678,11 @@ public class NotionSyncService : INotionSyncService
             SyncStatusChanged?.Invoke(this, "正在从每日时长表拉取记录...");
             var rawRecords = await _client.QueryDailyRecordsAsync(_config.DailyDatabaseId);
             _lastPullSucceeded = true;
+            // 🛡️ 先记录"原始查询返回了什么"，再让后续解析/过滤/合并去动业务快照。
+            _lastPulledRawPageIds = rawRecords
+                .Select(r => NormalizePageId(r.PageId))
+                .Where(id => id.Length > 0)
+                .ToHashSet();
             int synced = 0;
             int skippedOrphan = 0;
             int failed = 0;
@@ -1536,18 +1697,31 @@ public class NotionSyncService : INotionSyncService
                 .Where(id => id.Length > 0)
                 .ToHashSet();
 
-            var catalogNames = catalogItems
-                .Where(c => !string.IsNullOrWhiteSpace(c.PageId) && !string.IsNullOrWhiteSpace(c.Name))
-                .ToDictionary(c => NormalizePageId(c.PageId), c => c.Name.Trim().ToLowerInvariant());
+            // 🛡️ 2026-10-14（P5）：目录快照的**新鲜度**决定它能不能用来判定"总表里没有这个游戏"。
+            //    快照不新鲜 / 刷新失败 / 从未刷新 ⇒ **不做孤儿过滤**（宁可多导入，也不静默丢弃手录记录）。
+            var (catalogFresh, catalogFreshnessReason) = await IsGameCatalogFreshAsync();
+            var useOrphanFilter = catalogIds.Count > 0 && catalogFresh;
+            if (catalogIds.Count > 0 && !catalogFresh)
+            {
+                AppLog.Warn($"[同步] 本地游戏总表快照不可信（{catalogFreshnessReason}）⇒ 本轮**不做**"
+                            + "「总表已不存在」过滤，所有每日记录照常导入（避免把「本地尚未同步」误判成「总表已删除」）");
+            }
 
             var validRecords = new List<NotionDailyRecordItem>();
             foreach (var r in rawRecords)
             {
-                if (catalogIds.Count > 0 &&
+                if (useOrphanFilter &&
                     !string.IsNullOrWhiteSpace(r.GameMasterPageId) &&
                     !catalogIds.Contains(NormalizePageId(r.GameMasterPageId)))
                 {
                     skippedOrphan++;
+                    // 逐条诊断（最多 10 条明细），并明确写出判定依据与快照状态，便于人工核对是否误跳。
+                    if (skippedOrphan <= 10)
+                    {
+                        AppLog.Warn($"[同步] 每日页面 {r.PageId}（{r.Date}）的关联游戏 {r.GameMasterPageId} "
+                                    + $"不在**新鲜**的总表快照中（{catalogFreshnessReason}）⇒ 本轮跳过导入"
+                                    + "（防「已删游戏复活」；页面本身未被修改，快照刷新后下一轮会重新导入）");
+                    }
                     continue;
                 }
                 validRecords.Add(r);
@@ -1559,19 +1733,13 @@ public class NotionSyncService : INotionSyncService
             {
                 var date = r.Date?.Trim() ?? "";
                 string gameKey;
+                // 🛡️ 2026-10-14（P7）：游戏身份**以 Relation 指向的主表页面 ID 为准** ——
+                //    显示名可能重名，不能替代可用的页面 ID（否则"不同游戏同名"会被并成一条）。
+                //    完全没有 Relation 的记录才退回"标题基名"归组，而且这类组还要额外的归属证据才允许合并/归档。
                 var normMasterId = NormalizePageId(r.GameMasterPageId);
-                if (!string.IsNullOrEmpty(normMasterId) && catalogNames.TryGetValue(normMasterId, out var catName))
-                {
-                    gameKey = catName;
-                }
-                else if (!string.IsNullOrEmpty(normMasterId))
-                {
-                    gameKey = $"m:{normMasterId}";
-                }
-                else
-                {
-                    gameKey = DailyRecordTitle.ExtractBaseName(r.GameTitle ?? "").Trim().ToLowerInvariant();
-                }
+                gameKey = !string.IsNullOrEmpty(normMasterId)
+                    ? $"m:{normMasterId}"
+                    : "nolink|" + DailyRecordTitle.ExtractBaseName(r.GameTitle ?? "").Trim().ToLowerInvariant();
 
                 var key = $"{date}|{gameKey}";
                 if (!groupedRecords.TryGetValue(key, out var list))
@@ -1583,6 +1751,19 @@ public class NotionSyncService : INotionSyncService
             }
 
             var deduplicatedRecords = new List<NotionDailyRecordItem>();
+            var pendingAbsorb = await LoadPendingMergeAbsorbAsync();
+            var pendingChanged = false;
+            var mergeIncomplete = 0;          // 写入或归档没走完的重复记录（已保留原值，下一轮重试）
+            var mergeSkippedNoIdentity = 0;   // 归属无法确认 ⇒ 既不合并也不归档的组
+            var mergeIndeterminate = 0;       // 权威页在本机待确认期间被改过 ⇒ 本轮停止破坏性步骤的组
+
+            // 清理已经不用再管的吸收记录：重复页或权威页已不在本轮查询结果里（归档成功 / 页面已消失）。
+            var pendingBeforePrune = pendingAbsorb.Count;
+            pendingAbsorb.RemoveAll(e =>
+                !_lastPulledRawPageIds.Contains(NormalizePageId(e.PageId))
+                || !_lastPulledRawPageIds.Contains(NormalizePageId(e.CanonicalPageId)));
+            if (pendingAbsorb.Count != pendingBeforePrune) pendingChanged = true;
+
             foreach (var entry in groupedRecords)
             {
                 var group = entry.Value;
@@ -1592,15 +1773,27 @@ public class NotionSyncService : INotionSyncService
                     continue;
                 }
 
-                // canonical seconds：合并时取"秒"（老数据/测试构造的 item 退回 minutes × 60）
-                static int EffectiveSeconds(NotionDailyRecordItem item)
-                    => item.DurationSeconds > 0 ? item.DurationSeconds : item.DurationMinutes * 60;
-
                 // 同一天同一游戏在 Notion 存在多个页面（例如用户截图中的 3 条记录）！
                 // 1. 选取权威主页面：优先匹配本地已绑定的 pageId，否则选时长最大的
                 var groupDate = group[0].Date;
                 var localRows = await _repo.GetDailySummariesByDateAsync(groupDate);
                 var matchedLocal = localRows.FirstOrDefault(l => group.Any(g => NormalizePageId(g.PageId) == NormalizePageId(l.NotionPageId)));
+
+                // 🛡️ 2026-10-14 归属证据闸门（P6/P7）：
+                //    有 Relation 的组：游戏身份 = Relation 指向的主表页面 ID（归组键已按它分组）⇒ 归属已证明；
+                //    没有 Relation 的组：**只有"组内至少一条页面被本地每日行引用"才能证明归属**
+                //    （本地行=本机创建/认领过这条页面 ⇒ 属于同一个本地游戏）。
+                //    两者都不满足 ⇒ 无法确认是否同一条业务记录 ⇒ 本组**既不合并也不归档**，原样保留并留诊断。
+                var groupHasRelation = !string.IsNullOrEmpty(NormalizePageId(group[0].GameMasterPageId));
+                if (!groupHasRelation && matchedLocal == null)
+                {
+                    mergeSkippedNoIdentity++;
+                    AppLog.Warn($"[同步] 同一日期「{groupDate}」下有 {group.Count} 条**没有关联游戏**的每日页面"
+                                + $"（{string.Join(", ", group.Select(g => g.PageId))}），且没有任何一条被本机每日记录引用 —— "
+                                + "无法确认它们属于同一个游戏，本组既不合并不归档（页面与时长原样保留）");
+                    deduplicatedRecords.AddRange(group);
+                    continue;
+                }
 
                 var canonical = matchedLocal != null
                     ? group.First(g => NormalizePageId(g.PageId) == NormalizePageId(matchedLocal.NotionPageId))
@@ -1608,36 +1801,107 @@ public class NotionSyncService : INotionSyncService
 
                 var duplicates = group.Where(g => g.PageId != canonical.PageId).ToList();
 
-                // 2. 累计合并总时长
-                // 同一天多个页面的合并：**按秒**求和/取大，最后只换算一次
-                // （逐页按分钟截断再相加会让每次合并都吃掉最多 59 秒）
-                int sumSeconds = group.Sum(EffectiveSeconds);
+                // 2. 已经在**更早轮次**被吸收、但归档还没成功的重复页：不再计入合计（否则每轮 +1 份 ⇒ 膨胀）。
+                //    阶段 A（F1/F2/F3）：证据从"秒数 ≥ 目标"改成**整条远端口径指纹的三态判定** ——
+                //      · 等于"写入后的预期"   ⇒ 本机写入确认落库 ⇒ 已吸收（可归档）；
+                //      · 等于"写入前看到的样子" ⇒ 本机那次写入确实没落库，且用户没动过 ⇒ 作废条目、重新计入（安全重试）；
+                //      · 两者都不是          ⇒ 远端被本机之外改过（用户手改时长/标题/Relation/图标，或无法确认）
+                //                             ⇒ **整组停止破坏性步骤**：不写权威页、不归档重复页、保留条目等下轮复核。
+                var canonicalSecondsNow = EffectiveSeconds(canonical);
+                var canonicalSignatureNow = CanonicalSignatureOf(canonical);
+                var alreadyAbsorbed = new List<NotionDailyRecordItem>();
+                var groupLatched = false;
+                var latchReason = "";
+                foreach (var dup in duplicates)
+                {
+                    var dupKey = NormalizePageId(dup.PageId);
+                    var rec = pendingAbsorb.FirstOrDefault(e =>
+                        NormalizePageId(e.PageId) == dupKey
+                        && NormalizePageId(e.CanonicalPageId) == NormalizePageId(canonical.PageId));
+                    if (rec == null) continue;
+
+                    if (rec.ExpectedSignatureAfterWrite.Length > 0
+                        && canonicalSignatureNow == rec.ExpectedSignatureAfterWrite)
+                    {
+                        alreadyAbsorbed.Add(dup);
+                    }
+                    else if (rec.LastSeenSignature.Length > 0
+                             && canonicalSignatureNow == rec.LastSeenSignature)
+                    {
+                        // 权威页与本机上次看到的一模一样 ⇒ 那次写入确实没落库 ⇒ 作废条目，让本轮重新计入合计。
+                        pendingAbsorb.Remove(rec);
+                        pendingChanged = true;
+                        AppLog.Info($"[同步] 待完成合并记录作废（权威页 {canonical.PageId} 与写入前一致"
+                                    + $"「{rec.LastSeenSignature}」）⇒ 重复页 {dup.PageId} 重新计入合计");
+                    }
+                    else
+                    {
+                        groupLatched = true;
+                        latchReason = $"当前「{canonicalSignatureNow}」既不是写入后的预期「{rec.ExpectedSignatureAfterWrite}」，"
+                                      + $"也不是写入前看到的「{rec.LastSeenSignature}」";
+                    }
+                }
+
+                if (groupLatched)
+                {
+                    mergeIndeterminate++;
+                    AppLog.Warn($"[同步] 权威页 {canonical.PageId} 在本机待确认合并期间被改过（{latchReason}）—— "
+                                + "无法确认程序合计是否已经落库，本轮**不写权威页、不归档重复页**，"
+                                + "保留待处理状态（页面与时长原样保留，下轮继续复核；不会重复累加）");
+                    deduplicatedRecords.Add(canonical);
+                    continue;
+                }
+
+                var newDuplicates = duplicates.Except(alreadyAbsorbed).ToList();
+
+                // 3. 累计合并总时长：**按秒**求和/取大，最后只换算一次
+                //    （逐页按分钟截断再相加会让每次合并都吃掉最多 59 秒；已吸收未归档的那部分不再重复相加）
+                int sumSeconds = canonicalSecondsNow + newDuplicates.Sum(EffectiveSeconds);
                 int localSeconds = matchedLocal?.DurationSeconds ?? 0;
                 int totalSeconds = Math.Max(sumSeconds, localSeconds);
                 int totalMinutes = GameTimeTracker.Core.Services.DurationMath.MinutesFromSeconds(totalSeconds);
 
-                // 3. 将多余的重复页面归档移入 Notion 回收站
-                foreach (var dup in duplicates)
-                {
-                    try
-                    {
-                        await _client.ArchivePageAsync(dup.PageId);
-                        AppLog.Info($"[同步] 自动归档 Notion 冗余每日记录页面: {dup.PageId} (「{dup.GameTitle}」{dup.Date} {dup.DurationMinutes}m)");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.Warn($"[同步] 归档 Notion 重复页面失败 ({dup.PageId}): {ex.Message}");
-                    }
-                }
-
-                // 4. 更新权威页面为合并后的总时长
                 var masterPageId = !string.IsNullOrEmpty(canonical.GameMasterPageId)
                     ? canonical.GameMasterPageId
                     : group.FirstOrDefault(g => !string.IsNullOrEmpty(g.GameMasterPageId))?.GameMasterPageId;
 
                 var displayName = await ResolveDailyDisplayAsync(canonical.GameTitle, masterPageId);
                 // Daily 图标只来自本地封面文件（与 Master/总表图标完全独立）。
-                var iconUploadId = await ResolveDailyIconUploadIdAsync(masterPageId, canonical.GameTitle);
+                // 合并到已有页面时，页面已有任何 Page Icon（emoji / external / file_upload）都不得覆盖；
+                // 只有页面当前没有图标时才补本机封面。
+                var iconUploadId = canonical.HasIcon
+                    ? null
+                    : await ResolveDailyIconUploadIdAsync(masterPageId, canonical.GameTitle);
+
+                // 4. 先把"待吸收"落盘（在写权威页**之前**）：写完就崩溃也能靠远端指纹判定吸收是否真的发生。
+                //    同时记下"写入前的样子"与"写入后的预期样子"，恢复时用它们区分
+                //    「本机写入没落库」/「本机写入已落库」/「用户改过」三种情形。
+                if (newDuplicates.Count > 0)
+                {
+                    var expectedSignature = ExpectedSignatureAfterWrite(
+                        canonical, totalSeconds, totalMinutes, displayName, masterPageId,
+                        iconWillBeWritten: !canonical.HasIcon && iconUploadId != null);
+                    foreach (var dup in newDuplicates)
+                    {
+                        pendingAbsorb.Add(new PendingMergeAbsorb
+                        {
+                            PageId = NormalizePageId(dup.PageId),
+                            CanonicalPageId = NormalizePageId(canonical.PageId),
+                            CanonicalSecondsAfterAbsorb = totalSeconds,
+                            WrittenHours = DailyRecordTitle.SecondsToHours(totalSeconds),
+                            LastSeenSignature = canonicalSignatureNow,
+                            ExpectedSignatureAfterWrite = expectedSignature
+                        });
+                    }
+                    pendingChanged = true;
+                    await SavePendingMergeAbsorbAsync(pendingAbsorb);
+                }
+
+                // 5. 写权威页：**成功才继续归档**。写失败 ⇒ 不归档、也不把未确认的合计值当作远端现状。
+                //    没有新吸收、合计也没变（例如"已吸收未归档"的续轮）⇒ 不必再写一次远端，只继续重试归档。
+                var needWrite = newDuplicates.Count > 0 || totalSeconds != canonicalSecondsNow;
+                var writeOk = !needWrite;
+                if (needWrite)
                 try
                 {
                     await _client.UpdateDailyRecordAsync(
@@ -1649,11 +1913,48 @@ public class NotionSyncService : INotionSyncService
                         writeDuration: true,
                         durationSeconds: totalSeconds,
                         iconFileUploadId: iconUploadId);
+                    writeOk = true;
                     AppLog.Info($"[同步] 自动合并 Notion 同日重复记录：「{displayName}」{canonical.Date} 合并 {group.Count} 个页面为单个页面（总时长 {totalMinutes} 分钟），已更新远端页面 {canonical.PageId}");
                 }
                 catch (Exception ex)
                 {
-                    AppLog.Warn($"[同步] 更新 Notion 合并记录页面失败: {ex.Message}");
+                    AppLog.Warn($"[同步] 更新 Notion 合并记录页面失败（本轮不归档重复页，下轮重试）: {ex.Message}");
+                }
+
+                if (!writeOk)
+                {
+                    mergeIncomplete++;
+                    // ⚠️ **故意保留**本轮预登记的"待吸收"记录（不撤销）：
+                    //    "写失败"与"请求已发出但响应丢失"在本机看来是同一种异常，无法区分。
+                    //    · 若远端确实没写成功 ⇒ 下一轮权威页秒数仍 < 记录里的"吸收后秒数" ⇒ 自动作废、重新计入（不丢失）；
+                    //    · 若远端其实写成功了 ⇒ 下一轮权威页秒数达标 ⇒ 判定为已吸收（不重复累加）。
+                    //    两条路都不依赖内存与写入顺序，靠**远端值**兜底。
+                    if (newDuplicates.Count > 0) await SavePendingMergeAbsorbAsync(pendingAbsorb);
+
+                    // ⚠️ 关键（D2）：写入未确认 ⇒ 合计值**不是**远端现状 ⇒ 只把**权威页原值**交给本地导入；
+                    //    否则本地会持有一个远端从未确认的值，下一轮 Pull 会把这个差异当成"用户下调声明"而收敛掉，
+                    //    已经归档的重复页时长就再也找不回来了。
+                    deduplicatedRecords.Add(canonical);
+                    continue;
+                }
+
+                // 6. 合计已在远端确认 ⇒ 归档重复页（成功即删除对应吸收记录；失败则保留记录、下一轮只重试归档）
+                foreach (var dup in duplicates)
+                {
+                    try
+                    {
+                        await _client.ArchivePageAsync(dup.PageId);
+                        AppLog.Info($"[同步] 自动归档 Notion 冗余每日记录页面: {dup.PageId} (「{dup.GameTitle}」{dup.Date} {dup.DurationMinutes}m)");
+                        var dupKey = NormalizePageId(dup.PageId);
+                        var removed = pendingAbsorb.RemoveAll(e => NormalizePageId(e.PageId) == dupKey);
+                        if (removed > 0) pendingChanged = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        mergeIncomplete++;
+                        AppLog.Warn($"[同步] 归档 Notion 重复页面失败 ({dup.PageId}): {ex.Message}"
+                                    + "；其时长已并入权威页，本机已记住「已吸收未归档」，下一轮只重试归档、不重复累加");
+                    }
                 }
 
                 var mergedRecord = new NotionDailyRecordItem
@@ -1661,6 +1962,10 @@ public class NotionSyncService : INotionSyncService
                     PageId = canonical.PageId,
                     Date = canonical.Date,
                     DurationMinutes = totalMinutes,
+                    // ⚠️ 必须同时带上**秒**：否则本地导入会退回"分钟 × 60"，把合计里不足 1 分钟的部分抹掉
+                    //    （1 秒 + 1 分钟会变成 60 秒；逐页相加时每一页最多丢 59 秒）。
+                    //    远端写入用的也是 totalSeconds，两边口径必须一致。
+                    DurationSeconds = totalSeconds,
                     GameTitle = displayName,
                     GameMasterPageId = masterPageId,
                     RawTitle = DailyRecordTitle.Build(displayName, totalMinutes),
@@ -1669,6 +1974,8 @@ public class NotionSyncService : INotionSyncService
 
                 deduplicatedRecords.Add(mergedRecord);
             }
+
+            if (pendingChanged) await SavePendingMergeAbsorbAsync(pendingAbsorb);
 
             _lastPulledDailyRecords = deduplicatedRecords;
 
@@ -1690,7 +1997,15 @@ public class NotionSyncService : INotionSyncService
 
             var parts = new List<string>();
             parts.Add($"已从每日时长表同步 {synced} 条记录");
-            if (skippedOrphan > 0) parts.Add($"跳过 {skippedOrphan} 条总表已不存在的游戏");
+            if (skippedOrphan > 0)
+            {
+                parts.Add(catalogFresh
+                    ? $"跳过 {skippedOrphan} 条关联游戏不在总表快照中的记录"
+                    : $"跳过 {skippedOrphan} 条（目录快照不可信时也会在这里提示）");
+            }
+            if (mergeIncomplete > 0) parts.Add($"{mergeIncomplete} 条重复记录合并/归档未完成（已保留原值，下轮自动重试）");
+            if (mergeSkippedNoIdentity > 0) parts.Add($"{mergeSkippedNoIdentity} 组重复记录因无法确认归属未合并（原样保留）");
+            if (mergeIndeterminate > 0) parts.Add($"{mergeIndeterminate} 组重复记录因权威页被改动而暂缓（页面与时长原样保留，下轮复核）");
             if (failed > 0) parts.Add($"{failed} 条失败（{lastError}）");
 
             SyncStatusChanged?.Invoke(this, string.Join("，", parts));
@@ -1700,22 +2015,11 @@ public class NotionSyncService : INotionSyncService
         catch (Exception ex)
         {
             _lastPullSucceeded = false;
+            // 拉取失败时清空原始集合：不能让"上一轮的残留"看起来像"本轮查到了"。
+            _lastPulledRawPageIds = new();
             SyncStatusChanged?.Invoke(this, $"每日时长表拉取失败: {FriendlyNotionError(ex)}");
             return 0;
         }
-    }
-
-    /// <summary>
-    /// 判定一个日期是否属于历史日期（早于 7 天前）。
-    /// 历史日期在 Notion 上的单次时长与日期为绝对权威数据，程序绝不能向 Notion 回推写时长。
-    /// </summary>
-    private static bool IsHistoricalDate(string dateStr)
-    {
-        if (DateTime.TryParse(dateStr, out var dt))
-        {
-            return dt.Date < DateTime.Today.AddDays(-7);
-        }
-        return false;
     }
 
     /// <summary>
@@ -1787,18 +2091,6 @@ public class NotionSyncService : INotionSyncService
                 // 才是他真正想看的。未绑定则退回进程名。
                 // ⚠️ 2026-10-06：图标**不再**来自总表（Master）—— 只来自本地封面文件。
                 var displayName = await ResolveDailyDisplayAsync(item.GameName, gameNotionId);
-                var iconUploadId = await ResolveDailyIconUploadIdAsync(gameNotionId, item.GameName);
-
-                // 🚨 铁律：历史日期（早于 7 天前）的时长与日期在 Notion 上是绝对权威，程序绝不能向远端回推改写单次时长！
-                // 只有近期（7 天内）由本地心跳累加的活跃会话，才允许更新 Notion 上的单次时长。
-                bool isHistorical = IsHistoricalDate(item.Date);
-
-                if (isHistorical && !string.IsNullOrEmpty(item.NotionPageId))
-                {
-                    // 历史记录远端已有页面，绝对不推回覆盖 Notion 权威数据，直接在本地置为已同步/未绑定
-                    await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
-                    continue;
-                }
 
                 // 查重：若本地尚未记录 notion_page_id，先在刚拉取的 Notion 记录中寻找同日同游戏的页面
                 if (string.IsNullOrEmpty(item.NotionPageId))
@@ -1813,6 +2105,8 @@ public class NotionSyncService : INotionSyncService
 
                 if (string.IsNullOrEmpty(item.NotionPageId))
                 {
+                    // 新页面（本地无 page id、远端也没有同日同游戏记录）⇒ 直接带本机封面图标创建。
+                    var iconForCreate = await ResolveDailyIconUploadIdAsync(gameNotionId, item.GameName);
                     var newPageId = await _client.CreateDailyRecordAsync(
                         _config.DailyDatabaseId,
                         item.Date,
@@ -1821,7 +2115,7 @@ public class NotionSyncService : INotionSyncService
                         gameNotionId,
                         iconUrl: null,
                         durationSeconds: item.DurationSeconds,
-                        iconFileUploadId: iconUploadId);
+                        iconFileUploadId: iconForCreate);
 
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped", newPageId);
                     // 快照只记"呈现"用的标题：file_upload 图标没有 URL 可存，故记 null；
@@ -1831,11 +2125,51 @@ public class NotionSyncService : INotionSyncService
                 }
                 else
                 {
+                    // ⚖️ 是否推送与"记录日期"**无关**（2026-10-13 规则变更）：
+                    //    判据 = 本地是否存在**尚未同步的数据变动**（本地时长确实领先远端）。
+                    //    · 本地领先 ⇒ 推送（标题按项目统一格式重建 + 时长）；
+                    //    · 本地不领先 / 拿不到远端现状 ⇒ 一律不写远端（标题、图标、时长都不动），
+                    //      只把本地状态对齐为 synced/unmapped。
+                    var remoteDaily = _lastPulledDailyRecords?
+                        .FirstOrDefault(x => NormalizePageId(x.PageId) == NormalizePageId(item.NotionPageId));
+
+                    // 🛡️ 快照缺项保护（2026-10-14）：已绑定页面不在本次业务快照里 ⇒ **一律不写远端任何字段**。
+                    //    "不在快照里" ≠ "页面不存在"：可能是解析丢弃（空日期/无标题）、孤儿过滤、重复合并折叠、
+                    //    归档/回收站、未共享、403/404，或查询不完整 —— 只凭本次查询结果**无法**区分这些情况。
+                    //    缺项时既拿不到远端现状，也无法判定"本地是否领先" ⇒ 绝不覆盖标题/时长/图标；
+                    //    本地保持 pending（**不**置 synced/unmapped），等快照恢复后下一轮按规则推送。
+                    if (remoteDaily is null)
+                    {
+                        var inRawQuery = _lastPulledRawPageIds.Contains(NormalizePageId(item.NotionPageId));
+                        AppLog.Warn($"[同步] 已绑定页面 {item.NotionPageId} 不在本次业务快照中"
+                                    + $"（{(inRawQuery ? "原始查询返回了该页，但被解析/孤儿/合并过滤" : "原始查询未返回该页：归档/未共享/无权限/查询不完整，均不可据此认定不存在")}）"
+                                    + $"，为防止误覆盖远端，本轮跳过推送「{item.GameName} {item.Date}」并保持待同步状态");
+                        continue;
+                    }
+
+                    var localSeconds = item.DurationSeconds > 0 ? item.DurationSeconds : item.DurationMinutes * 60;
+                    var remoteSeconds = remoteDaily.DurationSeconds > 0
+                        ? remoteDaily.DurationSeconds
+                        : remoteDaily.DurationMinutes * 60;
+
+                    // 能读到远端现状且本地**不领先** ⇒ 判定为"没有未同步变动"：本轮不写远端任何字段。
+                    if (localSeconds <= remoteSeconds)
+                    {
+                        await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
+                        continue;
+                    }
+
+                    // Page Icon：**只在页面当前没有任何图标时**才补；已有 emoji / external / file_upload
+                    // 图标一律原样保留，绝不覆盖用户手动设置的内容。
+                    var iconForUpdate = remoteDaily is { HasIcon: false }
+                        ? await ResolveDailyIconUploadIdAsync(gameNotionId, item.GameName)
+                        : null;
+
                     await _client.UpdateDailyRecordAsync(
                         item.NotionPageId, item.DurationMinutes, gameNotionId, displayName, iconUrl: null,
-                        writeDuration: !isHistorical,
+                        writeDuration: true,
                         durationSeconds: item.DurationSeconds,
-                        iconFileUploadId: iconUploadId);
+                        iconFileUploadId: iconForUpdate);
                     await _repo.UpdateDailySyncStatusAsync(item.Id, isBound ? "synced" : "unmapped");
                     await RecordRemoteSnapshotAsync(
                         item.NotionPageId, displayName, item.DurationMinutes, null, item.DurationSeconds);
@@ -1844,9 +2178,23 @@ public class NotionSyncService : INotionSyncService
             }
             catch (Exception ex)
             {
-                // 页面在 Notion 已被删除（进回收站）→ 本地跟随删除语义清理，
-                // 否则这条记录会永远对着一个 archived 页面重试，卡死在 error。
-                if (ex.Message.Contains("archived"))
+                // 🛡️ 2026-10-14（数据丢失防护，与 BackfillRelationsAsync 同规则）：
+                // 本分支的异常可能来自 CreateDailyRecordAsync（此时还没有 page id）、
+                // UpdateDailyRecordAsync、图标上传/解析等多个环节，而异常文本在权限错误、
+                // 网关错误或 Notion 文案调整时都可能带上 "archived" 字样。
+                // 仅凭文本就执行 ArchiveDeletedAsync + DeleteDailySummariesAsync 会**不可逆地删掉本地时长**。
+                // 现在：先判空 page id，再取可靠证据（404 / 回收站；归档 ≠ 删除）；
+                // 取不到证据 ⇒ 保留记录并落 error 状态（保留原诊断能力），绝不删除。
+                var confirmedDeleted = !string.IsNullOrEmpty(item.NotionPageId)
+                    && await _client.IsPageDeletedAsync(item.NotionPageId!);
+                if (ex.Message.Contains("archived") && !confirmedDeleted)
+                {
+                    AppLog.Warn($"[SyncPendingDailyRecordsAsync] 异常文本提到 archived，但未取得可靠的归档/删除证据"
+                                + $"（{(string.IsNullOrEmpty(item.NotionPageId) ? "(无 page id：本条是新建失败)" : item.NotionPageId)}）"
+                                + $"⇒ 保留本地记录与时长，不删除「{item.GameName} {item.Date}」");
+                }
+
+                if (confirmedDeleted)
                 {
                     await _repo.ArchiveDeletedAsync("daily", "notion",
                         item.NotionPageId ?? item.Date,
@@ -1885,6 +2233,14 @@ public class NotionSyncService : INotionSyncService
         //    同一个 Token 对后续每条记录都必然同样失败，继续只会把几百条各重试 3 次
         //    （真机故障：无效 Token 时这条链被拖到分钟级，期间设置页保存按钮被禁用）。
         var fatalAuthAborted = false;
+
+        // 🛡️ 2026-10-14：「绑定状态」写入的单位是**页面**，而本轮有两个入口会覆盖同一批页面 ——
+        //    ① 逐条回填里的"未绑定"分支（本地 unmapped 行）；
+        //    ② 末尾的"远端绑定状态对齐"循环（直接遍历业务快照）。
+        //    这里按归一化 page id 记账，保证**每个页面本轮只尝试写一次**：
+        //    一条记录一轮打两次 Notion 没有意义（失败也不会因为立刻重打就成功），
+        //    且"401/403 立即中止、普通网络错误逐条续跑"的既有语义不变 —— 每条记录本轮仍会被尝试一次。
+        var bindingAttemptedPageIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var item in unmapped)
         {
@@ -1925,27 +2281,47 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
-                            displayName,
-                            DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
-                            item.DurationMinutes);
+                        // 🛡️ 2026-10-14 快照缺项保护：已绑定页面不在本轮业务快照中 ⇒
+                        // 既不创建替代页面、也不 PATCH 它（缺项 ≠ 页面已删除）。
+                        // ⚠️ 历史行为在这里直接写：一旦远端因归档/回收站返回含 "archived" 的错误，
+                        //    下面的 catch(1991) 会把**本地每日记录连同时长一起删除** ⇒ 属于不可逆的数据丢失。
+                        if (_lastPulledDailyRecords?.Any(r => NormalizePageId(r.PageId) == NormalizePageId(item.NotionPageId)) != true)
+                        {
+                            AppLog.Warn($"[BackfillRelationsAsync] 已绑定页面 {item.NotionPageId} 不在本轮快照中"
+                                        + $"（可能被解析/孤儿/合并过滤，或归档/未共享/查询不完整——不可据此认定已删除）"
+                                        + $"⇒ 跳过写入并保留待处理「{item.GameName} {item.Date}」");
+                            continue;
+                        }
 
-                        // writeDuration: false —— 回填 relation 与呈现，绝不修改远端时长数值
+                        // 普通同步只补「关联游戏 / 绑定状态」这类**数据变化**：
+                        // 已有历史 Daily 页面的标题与 Page Icon **一律不自动改写**，
+                        // 唯一允许批量修改它们的入口是设置页「开始格式规范化」。
+                        // writeDuration: false —— 时长以 Notion 上的为权威，绝不用本地缓存覆盖。
                         await _client.UpdateDailyRecordAsync(
-                            item.NotionPageId, item.DurationMinutes, game.NotionPageId, displayName, iconUrl: null,
-                            writeDuration: false,
-                            titleOverride: expectedTitle,
-                            iconFileUploadId: iconUploadId);
+                            item.NotionPageId, item.DurationMinutes, game.NotionPageId,
+                            gameName: null, iconUrl: null, writeDuration: false,
+                            titleOverride: null, durationSeconds: null, iconFileUploadId: null);
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
-                        await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, null);
                     }
                     backfilled++;
                 }
                 catch (Exception ex)
                 {
-                    // 页面在 Notion 已被删除（进回收站）→ 本地跟随删除语义清理，
-                    // 否则这条记录会永远对着一个 archived 页面重试，卡死在 error。
-                    if (ex.Message.Contains("archived"))
+                    // 🛡️ 2026-10-14（数据丢失防护）：不再仅凭"异常文本含 archived"就删除本地记录 ——
+                    // 该文本在权限错误 / 网关错误 / Notion 文案调整时同样可能出现，
+                    // 一旦误判就会**不可逆地删掉本地每日记录与其中的时长**。
+                    // 现在只认可靠的远端证据：404 或回收站（IsPageDeletedAsync 的既有语义，
+                    // 且它已明确"归档 ≠ 删除"）。取不到证据 ⇒ 保留记录并落 error，绝不删。
+                    var confirmedDeleted = !string.IsNullOrEmpty(item.NotionPageId)
+                        && await _client.IsPageDeletedAsync(item.NotionPageId!);
+                    if (ex.Message.Contains("archived") && !confirmedDeleted)
+                    {
+                        AppLog.Warn($"[BackfillRelationsAsync] 异常文本提到 archived，但未取得可靠的归档/删除证据"
+                                    + $"（{(string.IsNullOrEmpty(item.NotionPageId) ? "(无 page id)" : item.NotionPageId)}）"
+                                    + "⇒ 保留本地记录，不删除");
+                    }
+
+                    if (confirmedDeleted)
                     {
                         await _repo.ArchiveDeletedAsync("daily", "notion",
                             item.NotionPageId ?? item.Date,
@@ -1975,14 +2351,32 @@ public class NotionSyncService : INotionSyncService
             else if (!string.IsNullOrEmpty(item.NotionPageId))
             {
                 // 该游戏尚未绑定总表，若 Notion 每日记录上的「绑定状态」尚未标明为「未绑定」，则写入「未绑定」
+                var unboundPageKey = NormalizePageId(item.NotionPageId);
+                var remote = _lastPulledDailyRecords?.FirstOrDefault(r => NormalizePageId(r.PageId) == unboundPageKey);
+
+                // 🛡️ 2026-10-14 快照缺项保护（与 SyncPendingDailyRecordsAsync / 本方法"已绑定分支"同一规则）：
+                //    本分支写的是**本地库里的 notion_page_id**，而它是否真的还在当前配置的每日库里、
+                //    是否还存在，只能由本轮业务快照回答：缺项可能是解析丢弃（空日期/无标题）、孤儿过滤、
+                //    重复合并折叠，也可能是归档 / 未共享 / 无权限 / 查询不完整 —— 只凭缺项无法区分。
+                //    缺项 ⇒ 不 PATCH（不冒险打到一个与本机配置无关或已不在库里的页面）、
+                //    不创建替代页面、不删除本地记录，保持本条待处理（unmapped / pending 不变），
+                //    等快照恢复后下一轮按规则补写。
+                if (remote == null)
+                {
+                    AppLog.Warn($"[BackfillRelationsAsync] 未绑定页面 {item.NotionPageId} 不在本轮快照中"
+                                + $"（被解析/孤儿/合并过滤，或归档/未共享/无权限/查询不完整——缺项不足以认定页面存在或已删除）"
+                                + $"⇒ 跳过「绑定状态」写入并保留待处理「{item.GameName} {item.Date}」");
+                    continue;
+                }
+
+                // 远端「绑定状态」已经是「未绑定」⇒ 无需写入（远端状态本来就是对的，跳过以免每轮白打 Notion）。
+                if (remote.Status == "未绑定") continue;
+
                 try
                 {
-                    var remote = _lastPulledDailyRecords?.FirstOrDefault(r => NormalizePageId(r.PageId) == NormalizePageId(item.NotionPageId));
-                    if (remote == null || remote.Status != "未绑定")
-                    {
-                        await _client.UpdateDailyBindingStatusAsync(item.NotionPageId, "未绑定");
-                        if (remote != null) remote.Status = "未绑定";
-                    }
+                    bindingAttemptedPageIds.Add(unboundPageKey);
+                    await _client.UpdateDailyBindingStatusAsync(item.NotionPageId, "未绑定");
+                    remote.Status = "未绑定";
                 }
                 catch (Exception ex)
                 {
@@ -2001,11 +2395,18 @@ public class NotionSyncService : INotionSyncService
 
         // 统一对齐远端每日记录的绑定状态（例如历史记录或直接在 Notion 中添加但尚未有绑定状态的行）
         // ⚠️ 上面若已因致命认证/权限错误中止，这里整段跳过：否则等于把同一批无效请求再来一遍。
-        if (!fatalAuthAborted && _lastPulledDailyRecords != null)
+        // 🛡️ 2026-10-14 快照规则复核（与上面"未绑定分支"同一条规则，不得只保护其中一个入口）：
+        //    · 本循环遍历的就是本轮业务快照（_lastPulledDailyRecords）⇒ 天然满足
+        //      "仅当目标页出现在有效业务快照中才允许 PATCH"（页面就在集合里，不存在缺项）；
+        //    · 但快照必须来自**本轮成功的拉取**：拉取失败时 _lastPulledDailyRecords 还留着上一轮的残留值，
+        //      拿旧快照当"远端现状"回写绑定状态，同样属于"未经本轮确认就写远端" ⇒ 整段跳过；
+        //    · 已在上面的逐条回填里尝试过的页面（bindingAttemptedPageIds）本轮不重复 PATCH。
+        if (!fatalAuthAborted && _lastPullSucceeded && _lastPulledDailyRecords != null)
         {
             foreach (var r in _lastPulledDailyRecords)
             {
                 if (string.IsNullOrEmpty(r.PageId)) continue;
+                if (!bindingAttemptedPageIds.Add(NormalizePageId(r.PageId))) continue;
 
                 if (string.IsNullOrEmpty(r.GameMasterPageId) && r.Status != "未绑定")
                 {
@@ -2063,148 +2464,6 @@ public class NotionSyncService : INotionSyncService
         }
 
         return backfilled;
-    }
-
-    /// <summary>
-    /// 回刷：总表改名或补了 page icon 之后，把已同步的每日记录的标题与图标跟着改过来。
-    /// </summary>
-    /// <remarks>
-    /// 为什么需要这一步：
-    /// 每日记录的标题里嵌着游戏名（「不思议迷宫 · 0.7 h」）。用户在总表里改名
-    /// （例如把英文进程名改成中文）后，relation 已经指向新名字，但**已经推送过的每日记录**标题
-    /// 还是旧名 —— 拉取（Pull）只同步时长，不会碰标题，
-    /// 于是历史记录会永远停在旧名上。这里补上这条回刷链路。
-    /// 图标同理：绑定之后用户才给总表条目设图标的话，历史记录页面上是空的。
-    ///
-    /// 为什么不能每轮无条件 PATCH：
-    /// 记录条数会随天数线性增长，每轮同步都全量 PATCH 既慢又浪费 Notion 配额。
-    /// 因此逐条比对本地记录的快照（<c>notion_title</c> + <c>notion_icon_url</c>）与"期望值"，
-    /// 只有真的不一致才发 PATCH。首轮快照为空的记录会被判为"需要回刷"，
-    /// 之后就有了快照，后续轮次即为空操作。
-    ///
-    /// **标题与图标必须一起比对、一起写快照**。只比标题的话，
-    /// "总表有条目设了图标"会让每一轮都判定需要更新（`iconUrl` 非空 ≠ 页面图标不对），
-    /// 所有历史记录被反复 PATCH —— 正好把这个设计本来要解决的问题又引入回来。
-    ///
-    /// 只处理已绑定（notion_page_id 非空）的记录：未绑定的压根没有 relation 可读，
-    /// 名字只能保持在进程名上。
-    /// </remarks>
-    public async Task<int> RefreshDailyTitlesFromMasterAsync()
-    {
-        if (!_config.IsNotionConfigured) return 0;
-
-        IReadOnlyList<DailySummary> synced;
-        try
-        {
-            synced = await _repo.GetSyncedDailySummariesAsync();
-        }
-        catch (Exception ex)
-        {
-            AppLog.Warn($"回刷每日记录标题失败（读取本地记录）: {ex.Message}");
-            return 0;
-        }
-        if (synced.Count == 0) return 0;
-
-        // 总表快照一次性读进内存：不要放在循环里逐条查库 —— 记录多时是 N 次查询。
-        var games = await _repo.GetAllGamesAsync();
-        var gameById = games.ToDictionary(g => g.Id);
-
-        int refreshed = 0;
-        foreach (var item in synced)
-        {
-            try
-            {
-                if (!gameById.TryGetValue(item.GameId, out var game)) continue;
-                if (string.IsNullOrWhiteSpace(game.NotionPageId)) continue;
-                if (string.IsNullOrWhiteSpace(item.NotionPageId)) continue;
-
-                // ⚠️ 时长为 0 的记录**一律不参与回刷**。
-                // 回刷没法"只改标题"：标题串里就含时长（「游戏名 · X h」），
-                // UpdateDailyRecordAsync 必须同时写标题和「单次时长」属性。
-                // 于是拿本地的 0 去回刷 = 把 Notion 上原本的时长覆盖成 0，
-                // 页面标题也变成「游戏名 · 0 h」——**时长数据就这么没了**。
-                // 2026-09-19 QA 反馈的「喵门镖局 7/17 时长被清零」正是这个特征
-                // （该行标题恰好是程序格式「喵门镖局 · 0 h」，不是她手写的格式）。
-                if (item.DurationMinutes <= 0) continue;
-
-                // 回刷路径**只改标题、不动图标**（2026-10-06：Daily 图标已与总表解耦；
-                // 且这里刻意不批量重写历史页面的图标）。
-                var displayName = await ResolveDailyDisplayAsync(item.GameName, game.NotionPageId);
-
-                // ⚠️ 期望标题 = 总表的名字 + **原标题里原本的时长后缀**。
-                //
-                //    **绝不**用本地时长重新拼（DailyRecordTitle.Build）—— 那是在改 Notion 上的数据。
-                //    2026-09-19 就是这么把 QA 的 786 条历史记录改掉的：
-                //    「9/16 英灵神殿 2.2h」被写成了本地那份值（本地那份甚至可能是错的 ——
-                //    单位换算那次把 5 分钟读成 5 小时，本地一直带着错值）。
-                //
-                //    Notion 侧的历史数值是**权威**，本地只是缓存。回刷只负责"呈现"：
-                //    把游戏名换成总表的名字，时长文本原样保留。
-                // 有原标题 → 把"游戏名"换成总表的名字，并把原标题里的时长**文本**规范化成标准格式
-                // （见 DailyRecordTitle.BuildNormalizedTitle：它只用后缀自身携带的数字与单位换算）。
-                // 没有原标题可参考（老库升级）→ 只能按本地时长拼；
-                // 但依然**不写**「单次时长」属性，数值属性始终以 Notion 上的为准。
-                var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
-                    displayName,
-                    DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
-                    item.DurationMinutes);
-
-                // 标题与图标**都要**比对。只比标题的话，"总表设了图标"会让每一轮都判定
-                // 需要更新（因为 iconUrl 非空 ≠ 页面图标不对），于是所有历史记录被反复 PATCH，
-                // 正好把回刷本来要解决的性能问题又引入回来。
-                var titleChanged = !string.Equals(item.NotionTitle, expectedTitle, StringComparison.Ordinal);
-
-                // ⚠️ 2026-10-06：回刷**只比对标题**。
-                //    Daily 图标已改为"本地上传的 file_upload"，与总表图标解耦；
-                //    若继续在这里比图标，凡"总表条目有图标"的记录每轮都会被判为不一致、反复 PATCH。
-                if (!titleChanged) continue;
-
-                // 传**游戏名**（displayName），不是拼好的 expectedTitle：
-                // UpdateDailyRecordAsync 内部会自己调 DailyRecordTitle.Build 拼标题，
-                // 传完整标题进去会拼成「新名字 · 0.7 h · 0.7 h」——后缀重复。
-                // expectedTitle 只用于上面的比对。
-                //
-                // ⚠️ 2026-09-19 起这里改用 **UpdateDailyRecordTitleAsync**：只写标题与图标，
-                //    不写「单次时长」。原先用 UpdateDailyRecordAsync 会把本地时长一并写进
-                //    Notion，等于拿缓存覆盖权威数据（毁灭性错误）。
-                await _client.UpdateDailyRecordTitleAsync(
-                    item.NotionPageId,
-                    expectedTitle,
-                    iconUrl: null);
-
-                // 两个快照一起落库，否则下一轮还会认为"不一致"、又打一次 Notion。
-                // 写回 0 行意味着本地找不到这条 page_id —— 属于数据异常，要留下痕迹，
-                // 不然症状只是"同步一直很慢"，极难定位。
-                var snapshotRows = await _repo.UpdateDailyRecordFromNotionAsync(
-                    item.NotionPageId, expectedTitle, null);
-                if (snapshotRows == 0)
-                {
-                    AppLog.Warn($"回刷：快照写回 0 行（notion_page_id={item.NotionPageId} 本地未匹配），下轮会重复请求");
-                }
-                refreshed++;
-            }
-            catch (Exception ex)
-            {
-                // 单条失败不阻断其余记录：回刷是尽力而为的补偿动作，下轮还会再来。
-                AppLog.Warn($"回刷每日记录标题失败（{item.Date} {item.GameName}）: {ex.Message}");
-
-                // ⚠️ 2026-10-13 例外：致命认证/权限错误（401/403）⇒ 中止整个回刷循环 ——
-                //    后续每一条必然同样失败，逐条重试只是把同步拖到分钟级。
-                if (IsFatalAuthError(ex))
-                {
-                    AppLog.Warn("[RefreshDailyTitlesFromMasterAsync] 检测到 Notion 认证/权限错误（401/403）⇒ "
-                        + $"中止本轮回刷（已更新 {refreshed} 条；下轮同步会自动继续）");
-                    break;
-                }
-            }
-        }
-
-        if (refreshed > 0)
-        {
-            SyncStatusChanged?.Invoke(this, $"已按总表更新 {refreshed} 条每日记录的标题");
-        }
-
-        return refreshed;
     }
 
     /// <summary>
@@ -2325,28 +2584,47 @@ public class NotionSyncService : INotionSyncService
                 }
 
                 // 2. 目标标题格式：{总表游戏名} · {时长} h
-                // ⚠️ 2026-10-06：这里**不再**取总表图标 —— Daily 图标已与 Master 解耦，
-                //    历史规范化只负责改标题，不动图标（避免批量重写历史页面）。
                 var targetGameName = matchedCatalog.Name.Trim();
                 var expectedTitle = DailyRecordTitle.Build(targetGameName, r.DurationMinutes);
 
-                // 3. 比对标题：若已经完全符合标准规范格式，则无需重复更新
-                if (string.Equals(r.RawTitle?.Trim(), expectedTitle, StringComparison.Ordinal))
+                // 2b. Page Icon（用户裁定 · 原始需求）：**只在页面当前没有任何图标时**才补充本机当前封面的图标。
+                //     页面已有 emoji / external / file_upload 图标时一律原样保留 ——
+                //     绝不替换或覆盖用户手录的图标（"不修改其他属性"针对的是 时长/日期/关联/绑定状态等字段）。
+                //     只在确实要补图标时才解析/上传（复用上传缓存：同一张图不会重复上传）。
+                var iconUploadId = r.HasIcon
+                    ? null
+                    : await ResolveDailyIconUploadIdAsync(matchedCatalog.PageId, targetGameName);
+
+                // 3. 是否需要动这条记录：标题不符 ⇒ 要改；标题已标准但页面缺图标 ⇒ 也要补图标。
+                //    （原来只比标题，会在"标题已标准 + 缺图标"时整条跳过，导致图标永远补不上。）
+                var titleAlreadyStandard = string.Equals(r.RawTitle?.Trim(), expectedTitle, StringComparison.Ordinal);
+                if (titleAlreadyStandard && r.HasIcon)
                 {
                     skipped++;
                     progress?.Report((current, total, $"格式已规范：{expectedTitle}"));
                     continue;
                 }
 
-                // 4. 调用 UpdateDailyRecordTitleAsync 执行安全更新：只改标题与图标，绝不写时长属性
+                if (titleAlreadyStandard && iconUploadId is null)
+                {
+                    skipped++;
+                    progress?.Report((current, total, $"格式已规范（本机无可补图标）：{expectedTitle}"));
+                    continue;
+                }
+
+                // 4. 调用 UpdateDailyRecordTitleAsync 执行安全更新：**只改标题 + 可选图标**，
+                //    绝不写「时长」「日期」「关联游戏」「绑定状态」。
                 try
                 {
-                    progress?.Report((current, total, $"正在规范化：{r.RawTitle} -> {expectedTitle}"));
+                    progress?.Report((current, total, iconUploadId is null
+                        ? $"正在规范化：{r.RawTitle} -> {expectedTitle}"
+                        : $"正在规范化并补图标：{r.RawTitle} -> {expectedTitle}"));
                     var success = await _client.UpdateDailyRecordTitleAsync(
                         r.PageId,
                         expectedTitle,
                         iconUrl: null,
-                        r.TitlePropertyName);
+                        r.TitlePropertyName,
+                        iconFileUploadId: iconUploadId);
 
                     if (success)
                     {
@@ -2704,20 +2982,23 @@ public class NotionSyncService : INotionSyncService
                     }
                     else
                     {
-                        var expectedTitle = DailyRecordTitle.BuildNormalizedTitle(
-                            displayName,
-                            DailyRecordTitle.ExtractSuffix(item.NotionTitle ?? string.Empty),
-                            item.DurationMinutes);
+                        // 🛡️ 2026-10-14 快照缺项保护：用户点击"关联"只表达意图，**不证明**远端页面存在、
+                        //    也不证明它属于当前配置的每日库。页面不在本轮快照中 ⇒ 不创建替代页、不 PATCH。
+                        if (_lastPulledDailyRecords?.Any(r => NormalizePageId(r.PageId) == NormalizePageId(item.NotionPageId)) != true)
+                        {
+                            AppLog.Warn($"[LinkGameRelationAsync] 跳过写入：已绑定页面 {item.NotionPageId} 不在本轮快照中"
+                                        + $"（归属与状态均未经确认）「{item.GameName} {item.Date}」");
+                            continue;
+                        }
 
-                        // writeDuration: false —— 这里只是在补 relation 与改标题，
-                        // 时长以 Notion 上的为准，不能用本地缓存去覆盖（2026-09-19 事故的教训）。
+                        // 手动绑定总表后，历史条目**只补关联与绑定状态**：
+                        // 标题与 Page Icon 仍不自动改写（唯一入口是设置页「开始格式规范化」）。
+                        // 时长以 Notion 上的为权威，绝不用本地缓存覆盖。
                         await _client.UpdateDailyRecordAsync(
-                            item.NotionPageId, item.DurationMinutes, notionPageId, displayName, iconUrl: null,
-                            writeDuration: false,
-                            titleOverride: expectedTitle,
-                            iconFileUploadId: iconUploadId);
+                            item.NotionPageId, item.DurationMinutes, notionPageId,
+                            gameName: null, iconUrl: null, writeDuration: false,
+                            titleOverride: null, durationSeconds: null, iconFileUploadId: null);
                         await _repo.UpdateDailySyncStatusAsync(item.Id, "synced");
-                        await RecordRemoteSnapshotAsync(item.NotionPageId, displayName, item.DurationMinutes, null);
                     }
                 }
                 catch (Exception ex)
@@ -2967,6 +3248,108 @@ public class NotionSyncService : INotionSyncService
                                 "疑似拉取不完整，本轮跳过（宁可漏删，不误删）");
                     result.Skipped = true;
                     return result;
+                }
+
+                // 🛡️ 2026-10-14（删除对账误删收口 · 环境可信判断）：
+                //    下面这段会**物理删除**本地每日记录并**撤回外部声明**（撤销会随设备同步传播到对端），
+                //    所以在动手之前必须先确认：当前 Notion 环境仍然是这些记录当初同步到的那个库。
+                //
+                //    最危险的一类误删：库被重建 / 换 workspace / 换 Token / 配置被指向另一个同结构库之后，
+                //    QueryDailyRecordsAsync 依然会成功（新库是合法且已共享的），但本地旧 page id 的
+                //    GET /pages/{id} 全部返回 404 ⇒ 旧逻辑认定"用户删了这些页面"⇒ 删本地行 + 撤回声明 +
+                //    跨设备传播。配置错误绝不能演变成数据删除。
+                //
+                //    判据 = ① 把最近一次"确认可信"的 Daily 库 id 记进 settings，与本轮配置比对（库身份）；
+                //           ② 用本地绑定记录与本轮远端列表的**连续性证据**衡量环境可信度（不止"看到一条就算"）。
+                //      · 目标库一致，或首次但连续性不足 20 条样本（正常的小库用法）⇒ 记下当前库，照常对账
+                //        （必须保住"用户真的删了 Notion 页面 ⇒ 本地跟随删除"这条既有行为）；
+                //      · 目标库**不一致** + 连续性证据不足 ⇒ 只 Warn + 整轮跳过（不删、不撤回、不重新基线）；
+                //      · 目标库不一致 + 连续性证据充分（≥ 半数本地页面仍可见）⇒ Warn + 重新基线 + 照常对账（自愈）；
+                //      · **首次建立基线** + 样本 ≥20 + 连续性证据不足 ⇒ 只 Warn + 整轮跳过，且**不写基线**
+                //        （首次建立基线不得等同于首次获得删除授权）。
+                var currentTargetDbKey = NormalizePageId(_config.DailyDatabaseId);
+                var localBoundPageIds = localSynced
+                    .Where(d => !string.IsNullOrWhiteSpace(d.NotionPageId))
+                    .Select(d => NormalizePageId(d.NotionPageId))
+                    .Where(id => id.Length > 0)
+                    .ToHashSet();
+
+                // 连续性证据（统计性）：本地已绑定页面里有多少条**真的出现在本轮远端列表**里。
+                //   · 0 条 ⇒ 当前环境里看不到任何一条我们认识的页面；
+                //   · 零星几条 ⇒ 也不足以证明"其余记录都该删"（旧库 100 条、新库里只有 1 条匹配，
+                //     绝不能据此把其余 99 条当成"用户已删除"）。
+                var visibleLocalPageCount = localBoundPageIds.Count(id => remoteIds.Contains(id));
+                var seenKnownPageRemotely = visibleLocalPageCount > 0;
+                var hasContinuityEvidence = visibleLocalPageCount * 2 >= localBoundPageIds.Count;
+                // 样本门槛与既有"半数骤减保护"保持一致：绑定记录少于 20 条时不做统计性判断 ——
+                // 否则"用户就一两条记录、他把其中一条删了"这种**正常用法**会被永久拦住（既有测试锁定了它）。
+                const int continuitySampleThreshold = 20;
+                var continuitySampleTooSmall = localBoundPageIds.Count < continuitySampleThreshold;
+
+                var recordedTargetDbKey = NormalizePageId(await _repo.GetSettingAsync(SettingKeyDailyReconcileTargetDb));
+                var targetDbChanged = recordedTargetDbKey.Length > 0
+                    && !string.Equals(recordedTargetDbKey, currentTargetDbKey, StringComparison.Ordinal);
+
+                // 日志用：让"仍待确认"的记录可见（不是只说一句"跳过"）。
+                var unconfirmedPageSample = string.Join(", ",
+                    localBoundPageIds.Where(id => !remoteIds.Contains(id)).Take(5));
+                var unconfirmedCount = localBoundPageIds.Count - visibleLocalPageCount;
+
+                // 闸门 A：「已记录的目标库」与本机配置不一致 = 换库 / 重建 / 换 workspace / 换 Token 的迹象。
+                //   这种情况必须拿到**足够的**连续性证据才允许继续删除；只看到一两条本地页面不算证据。
+                if (targetDbChanged && !hasContinuityEvidence)
+                {
+                    AppLog.Warn($"[删除对账] 同步目标库已由 {Fingerprint(recordedTargetDbKey)} 变为 "
+                                + $"{Fingerprint(currentTargetDbKey)}，而本地 {localBoundPageIds.Count} 条绑定记录里"
+                                + $"本轮远端只看到 {visibleLocalPageCount} 条（仍待确认 {unconfirmedCount} 条，例如 {unconfirmedPageSample}）——"
+                                + "证据不足，本轮**跳过删除对账**：不删本地记录、不撤回声明、不重新基线"
+                                + "（宁可漏删，不误删；等这些记录重新绑定到新库页面、或人工确认后再恢复自动对账）");
+                    result.Skipped = true;
+                    return result;
+                }
+
+                // 闸门 B：**首次建立基线 ≠ 首次获得删除授权**。
+                //   升级 / 换机后第一次跑：settings 里还没有目标库记录，而本地可能已积累大量绑定记录，
+                //   若当前配置恰好指向另一个库（新库可查但里面没有我们的页面），
+                //   "没有基线可比对"绝不能被当成"环境可信"，否则一批本地记录会被一次性删光。
+                //   ⚠️ 只对有统计意义的样本（≥20 条）生效：少量记录是"用户就删了那一条"的正常用法，保持既有行为。
+                if (recordedTargetDbKey.Length == 0 && !continuitySampleTooSmall && !hasContinuityEvidence)
+                {
+                    AppLog.Warn($"[删除对账] 首次建立同步目标基线：本地已有 {localBoundPageIds.Count} 条绑定记录，"
+                                + $"但本轮远端只看到 {visibleLocalPageCount} 条（仍待确认 {unconfirmedCount} 条，例如 {unconfirmedPageSample}）——"
+                                + "证据不足**不等同于**用户删除了这些页面，本轮跳过删除对账且**不写入基线**"
+                                + "（既不删本地数据，也不把不可信环境固化成「已确认同步目标」）");
+                    result.Skipped = true;
+                    return result;
+                }
+
+                if (targetDbChanged)
+                {
+                    AppLog.Warn($"[删除对账] 同步目标库已由 {Fingerprint(recordedTargetDbKey)} 变为 "
+                                + $"{Fingerprint(currentTargetDbKey)}，本地 {localBoundPageIds.Count} 条绑定记录里"
+                                + $"本轮远端能看到 {visibleLocalPageCount} 条（仍待确认 {unconfirmedCount} 条）"
+                                + " ⇒ 视为已完成迁移，重新基线后继续对账");
+                }
+
+                if (!string.Equals(recordedTargetDbKey, currentTargetDbKey, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        await _repo.SetSettingAsync(SettingKeyDailyReconcileTargetDb, currentTargetDbKey);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 记录基线失败不该阻断对账本身（下一轮再记）
+                        AppLog.Warn($"[删除对账] 记录同步目标库失败（不影响本轮对账）: {ex.Message}");
+                    }
+                }
+                else if (localBoundPageIds.Count > 0 && !seenKnownPageRemotely)
+                {
+                    // 诊断用（不改变行为）：库身份没变、本轮却看不到任何本地已绑定页面 ——
+                    // 可能是索引延迟、权限变化，也可能用户确实把这些页面都删了。
+                    // 是否删除仍以逐页二次确权（IsPageDeletedAsync）为准。
+                    AppLog.Warn($"[删除对账] 本轮远端 {remoteIds.Count} 条页面里看不到本地已绑定的 {localBoundPageIds.Count} 条页面，"
+                                + "将逐页二次确权后再决定是否删除（索引延迟 / 权限变化 / 批量删除均可能是原因）");
                 }
 
                 // 只处理「本地认为已同步」且有 NotionPageId 的行：pending / error 的行本来就可能还没进 Notion，

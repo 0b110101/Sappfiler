@@ -111,27 +111,102 @@ public sealed class DailyIconUploadService
         return true;
     }
 
+    /// <summary>
+    /// Notion File Upload **只接受 png / jpg / gif 等少数格式**。
+    /// 2026-10-14 真机实测：本地封面缓存里存在**ICO 字节**的封面（文件名却可能是 <c>.jpg</c>/<c>.png</c>），
+    /// 判型得到 <c>application/octet-stream</c> ⇒ 上传文件名成了 <c>.bin</c> ⇒ Notion 直接
+    /// <c>400 Provided filename has an extension that is not supported for the File Upload API</c>
+    /// ⇒ 那几款游戏的每日页面图标**永远补不上**（日志里只看到"创建 File Upload 失败"）。
+    /// 因此上传前把不受支持的格式**转成 PNG**（临时文件，上传完即删）；受支持的格式原样上传，行为不变。
+    /// </summary>
+    private static readonly string[] NotionUploadableTypes = { "image/png", "image/jpeg", "image/gif" };
+
+    /// <summary>把不受 Notion 支持的封面转成 PNG；转换失败则原样返回（仍由调用方按失败处理，不抛异常）。</summary>
+    private static (string Path, string ContentType, string? TempFile) PrepareUploadable(string coverPath, string contentType)
+    {
+        if (NotionUploadableTypes.Contains(contentType, StringComparer.OrdinalIgnoreCase))
+        {
+            return (coverPath, contentType, null);
+        }
+
+        try
+        {
+            var temp = Path.Combine(Path.GetTempPath(), $"sappfiler-icon-{Guid.NewGuid():N}.png");
+            using (var bitmap = LoadBitmap(coverPath))
+            {
+                bitmap.Save(temp, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            AppLog.Info($"[DailyIcon] 封面「{Path.GetFileName(coverPath)}」的内容类型 {contentType} 不受 Notion File Upload 支持"
+                        + " ⇒ 已转成 PNG 再上传");
+            return (temp, "image/png", temp);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[DailyIcon] 封面转 PNG 失败（{Path.GetFileName(coverPath)} / {contentType}）: {ex.Message}");
+            return (coverPath, contentType, null);
+        }
+    }
+
+    /// <summary>
+    /// 读成 Bitmap：ICO 走 <see cref="System.Drawing.Icon"/> 分支（Bitmap 直接解码 .ico 不稳），
+    /// 其余按流解码后**复制**一份（脱离流生命周期，允许调用方立刻关流）。
+    /// </summary>
+    private static System.Drawing.Bitmap LoadBitmap(string path)
+    {
+        Span<byte> head = stackalloc byte[4];
+        using (var probe = File.OpenRead(path))
+        {
+            _ = probe.Read(head);
+        }
+
+        if (head[0] == 0x00 && head[1] == 0x00 && head[2] == 0x01 && head[3] == 0x00)
+        {
+            using var ico = new System.Drawing.Icon(path);
+            using var fromIco = ico.ToBitmap();
+            return new System.Drawing.Bitmap(fromIco);
+        }
+
+        using var stream = File.OpenRead(path);
+        using var image = System.Drawing.Image.FromStream(stream);
+        return new System.Drawing.Bitmap(image);
+    }
+
+    private static void SafeDeleteFile(string path)
+    {
+        try { File.Delete(path); } catch { /* 临时文件删不掉不影响结果 */ }
+    }
+
     /// <summary>新建 File Upload → 发送内容 → 校验 status=uploaded。任一步失败返回 null（只上传一次，不循环重试）。</summary>
     private async Task<string?> UploadOnceAsync(string coverPath, string hash, long size, string contentType)
     {
-        var fileName = $"cover-{Short(hash)}{CoverFileProbe.ExtensionFor(contentType)}";
-
-        var fileUploadId = await _client.CreateFileUploadAsync(fileName, contentType);
-        if (string.IsNullOrWhiteSpace(fileUploadId))
+        // ⚠️ 不受支持的格式（ICO/BMP/判不出的字节）必须先转 PNG，否则 Notion 会以 400 拒绝整个上传。
+        //    映射的 ContentType 仍记录**缓存文件本身**的类型（复用判据是 hash + size，与它无关）。
+        var (uploadPath, uploadType, tempFile) = PrepareUploadable(coverPath, contentType);
+        try
         {
-            AppLog.Warn("[DailyIcon] 创建 File Upload 失败，本次不设图标（下次同步会重试）");
-            return null;
-        }
+            var fileName = $"cover-{Short(hash)}{CoverFileProbe.ExtensionFor(uploadType)}";
 
-        var uploaded = await _client.SendFileUploadAsync(fileUploadId!, coverPath, contentType);
-        if (!uploaded)
+            var fileUploadId = await _client.CreateFileUploadAsync(fileName, uploadType);
+            if (string.IsNullOrWhiteSpace(fileUploadId))
+            {
+                AppLog.Warn("[DailyIcon] 创建 File Upload 失败，本次不设图标（下次同步会重试）");
+                return null;
+            }
+
+            var uploaded = await _client.SendFileUploadAsync(fileUploadId!, uploadPath, uploadType);
+            if (!uploaded)
+            {
+                // 创建成功但 /send 失败：**不写映射**（下次重来一遍），也不阻塞调用方。
+                AppLog.Warn($"[DailyIcon] /send 未成功（id={Short(fileUploadId!)}），不写映射，等待下次同步重试");
+                return null;
+            }
+
+            return fileUploadId;
+        }
+        finally
         {
-            // 创建成功但 /send 失败：**不写映射**（下次重来一遍），也不阻塞调用方。
-            AppLog.Warn($"[DailyIcon] /send 未成功（id={Short(fileUploadId!)}），不写映射，等待下次同步重试");
-            return null;
+            if (tempFile != null) SafeDeleteFile(tempFile);
         }
-
-        return fileUploadId;
     }
 
     private async Task SaveAsync(string key, NotionIconMapping mapping)

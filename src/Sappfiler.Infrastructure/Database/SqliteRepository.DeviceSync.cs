@@ -2147,6 +2147,32 @@ public partial class SqliteRepository
             //    （相加会把同一场游玩重复计次）。合并完秒数后，按 canonical 自己的事实重算场次。
             ApplyUnifiedSessionCount(conn, tx, canonicalGameId, ds.Date, ReadDailyCutoffHour(conn, tx));
         }
+
+        // 🛡️ 2026-10-14（孤儿会话收口）：搬家完成后**必须**确认旧 id 已无任何事实引用 ——
+        //    调用方在同一事务里紧接着 `DELETE FROM games`：若这里仍有残留却放行，
+        //    sessions / daily_summary 会被 FK **级联静默删掉**（历史丢失），
+        //    adjustments（无外键）则会变成谁也认领不了的孤儿。
+        //    残留 ⇒ 抛异常 ⇒ 调用方 `using tx` 回滚整个合并，本地数据保持原样（可安全重试）。
+        EnsureNoGameRefsOrThrow(conn, tx, duplicateGameId, "身份合并");
+    }
+
+    /// <summary>
+    /// 物理删除 <c>games</c> 行**之前**的最后一道守卫：三张事实表都不得再引用该 id。
+    /// 有残留 ⇒ 抛异常（由调用方事务回滚），绝不静默删行。
+    /// <c>internal</c> 以便测试直接验证"发现残留必须阻止删除"。
+    /// </summary>
+    internal static void EnsureNoGameRefsOrThrow(SqliteConnection conn, SqliteTransaction? tx, int gameId, string context)
+    {
+        var daily = conn.ExecuteScalar<int>("SELECT COUNT(*) FROM daily_summary WHERE game_id = @id;", new { id = gameId }, tx);
+        var sessions = conn.ExecuteScalar<int>("SELECT COUNT(*) FROM sessions WHERE game_id = @id;", new { id = gameId }, tx);
+        var adjustments = conn.ExecuteScalar<int>("SELECT COUNT(*) FROM daily_duration_adjustments WHERE game_id = @id;", new { id = gameId }, tx);
+        if (daily > 0 || sessions > 0 || adjustments > 0)
+        {
+            throw new InvalidOperationException(
+                $"[{context}] 拒绝物理删除 games 行 id={gameId}：仍被事实引用"
+                + $"（daily_summary={daily}、sessions={sessions}、daily_duration_adjustments={adjustments}）"
+                + "；删除会留下悬挂引用或级联抹掉历史，请先迁移/清理这些事实");
+        }
     }
 
     // ==================== Deferred 台账重处理（2e 步骤 7） ====================

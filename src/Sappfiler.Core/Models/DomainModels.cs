@@ -215,6 +215,21 @@ public class NotionDailyRecordItem
 
     public string? GameMasterPageId { get; set; }
     public string? Status { get; set; }
+
+    /// <summary>
+    /// 页面当前 Page Icon 的类型（null / 空 = 页面没有图标）。取值同 Notion：
+    /// <c>emoji</c> / <c>external</c> / <c>file_upload</c>。
+    /// </summary>
+    public string? IconType { get; set; }
+
+    /// <summary>页面当前 Page Icon 的 URL（emoji 类型时通常为空，file_upload 类型时为 null）。</summary>
+    public string? IconUrl { get; set; }
+
+    /// <summary>
+    /// 页面当前**是否已有** Page Icon。已有任何图标（emoji / external / file_upload）都不得被覆盖：
+    /// 普通同步只在没有图标时补图标，手工「开始格式规范化」同样只补不改。
+    /// </summary>
+    public bool HasIcon => !string.IsNullOrWhiteSpace(IconType);
 }
 
 /// <summary>删除某个游戏前的影响面统计，用于删除确认对话框。</summary>

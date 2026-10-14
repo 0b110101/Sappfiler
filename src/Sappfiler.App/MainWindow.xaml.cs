@@ -179,7 +179,6 @@ public sealed partial class MainWindow : Window
         if (!await RunStepAsync(() => _syncService.PullDailyRecordsFromNotionAsync())) return;
         if (!await RunStepAsync(() => _syncService.BackfillRelationsAsync())) return;
         if (!await RunStepAsync(() => _syncService.SyncPendingDailyRecordsAsync())) return;
-        if (!await RunStepAsync(() => _syncService.RefreshDailyTitlesFromMasterAsync())) return;
 
         if (ct.IsCancellationRequested)
         {
@@ -665,8 +664,6 @@ public sealed partial class MainWindow : Window
                     await _syncService.ApplyCatalogIgnoredStateAsync();
                     await _syncService.BackfillRelationsAsync();
                     await _syncService.SyncPendingDailyRecordsAsync();
-                    // 回刷必须在推送之后：这轮刚推上去的记录此时才有 notion_title 快照。
-                    await _syncService.RefreshDailyTitlesFromMasterAsync();
                     _ = _coverCache.EnsureLibraryCoversAsync(_repo);
                     await _homeViewModel.RefreshAllDataAsync();
                 });
@@ -736,7 +733,6 @@ public sealed partial class MainWindow : Window
                     {
                         await Task.Delay(500); // 确保本地落库完成
                         await _syncService.SyncPendingDailyRecordsAsync();
-                        await _syncService.RefreshDailyTitlesFromMasterAsync();
                         await _homeViewModel.RefreshAllDataAsync();
                         if (_trayService != null) await _trayService.RefreshStateAsync();
                     }

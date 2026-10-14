@@ -433,7 +433,9 @@ public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Cor
                     //     身份合并 → sync_identity_supersessions
                     var discarded = snapshots[dup.Id];
 
-                    conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id }, tx);
+                    // 🛡️ 2026-10-14（孤儿会话收口）：与 2e 身份对账共用同一道守卫 —— 残留 ⇒ 抛异常 ⇒ 本事务回滚，不删行
+            EnsureNoGameRefsOrThrow(conn, tx, dup.Id, "启动去重身份合并");
+            conn.Execute("DELETE FROM games WHERE id = @dupId;", new { dupId = dup.Id }, tx);
 
                     if (syncIdentityReady &&
                         discarded.IsSyncable &&
@@ -1433,7 +1435,8 @@ public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Cor
 
     /// <summary>
     /// 判定一个日期是否属于历史日期（早于 7 天前）。
-    /// 历史日期在 Notion 上的单次时长为唯一权威数据，Pull 时绝不判定 localAhead，绝不标记 pending。
+    /// ⚠️ 2026-10-13 起，它**不再**决定"是否允许回刷时长/是否标记 pending"（那与日期无关，只取决于
+    /// 本地是否存在尚未同步的变动）；现在它只用于手工**声明**的取值口径：历史日期优先采用 Notion 侧声明。
     /// </summary>
     private static bool IsHistoricalDate(string dateStr)
     {
@@ -1910,16 +1913,18 @@ public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Cor
                         $"[同步] 修正历史时长膨胀：「{item.GameTitle}」{item.Date} " +
                         $"本地 {existingMinutes} 分钟 → {finalMinutes} 分钟（旧版把分钟当成了小时）");
                 }
-                else if (isHistorical)
-                {
-                    // 历史日期：Notion 的手工时长是**增量权威**（已经折算进上方的 adjustment）。
-                    newStatus = isBoundOnNotion ? "synced" : "unmapped";
-                }
                 else
                 {
-                    // ⚠️ 与 **Notion 侧的值**比较（不是与本地行值比）：本地领先远端 ⇒ 仍需回刷 → pending，
-                    //    否则每轮 Pull 都把 pending 洗成 synced，回刷永远查不到待上传记录（QA app(2).log 事故）。
-                    newStatus = (existingMinutes > item.DurationMinutes) ? "pending" : (isBoundOnNotion ? "synced" : "unmapped");
+                    // ⚖️ 2026-10-13 规则变更：状态**不再**看"记录是否早于 7 天"，只看
+                    //    **是否存在尚未同步的本地变动** —— 本地行值确实高于 Notion 侧的值 ⇒ pending（进入推送队列）；
+                    //    否则 synced/unmapped（推送侧据此跳过，不写远端）。
+                    //    （原实现把历史日期一律置 synced ⇒ 历史记录上的真实未同步变动会被永久丢弃、永不回刷。）
+                    // ⚠️ 比较基准是**本次算出的行值**（facts + 声明），与 Notion 侧的现值比较：
+                    //    行值确实高于远端 ⇒ 还有未同步的变动 → pending；否则 synced/unmapped。
+                    //    （用拉取前的旧值会误判"用户在 Notion 主动下调"这类场景 ⇒ 把已收敛的行又标成 pending。）
+                    //    不写成 `existingMinutes` 的另一个原因：每轮 Pull 都必须能重新发现真正的待上传记录
+                    //    （QA app(2).log 事故：被洗成 synced 后回刷永远查不到）。
+                    newStatus = (finalMinutes > item.DurationMinutes) ? "pending" : (isBoundOnNotion ? "synced" : "unmapped");
                 }
             }
 
@@ -2074,16 +2079,16 @@ public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Cor
     }
 
     /// <summary>
-    /// 把某条 Notion 每日记录页面的标题与图标快照回写到本地，用于回刷时比对
-    /// （见 <c>NotionSyncService.RefreshDailyTitlesFromMasterAsync</c>）。
+    /// 把某条 Notion 每日记录页面的标题与图标快照回写到本地
+    /// （Pull 与推送后记录"我们所知远端现状"）。
     ///
     /// 只改 notion_title / notion_icon_url 两个快照字段 —— 不碰 sync_status，
     /// 否则会把"本地时长领先、正等上传"的 pending 状态洗掉。
     /// 返回受影响行数（0 表示本地没有这条记录）。
     /// </summary>
     /// <remarks>
-    /// 两个快照必须**一起**写：只更新标题的话，图标快照会永远停在旧值，
-    /// 下一轮就会因为"图标不一致"再 PATCH 一次，退化成每轮都打 Notion。
+    /// 2026-10-13 起普通同步**不再**回刷历史标题（自动回刷链路已移除），
+    /// 快照只作为"远端现状"的本地记录；历史标题的批量规范化只走设置页手工入口。
     /// </remarks>
     public async Task<int> UpdateDailyRecordFromNotionAsync(string notionPageId, string title, string? iconUrl)
     {
@@ -2266,16 +2271,27 @@ public partial class SqliteRepository : IDatabaseRepository, GameTimeTracker.Cor
         if (!string.IsNullOrEmpty(game.NotionPageId)) return;
         if (!string.IsNullOrEmpty(game.Executable) || !string.IsNullOrEmpty(game.ExecutablePath)) return;
 
-        if (await conn.ExecuteScalarAsync<int>(
-                "SELECT COUNT(*) FROM daily_summary WHERE game_id = @id;", new { id = gameId }) > 0) return;
-        if (await conn.ExecuteScalarAsync<int>(
-                "SELECT COUNT(*) FROM sessions WHERE game_id = @id;", new { id = gameId }) > 0) return;
+        // 🛡️ 2026-10-14（孤儿会话收口）：三张事实表逐一核对，且**不再静默 return** ——
+        //    任何一张仍有引用就保留游戏行，并把"为什么没清掉"写进 Info 日志（原实现直接 return，
+        //    排查时看不出是哪个引用挡住了清理）。
+        var dailyRefs = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM daily_summary WHERE game_id = @id;", new { id = gameId });
+        var sessionRefs = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM sessions WHERE game_id = @id;", new { id = gameId });
 
         // ⚠️ 2026-10-11：adjustment 也是**持久化事实**（它没有外键，物理删 games 不会连带删它，
         //    但会把它变成谁也认领不了的孤儿）。migration 011 的守卫已把"仍有 adjustment 的 games 行"
         //    也纳入保护 ⇒ 幽灵行判定必须同样要求"无 adjustment"，否则这条合法清理会被守卫挡住。
-        if (await conn.ExecuteScalarAsync<int>(
-                "SELECT COUNT(*) FROM daily_duration_adjustments WHERE game_id = @id;", new { id = gameId }) > 0) return;
+        var adjustmentRefs = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM daily_duration_adjustments WHERE game_id = @id;", new { id = gameId });
+
+        if (dailyRefs > 0 || sessionRefs > 0 || adjustmentRefs > 0)
+        {
+            AppLog.Info($"[同步] 保留疑似幽灵游戏行「{game.Name}」(id={gameId})：仍被事实引用 —— "
+                        + $"daily_summary={dailyRefs}、sessions={sessionRefs}、daily_duration_adjustments={adjustmentRefs}"
+                        + "；物理删除会留下悬挂引用（孤儿），等这些事实被迁移/清理后再重新评估");
+            return;
+        }
 
         await conn.ExecuteAsync(
             """
