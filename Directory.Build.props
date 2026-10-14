@@ -35,7 +35,7 @@
       AssemblyVersion               -> 程序集绑定版本，只在 MAJOR 变动时改
   -->
   <PropertyGroup>
-    <VersionPrefix>0.4.0</VersionPrefix>
+    <VersionPrefix>0.4.1</VersionPrefix>
     <!--
       预发布序号约定（2026-10-03）：**feature 分支不占正式版本号**，用 alpha / beta 区分不同特性线。
         · feature/multi-backend-sync → 0.4.0-alpha.N（三后端笔记同步）
@@ -46,7 +46,7 @@
     <VersionSuffix></VersionSuffix>
 
     <!-- FileVersion 只能是四段纯数字：MAJOR.MINOR.PATCH.<预发布序号>（无预发布时为 0） -->
-    <FileVersion>0.4.0.0</FileVersion>
+    <FileVersion>0.4.1.0</FileVersion>
     <AssemblyVersion>0.4.0.0</AssemblyVersion>
 
     <Product>Sappfiler</Product>
