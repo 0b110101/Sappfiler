@@ -1529,7 +1529,10 @@ public class NotionSyncService : INotionSyncService
                 //    否则会把"本地还没同步到"误判成"总表已删除"而静默丢弃手录记录。
                 try
                 {
-                    await _repo.SetSettingAsync(SettingKeyGameCatalogRefreshedAtUtc, DateTime.UtcNow.ToString("O"));
+                    // 🛡️ 2026-10-15（F5）：时间戳 + **总表库指纹** 一起存 —— 换库后旧快照不再被当成当前库的事实。
+                    await _repo.SetSettingAsync(
+                        SettingKeyGameCatalogRefreshedAtUtc,
+                        $"{DateTime.UtcNow:O}|{_config.GameDatabaseId}");
                 }
                 catch (Exception ex)
                 {
@@ -1656,17 +1659,30 @@ public class NotionSyncService : INotionSyncService
     /// 本地总表快照是否**新鲜**（最近一次成功刷新在 <see cref="CatalogFreshnessWindow"/> 内）。
     /// 不新鲜 / 从未刷新 ⇒ 不能拿它判定"总表里没有这个游戏"。
     /// </summary>
-    private async Task<(bool Fresh, string Description)> IsGameCatalogFreshAsync()
+    private async Task<(bool Fresh, bool SameDatabase, string Description)> IsGameCatalogFreshAsync()
     {
         var raw = await _repo.GetSettingAsync(SettingKeyGameCatalogRefreshedAtUtc);
-        if (string.IsNullOrWhiteSpace(raw) ||
-            !DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var at))
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            return (false, "从未成功刷新过（无时间戳）");
+            return (false, true, "从未成功刷新过（无时间戳）");
+        }
+
+        // 🛡️ 2026-10-15（F5）：快照必须与**当前配置的总表数据库**同源。
+        //    存储格式：<ISO 时间戳>|<GameDatabaseId>；旧数据没有 '|' ⇒ 视为同一库
+        //    （升级当次行为不变，下一次成功刷新会补上指纹）。
+        var parts = raw!.Split('|', 2);
+        var hasFingerprint = parts.Length > 1 && !string.IsNullOrWhiteSpace(parts[1]);
+        var sameDb = !hasFingerprint
+                     || string.Equals(parts[1], _config.GameDatabaseId, StringComparison.Ordinal);
+        if (!DateTime.TryParse(parts[0], null, System.Globalization.DateTimeStyles.RoundtripKind, out var at))
+        {
+            return (false, sameDb, "快照时间戳不可解析");
         }
 
         var fresh = DateTime.UtcNow - at.ToUniversalTime() <= CatalogFreshnessWindow;
-        return (fresh, $"最近成功刷新 {at.ToUniversalTime():yyyy-MM-dd HH:mm} UTC（{(fresh ? "新鲜" : "已过期")}）");
+        return (fresh, sameDb, sameDb
+            ? $"最近成功刷新 {at.ToUniversalTime():yyyy-MM-dd HH:mm} UTC（{(fresh ? "新鲜" : "已过期")}）"
+            : $"快照属于**另一个总表库**（快照库 {parts[1]} ≠ 当前库 {_config.GameDatabaseId}）");
     }
 
     public async Task<int> PullDailyRecordsFromNotionAsync()
@@ -1697,14 +1713,21 @@ public class NotionSyncService : INotionSyncService
                 .Where(id => id.Length > 0)
                 .ToHashSet();
 
-            // 🛡️ 2026-10-14（P5）：目录快照的**新鲜度**决定它能不能用来判定"总表里没有这个游戏"。
-            //    快照不新鲜 / 刷新失败 / 从未刷新 ⇒ **不做孤儿过滤**（宁可多导入，也不静默丢弃手录记录）。
-            var (catalogFresh, catalogFreshnessReason) = await IsGameCatalogFreshAsync();
-            var useOrphanFilter = catalogIds.Count > 0 && catalogFresh;
-            if (catalogIds.Count > 0 && !catalogFresh)
+            // 🛡️ 2026-10-15（F6 用户裁定「不复活已删」）：只要快照**属于当前库**，就始终用它做
+            //    「总表已不存在」过滤 —— 刷新失败 / 时间戳过期都**不放行**（放行会让已删游戏的记录被重新导入
+            //    = 复活）。被跳过的记录仍留在 Notion，属于**暂缓导入**：下次总表刷新成功后若该游戏确实存在会自动补上。
+            //    只有"没有快照"或"快照属于另一个库（F5）"时才不过滤 —— 此时没有可信事实可用，宁多导入 + 逐条诊断。
+            var (catalogFresh, catalogSameDb, catalogFreshnessReason) = await IsGameCatalogFreshAsync();
+            var useOrphanFilter = catalogIds.Count > 0 && catalogSameDb;
+            if (catalogIds.Count > 0 && !useOrphanFilter)
             {
-                AppLog.Warn($"[同步] 本地游戏总表快照不可信（{catalogFreshnessReason}）⇒ 本轮**不做**"
-                            + "「总表已不存在」过滤，所有每日记录照常导入（避免把「本地尚未同步」误判成「总表已删除」）");
+                AppLog.Warn($"[同步] 本地游戏总表快照不可用于当前库（{catalogFreshnessReason}）⇒ 本轮**不做**"
+                            + "「总表已不存在」过滤，所有每日记录照常导入（避免换库/首次运行时把合法记录误判成已删除）");
+            }
+            else if (useOrphanFilter && !catalogFresh)
+            {
+                AppLog.Warn($"[同步] 总表快照不是最新（{catalogFreshnessReason}），但按『不复活已删』**仍照常过滤**；"
+                            + "被跳过的记录是**暂缓导入**（下次总表刷新成功后若该游戏存在会自动补上）");
             }
 
             var validRecords = new List<NotionDailyRecordItem>();
